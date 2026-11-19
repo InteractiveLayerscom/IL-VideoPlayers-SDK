@@ -24,6 +24,7 @@ final class OverlayLayer extends View {
     private ViewGroup.LayoutParams originalParams;
     private Bitmap image;
     private boolean corner;
+    private boolean floating;
     private boolean drawn;
 
     OverlayLayer(PlayerView playerView, Runnable afterDraw) {
@@ -45,6 +46,7 @@ final class OverlayLayer extends View {
     void show(OverlayCue cue, Bitmap bitmap) {
         image = bitmap;
         corner = "l".equals(cue.format);
+        floating = "overlay".equals(cue.format);
         drawn = false;
         if (corner && originalParams == null) originalParams = content.getLayoutParams();
         updateBounds();
@@ -60,8 +62,11 @@ final class OverlayLayer extends View {
         image = null;
         drawn = false;
         corner = false;
+        floating = false;
         setVisibility(INVISIBLE);
     }
+
+    FrameLayout container() { return container; }
 
     void remove() {
         clear();
@@ -80,6 +85,8 @@ final class OverlayLayer extends View {
             content.setLayoutParams(new FrameLayout.LayoutParams(Math.round(.75f * w),
                     Math.round(.75f * h), Gravity.TOP | Gravity.LEFT));
             destination.set(0, 0, w, h);
+        } else if (floating) {
+            destination.set(.64f * w, .10f * h, .94f * w, .42f * h);
         } else {
             destination.set(.125f * w, .70f * h, .875f * w, .90f * h);
         }

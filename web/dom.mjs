@@ -1,3 +1,4 @@
+import { commerceSurface } from './commerce.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
 
@@ -11,13 +12,14 @@ const resized = {
   height: '75%',
 };
 
-function renderer(stage, surface, avplay, getDisplayRect) {
+function renderer(stage, surface, avplay, getDisplayRect, commerce) {
   const doc = stage.ownerDocument;
   let layer,
     images = [],
     originalStyles,
     originalRect;
   function hide() {
+    commerce.hide();
     layer?.remove();
     layer = null;
     images = [];
@@ -54,7 +56,9 @@ function renderer(stage, surface, avplay, getDisplayRect) {
           ['75%', '0', '25%', '75%', '-300%', '0', '400%', '133.333334%'],
           ['0', '75%', '100%', '25%', '0', '-300%', '100%', '400%'],
         ]
-      : [['12.5%', '70%', '75%', '20%', '0', '0', '100%', '100%']];
+      : cue.format === 'overlay'
+        ? [['64%', '10%', '30%', '32%', '0', '0', '100%', '100%']]
+        : [['12.5%', '70%', '75%', '20%', '0', '0', '100%', '100%']];
     let ready = 0;
     function loaded() {
       if (root !== layer || !stillActive() || ++ready !== bands.length) return;
@@ -88,6 +92,7 @@ function renderer(stage, surface, avplay, getDisplayRect) {
         Object.assign(surface.style, resized);
       }
       root.style.visibility = 'visible';
+      commerce.show(cue, stillActive);
     }
     for (const [left, top, width, height, x, y, w, h] of bands) {
       const band = doc.createElement('div');
@@ -151,7 +156,7 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     ...source,
     playing,
     clock,
-    renderer: renderer(stage, surface, avplay, getDisplayRect),
+    renderer: renderer(stage, surface, avplay, getDisplayRect, commerceSurface(stage, source.commerce, source.fetchImpl)),
   });
   const unlisten = video ? listenToVideo(video, session.tick) : () => {};
   return {
@@ -203,5 +208,6 @@ export function attachAvPlay({ avplay, getDisplayRect, programTime, ...options }
   if (typeof getDisplayRect !== 'function' || typeof programTime !== 'function') {
     throw new Error('Provide the original AVPlay display rectangle and the UTC playhead');
   }
-  return attach({ ...options, avplay, getDisplayRect, programTime });
+  const commerce = options.commerce ? { ...options.commerce, tv: true } : undefined;
+  return attach({ ...options, commerce, avplay, getDisplayRect, programTime });
 }

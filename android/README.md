@@ -93,3 +93,14 @@ adb shell 'am start -n com.teinformas.pilot/.MainActivity --es source "https://c
 ```
 
 El proxy del piloto admite de 1 a 64 caracteres en `sid`, con letras ASCII, números, punto, guion y guion bajo. En una vista previa podés omitirlo para generar un UUID local. Con agenda, la demo reserva los primeros 15 segundos del playhead como convención de preroll. Para sincronizar una emisión real, el integrador SSAI comunica los límites efectivos de cada spot mediante `setLinearAdActive`.
+
+## Compra con Shopify
+
+Con un endpoint JSON por sesión, instalá el controlador de comercio después de asignar el player al `PlayerView`.
+
+```java
+OverlayController overlays = OverlayController.attachCommerce(
+        playerView, playback.overlayFeedUrl, playback.sessionId, "es", "AR", null);
+```
+
+El último argumento permite seleccionar el modo TV. Usá `null` para detectar Android TV, Google TV y Fire TV desde el dispositivo. El modo TV muestra el QR y el modo móvil abre la continuación en el navegador. Si la app intercepta Atrás, consultá `overlays.closeCommercePanel()` antes de ejecutar su navegación. [Contrato de compra](../docs/signals.md#compra-con-shopify)

@@ -12,7 +12,9 @@ function normalizeCue(item as Dynamic, https as Object) as Dynamic
     if type(item) <> "roAssociativeArray" then return invalid
     if not isText(item.id) or not isText(item.imageUrl) or not isText(item.format) then return invalid
     if item.id.trim() = "" or len(item.id) > 256 or not https.isMatch(item.imageUrl) then return invalid
-    if item.format <> "super" and item.format <> "l" then return invalid
+    if item.format <> "super" and item.format <> "l" and item.format <> "overlay" then return invalid
+    commerce = normalizeCommerce(item.commerce, https)
+    if item.format = "overlay" and commerce = invalid then return invalid
     if not validUnixMs(item.start) or not validUnixMs(item["end"]) then return invalid
     if item["end"] <= item.start then return invalid
     if item.mimeType <> invalid
@@ -26,6 +28,7 @@ function normalizeCue(item as Dynamic, https as Object) as Dynamic
         if not https.isMatch(item.impressionUrl) then return invalid
         cue.impressionUrl = item.impressionUrl
     end if
+    if commerce <> invalid then cue.commerce = commerce
     return cue
 end function
 

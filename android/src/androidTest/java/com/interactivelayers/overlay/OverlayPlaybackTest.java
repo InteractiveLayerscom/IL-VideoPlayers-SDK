@@ -11,6 +11,8 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import android.widget.Button;
+import android.widget.ImageView;
 import androidx.media3.common.MediaItem;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.AspectRatioFrameLayout;
@@ -168,6 +170,54 @@ public final class OverlayPlaybackTest {
         assertTrue(position >= 1795046401000L && position < 1795046418000L);
         assertEquals(java.util.Collections.singletonList("/assets/sidecar"), network.images);
         assertEquals(java.util.Collections.singletonList("/measure/sidecar"), network.impressions);
+    }
+
+    @Test public void commerceSelectsATvVariantAndShowsTheQrDuringPlayback() throws Exception {
+        activity.onActivity(a -> {
+            overlays = OverlayController.attachCommerce(view, network.url("/commerce"), "tv-session",
+                    "es", "AR", true);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> network.impressions.contains("/measure/commerce"));
+        HttpUrl request = network.sidecarRequests.get(0);
+        assertEquals("1", request.queryParameter("commerce"));
+        assertEquals("es", request.queryParameter("locale"));
+        assertEquals("AR", request.queryParameter("country"));
+        activity.onActivity(a -> {
+            clickButton("Ver producto");
+            clickButton("Talle 42");
+            clickButton("Mostrar código QR");
+        });
+        await(() -> network.impressions.contains("/measure/product-view") && qrShown());
+        assertEquals(java.util.Collections.singletonList("{\"variantId\":\"43\"}"), network.checkoutSelections);
+        activity.onActivity(a -> {
+            assertTrue(player.isPlaying());
+            assertTrue(overlays.closeCommercePanel());
+            assertFalse(qrShown());
+            overlays.setLinearAdActive(true);
+            assertTrue(buttons("Ver producto").isEmpty());
+        });
+        assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/commerce"));
+    }
+
+    private java.util.List<View> buttons(String title) {
+        java.util.ArrayList<View> matched = new java.util.ArrayList<>();
+        view.findViewsWithText(matched, title, View.FIND_VIEWS_WITH_TEXT);
+        matched.removeIf(item -> !(item instanceof Button) || !item.isShown());
+        return matched;
+    }
+
+    private void clickButton(String title) {
+        java.util.List<View> matched = buttons(title);
+        assertEquals(title, 1, matched.size());
+        matched.get(0).performClick();
+    }
+
+    private boolean qrShown() {
+        java.util.ArrayList<View> matched = new java.util.ArrayList<>();
+        view.findViewsWithText(matched, "Escaneá el código con tu celular", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+        return matched.stream().anyMatch(item -> item instanceof ImageView && item.isShown());
     }
 
     @Test public void missingProgramClockSkipsBothSchedulingAndMeasurement() throws Exception {

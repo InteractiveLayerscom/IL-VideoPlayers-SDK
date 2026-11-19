@@ -1,17 +1,9 @@
+import { isHttps, normalizeCommerce } from './commerce.mjs';
+
 // Publisher-facing cue profile. All times outside the player adapters are Unix milliseconds.
 export const cueClass = 'com.interactivelayers.overlay';
 const types = new Set(['image/png', 'image/jpeg']);
 const prefix = '#EXT-X-DATERANGE:';
-
-function https(value) {
-  if (typeof value !== 'string') return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && !url.username && !url.password;
-  } catch {
-    return false;
-  }
-}
 
 export function normalizeCue(item) {
   if (
@@ -19,19 +11,21 @@ export function normalizeCue(item) {
     typeof item.id !== 'string' ||
     !item.id.trim() ||
     item.id.length > 256 ||
-    !['super', 'l'].includes(item.format) ||
+    !['super', 'l', 'overlay'].includes(item.format) ||
     !Number.isSafeInteger(item.start) ||
     !Number.isSafeInteger(item.end) ||
     item.start < 0 ||
     item.end <= item.start ||
-    !https(item.imageUrl) ||
-    (item.impressionUrl != null && !https(item.impressionUrl))
+    !isHttps(item.imageUrl) ||
+    (item.impressionUrl != null && !isHttps(item.impressionUrl))
   )
     return null;
   const mimeType =
     item.mimeType ??
     (/\.jpe?g$/i.test(new URL(item.imageUrl).pathname) ? 'image/jpeg' : 'image/png');
   if (!types.has(mimeType)) return null;
+  const commerce = normalizeCommerce(item.commerce);
+  if (item.format === 'overlay' && !commerce) return null;
   return {
     id: item.id,
     format: item.format,
@@ -40,6 +34,7 @@ export function normalizeCue(item) {
     imageUrl: item.imageUrl,
     mimeType,
     impressionUrl: item.impressionUrl ?? null,
+    ...(commerce ? { commerce } : {}),
   };
 }
 

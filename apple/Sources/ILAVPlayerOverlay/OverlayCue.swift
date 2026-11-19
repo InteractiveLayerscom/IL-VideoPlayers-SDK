@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-enum OverlayFormat: String { case `super`, l }
+enum OverlayFormat: String { case `super`, l, overlay }
 
 struct OverlayCue: Equatable {
     static let hlsClass = "com.interactivelayers.overlay"
@@ -12,11 +12,12 @@ struct OverlayCue: Equatable {
     let imageURL: URL
     let imageMIME: String?
     let impressionURL: URL?
+    let commerce: OverlayCommerce?
 
     init?(id: String?, format: String?, start: Date, end: Date?,
-          image: String?, mime: String? = nil, impression: String?) {
+          image: String?, mime: String? = nil, impression: String?, commerce: OverlayCommerce? = nil) {
         guard let id, !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let format = format.flatMap(OverlayFormat.init(rawValue:)),
+              let format = format.flatMap(OverlayFormat.init(rawValue:)), format != .overlay || commerce != nil,
               let end, start < end, let imageURL = Self.httpsURL(image),
               mime == nil || mime == "image/png" || mime == "image/jpeg"
         else { return nil }
@@ -27,6 +28,7 @@ struct OverlayCue: Equatable {
         self.imageURL = imageURL
         self.imageMIME = mime
         self.impressionURL = Self.httpsURL(impression)
+        self.commerce = commerce
     }
 
     static func httpsURL(_ raw: String?) -> URL? {
@@ -44,7 +46,7 @@ struct OverlayCue: Equatable {
 
     private struct SidecarRow: Decodable {
         let cue: OverlayCue?
-        enum Field: String, CodingKey { case id, format, start, end, imageUrl, mimeType, impressionUrl }
+        enum Field: String, CodingKey { case id, format, start, end, imageUrl, mimeType, impressionUrl, commerce }
 
         init(from decoder: Decoder) {
             do {
@@ -57,7 +59,8 @@ struct OverlayCue: Equatable {
                                      end: Date(timeIntervalSince1970: Double(end) / 1000),
                                      image: row.decode(String.self, forKey: .imageUrl),
                                      mime: row.decodeIfPresent(String.self, forKey: .mimeType),
-                                     impression: row.decodeIfPresent(String.self, forKey: .impressionUrl))
+                                     impression: row.decodeIfPresent(String.self, forKey: .impressionUrl),
+                                     commerce: try? row.decode(OverlayCommerce.self, forKey: .commerce))
             } catch {
                 cue = nil
             }
@@ -100,6 +103,10 @@ struct OverlayLayout {
             video = canvas
             artwork = CGRect(x: canvas.minX + canvas.width * 0.125, y: canvas.minY + canvas.height * 0.70,
                              width: canvas.width * 0.75, height: canvas.height * 0.20)
+        case .overlay:
+            video = canvas
+            artwork = CGRect(x: canvas.minX + canvas.width * 0.64, y: canvas.minY + canvas.height * 0.10,
+                             width: canvas.width * 0.30, height: canvas.height * 0.32)
         case nil:
             video = canvas
             artwork = .zero

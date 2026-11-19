@@ -92,3 +92,9 @@ const sdk = attachAvPlay({
 Usá `sdk.setLinearAd(true)` al comenzar un spot confirmado de esa sesión y `sdk.setLinearAd(false)` cuando vuelve el contenido. Con Shaka, un ad lineal activo que conoce su AdManager también suspende la capa. En SSAI el host puede recibir esos límites desde la integración de tracking de la sesión. El backend coordina esa misma ventana con el contexto del programa.
 
 Al pasar `onVisible(cue)`, la aplicación asume el envío de la impresión. Sin callback, el adaptador web intenta una sola solicitud al `impressionUrl` una vez presentada la gráfica. Al cerrar la reproducción llamá a `sdk.destroy()`. Para Shaka descargá el asset antes de destruir el adaptador. Los SDK no instalan un selector de proveedor en el player.
+
+## Compra con Shopify
+
+Agregá `commerce: { locale: 'es', country: 'AR', tv: true }` a la configuración de cualquier adaptador conectado a un `eventsUrl`. Usá `tv: true` para el navegador de TV, incluido Video.js en webOS. AVPlay usa el modo TV al habilitar comercio. Cargá `player.css` y colocá los contenedores del reproductor dentro de un ancestro con posición relativa que también incluya la ficha.
+
+En web, el botón **Comprar** prepara el carrito y presenta el enlace **Continuar a Shopify** para que el navegador pueda abrirlo con una acción del usuario. Si tu app ya abre el destino en un navegador externo, pasá `navigate(url)` dentro de `commerce`. El modo TV navega con flechas, OK y Atrás. [Contrato de compra](../docs/signals.md#compra-con-shopify)

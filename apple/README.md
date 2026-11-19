@@ -78,3 +78,9 @@ xcodebuild -scheme ILAVPlayerOverlay -destination 'platform=macOS,variant=Mac Ca
 Para la aceptación en una Apple TV podés generar un HLS con ambos formatos y servir sus dos creatividades por HTTPS desde un origen accesible al equipo. [Fixture del repositorio](../examples/README.md)
 
 Reproducí el HLS de la sesión de pruebas. Observá un super y una L de principio a fin, pausá, cruzá un corte lineal y hacé seek hacia atrás y fuera del intervalo. Confirmá la recuperación de la pantalla completa y un único GET de impresión por ID. La validación local comprende compilación arm64 con los SDK de iOS y tvOS 26.1, metadatos HLS en AVPlayer de macOS y pruebas de UIKit con Mac Catalyst. La reproducción y la composición en una Apple TV física quedan pendientes de esa prueba.
+
+## Compra con Shopify
+
+Usá `ILOverlayPlayerView(player: player, source: .sidecar)` y habilitá `surface.commerceEnabled = true`. Aplicá `ILOverlayPlayerView.commerceFeed(feedURL, locale: "es", country: "AR")` antes de agregar `sid` y `time` desde el cliente de sesión. Seguí pasando la respuesta con `replaceSidecar(_:for:)`.
+
+En tvOS, el control remoto elige variantes y abre el QR. En iOS, la misma acción abre la continuación en el navegador. La app puede asignar `openCheckoutURL` para usar su navegación de compra y llamar a `closeCommercePanel()` para ofrecer primero el cierre de la ficha al gestionar Atrás. [Contrato de compra](../docs/signals.md#compra-con-shopify)

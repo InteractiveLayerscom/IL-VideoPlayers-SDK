@@ -32,3 +32,36 @@ El súper usa una caja de 75 % de ancho y 20 % de alto a partir de (12,5 %, 70 %
 La impresión corresponde a la gráfica presentada. El pedido, la recepción de VAST y la descarga de la imagen son pasos anteriores. El SDK expone el evento o envía el beacon según la plataforma y la configuración. Un ID se contabiliza una vez por sesión, incluso al retroceder. Verificá el recibo en el colector de prueba, y luego la contabilización en el ad server elegido.
 
 Shaka también interpreta su perfil nativo con `CLASS="com.apple.hls.interstitial"`, `X-OVERLAY-ID` y geometría. Usá esa variante únicamente en reproductores que conozcan esas extensiones. Son distintas de las marcas lineales SCTE-35. [Sintaxis HLS de fechas](https://www.rfc-editor.org/rfc/rfc8216#section-4.3.2.7) · [Parser de Shaka](https://shaka-project.github.io/shaka-player-release/docs/api/lib_ads_hls_interstitial_parser.js.html)
+
+## Compra con Shopify
+
+Los reproductores que habilitan la oferta comercial agregan `commerce=1` y `locale` al endpoint JSON por sesión. Pueden enviar `country` con el código ISO 3166-1 alfa-2 del mercado. Los idiomas de los controles son `es`, `en` y `pt-BR`. El servicio provee el contenido del producto en el idioma y la moneda disponibles para ese mercado.
+
+Un cue comercial admite `l`, `super` y `overlay`. La tarjeta `overlay` usa el 30 % del ancho y el 32 % de la altura a partir del 64 % hacia la derecha y el 10 % hacia abajo. El manifiesto HLS puede entregar las gráficas convencionales por su contrato habitual. El catálogo, las variantes y el acceso al carrito se entregan al reproductor en la respuesta de su sesión.
+
+```json
+{
+  "id": "offer-1",
+  "format": "overlay",
+  "start": 1795089608000,
+  "end": 1795089638000,
+  "imageUrl": "https://media.example/producto.jpg",
+  "impressionUrl": "https://ads.example/events/delivery/impression",
+  "commerce": {
+    "title": "Botines",
+    "price": "89.00",
+    "currency": "USD",
+    "locale": "es",
+    "variants": [
+      {"id": "42", "label": "Talle 42", "price": "89.00"},
+      {"id": "43", "label": "Talle 43", "price": "89.00"}
+    ],
+    "handoffUrl": "https://ads.example/commerce/offer/delivery",
+    "viewUrl": "https://ads.example/events/delivery/creativeView"
+  }
+}
+```
+
+El SDK hace un GET a `viewUrl` una vez por cue al abrir la ficha. En Roku, el host lo envía a partir del campo `productView`. La impresión sigue el evento de presentación de la gráfica. Cuando el espectador pulsa el botón de compra, el SDK hace un POST JSON a `handoffUrl` con `{"variantId":"42"}`. La respuesta incluye `continueUrl` y `qrImageUrl`, ambas HTTPS. Los reproductores TV muestran el PNG del QR. Navegadores y apps móviles abren el enlace de continuación con la variante elegida. El servicio de anuncios administra la duración y vinculación del enlace. Configurá una ventana de exhibición que permita navegar con el control y escanear el QR.
+
+El endpoint web debe permitir los orígenes habilitados mediante CORS, incluido el preflight de POST con `Content-Type: application/json`. Publicá la respuesta de sesión y los enlaces de compra por HTTPS. Las integraciones del SDK solo usan el contrato de anuncios. La sesión de checkout y las credenciales corresponden al backend.

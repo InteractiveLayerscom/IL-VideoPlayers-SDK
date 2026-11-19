@@ -30,6 +30,7 @@ final class FixturePublisher implements Closeable {
     final List<String> images = Collections.synchronizedList(new ArrayList<>());
     final List<String> impressions = Collections.synchronizedList(new ArrayList<>());
     final List<HttpUrl> sidecarRequests = Collections.synchronizedList(new ArrayList<>());
+    final List<String> checkoutSelections = Collections.synchronizedList(new ArrayList<>());
     final CountDownLatch requestStarted = new CountDownLatch(1);
     final CountDownLatch releaseImage = new CountDownLatch(1);
     final CountDownLatch responseSent = new CountDownLatch(1);
@@ -62,6 +63,11 @@ final class FixturePublisher implements Closeable {
         server.useHttps(publisher.sslSocketFactory(), false);
         server.setDispatcher(new Dispatcher() {
             @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                if (request.getPath().equals("/cart") && request.getMethod().equals("POST")) {
+                    checkoutSelections.add(request.getBody().readUtf8());
+                    return new MockResponse().setHeader("Content-Type", "application/json")
+                            .setBody("{\"continueUrl\":\"" + url("/continue") + "\",\"qrImageUrl\":\"" + url("/qr.png") + "\"}");
+                }
                 return respond(request.getRequestUrl());
             }
         });
@@ -93,6 +99,16 @@ final class FixturePublisher implements Closeable {
         if (path.startsWith("/measure/")) {
             impressions.add(path);
             return new MockResponse().setResponseCode(204);
+        }
+        if (path.equals("/qr.png")) return bytes(png, "image/png");
+        if (path.equals("/commerce")) {
+            sidecarRequests.add(request);
+            return new MockResponse().setHeader("Content-Type", "application/json")
+                    .setBody("[{\"id\":\"sale\",\"format\":\"overlay\",\"start\":1795046400000,\"end\":1795046418000,"
+                            + "\"imageUrl\":\"" + url("/assets/sidecar") + "\",\"impressionUrl\":\"" + url("/measure/commerce")
+                            + "\",\"commerce\":{\"title\":\"Botines\",\"price\":\"25.00\",\"locale\":\"es\",\"currency\":\"USD\","
+                            + "\"variants\":[{\"id\":\"42\",\"label\":\"Talle 42\"},{\"id\":\"43\",\"label\":\"Talle 43\"}],"
+                            + "\"viewUrl\":\"" + url("/measure/product-view") + "\",\"handoffUrl\":\"" + url("/cart") + "\"}}]");
         }
         if (path.equals("/session")) {
             sidecarRequests.add(request);

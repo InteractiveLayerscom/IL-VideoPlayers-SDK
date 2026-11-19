@@ -10,31 +10,81 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 final class OverlayNetwork {
-    List<OverlayCue> windows(String endpoint, String session, long timeMs) throws IOException {
+    List<OverlayCue> windows(String endpoint, String session, long timeMs, String locale, String country) throws IOException {
         Uri uri = Uri.parse(endpoint);
         Uri.Builder builder = uri.buildUpon().clearQuery();
         for (String key : uri.getQueryParameterNames()) {
-            if (key.equals("sid") || key.equals("time")) continue;
+            if (key.equals("sid") || key.equals("time") || key.equals("commerce")
+                    || (locale != null && key.equals("locale")) || (country != null && key.equals("country"))) continue;
             for (String value : uri.getQueryParameters(key)) builder.appendQueryParameter(key, value);
         }
+        if (locale != null) builder.appendQueryParameter("commerce", "1")
+                .appendQueryParameter("locale", OverlayCommerce.language(locale));
+        if (country != null) builder.appendQueryParameter("country", country);
         String url = builder.appendQueryParameter("time", Long.toString(timeMs))
                 .appendQueryParameter("sid", session).build().toString();
         return OverlayCue.fromSidecar(new String(read(url, 128 * 1024), StandardCharsets.UTF_8));
     }
 
     Bitmap image(OverlayCue cue) throws IOException {
-        byte[] bytes = read(cue.imageUrl, 4 * 1024 * 1024);
+        return staticImage(cue.imageUrl, cue.mimeType, 4 * 1024 * 1024);
+    }
+
+    Bitmap qrImage(String url) throws IOException {
+        return staticImage(url, "image/png", 256 * 1024);
+    }
+
+    private Bitmap staticImage(String url, String mimeType, int limit) throws IOException {
+        byte[] bytes = read(url, limit);
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
         if (!OverlayCue.isStaticImage(bounds.outMimeType)
-                || (cue.mimeType != null && !cue.mimeType.equals(bounds.outMimeType))
+                || (mimeType != null && !mimeType.equals(bounds.outMimeType))
                 || bounds.outWidth <= 0 || bounds.outHeight <= 0
                 || bounds.outWidth > 4096 || bounds.outHeight > 4096
                 || (long) bounds.outWidth * bounds.outHeight > 4096L * 2160) return null;
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+    }
+
+    static final class Handoff {
+        final String continueUrl;
+        final String qrImageUrl;
+
+        Handoff(String continueUrl, String qrImageUrl) {
+            this.continueUrl = continueUrl;
+            this.qrImageUrl = qrImageUrl;
+        }
+    }
+
+    Handoff prepareCart(String handoffUrl, String variantId) throws IOException {
+        if (!OverlayCue.isHttps(handoffUrl)) throw new IOException("Expected an HTTPS checkout endpoint");
+        HttpURLConnection connection = connection(new URL(handoffUrl));
+        try {
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json");
+            byte[] payload = new JSONObject().put("variantId", variantId).toString()
+                    .getBytes(StandardCharsets.UTF_8);
+            try (java.io.OutputStream out = connection.getOutputStream()) {
+                out.write(payload);
+            }
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) throw new IOException("Cart unavailable");
+            JSONObject reply = new JSONObject(new String(read(connection, 16384), StandardCharsets.UTF_8));
+            String continuation = reply.optString("continueUrl");
+            String qr = reply.optString("qrImageUrl");
+            if (!OverlayCue.isHttps(continuation)) throw new IOException("Invalid checkout URL");
+            return new Handoff(continuation, OverlayCue.isHttps(qr) ? qr : null);
+        } catch (JSONException e) {
+            throw new IOException("Invalid cart response", e);
+        } finally {
+            connection.disconnect();
+        }
     }
 
     void impression(String url) throws IOException {
@@ -43,7 +93,10 @@ final class OverlayNetwork {
     }
 
     private static byte[] read(String address, int limit) throws IOException {
-        HttpURLConnection connection = open(address);
+        return read(open(address), limit);
+    }
+
+    private static byte[] read(HttpURLConnection connection, int limit) throws IOException {
         try (InputStream in = connection.getInputStream();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
@@ -67,11 +120,7 @@ final class OverlayNetwork {
                 throw new IOException("Expected an HTTPS resource");
             }
             URL url = new URL(next);
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(2500);
-            connection.setReadTimeout(2500);
-            connection.setUseCaches(false);
-            connection.setInstanceFollowRedirects(false);
+            HttpURLConnection connection = connection(url);
             try {
                 int code = connection.getResponseCode();
                 if (code >= 200 && code < 300) return connection;
@@ -86,5 +135,13 @@ final class OverlayNetwork {
             connection.disconnect();
         }
         throw new IOException("Too many redirects");
+    }
+    private static HttpURLConnection connection(URL url) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(2500);
+        connection.setReadTimeout(2500);
+        connection.setUseCaches(false);
+        connection.setInstanceFollowRedirects(false);
+        return connection;
     }
 }
