@@ -1,37 +1,37 @@
 # InteractiveLayers Player SDK
 
-Este SDK permite a una app de un publisher mostrar publicidad contextual durante la reproducción de HLS. Un **súper** se dibuja sobre el programa. En una **L**, la imagen del programa ocupa el 75 % superior izquierdo y la creatividad aparece en los márgenes derecho e inferior. El audio y la sesión de reproducción continúan.
+The SDK lets publishers show contextual ads in their apps during HLS playback. A **lower-third overlay** (`super`) appears over the program. For an **L-shaped ad** (`l`), the player scales the video to 75% of its original width and height, anchors it in the upper-left corner, and displays the creative along the right and bottom edges. Audio continues in the same playback session.
 
-InteractiveLayers Console conserva la conexión al ad server del proyecto. El backend identifica el tramo que realmente se está emitiendo, consulta esa conexión y entrega al player una creatividad con su horario. El SDK se instala una vez en la aplicación. Un cambio de campaña se administra en el ad server.
+InteractiveLayers Console manages the project's ad server connection. The backend identifies the segment on air, requests a creative from the selected ad server, and tells the player when to display it. Publishers integrate the SDK once and manage campaign changes in their ad server.
 
-| App del publisher | Integración disponible |
+| Publisher app | Integration |
 | --- | --- |
-| Web con Shaka | Interstitials y composición propios de Shaka. [Guía Shaka](web/README.md#shaka) |
-| Android TV, Google TV, Fire TV y Android con Media3 | Módulo Android sobre la instancia existente de ExoPlayer. [Guía Android](android/README.md) |
-| Apple TV e iOS con AVPlayer | Swift Package con colector HLS y vista de presentación. [Guía Apple](apple/README.md) |
-| Roku nativo | Componente SceneGraph para el nodo de video de la app. [Guía Roku](roku/README.md) |
-| Samsung Tizen con AVPlay | Adaptador JavaScript que ajusta la ventana nativa y el objeto HTML. [Guía Samsung](web/README.md#samsung-avplay) |
-| Video.js en web o LG webOS | Adaptador sobre la instancia Video.js y su tecnología HTML5. [Guía Video.js](web/README.md#videojs) |
-| HTML5 en una app de TV | Adaptador para el elemento de video y su contenedor. [Guía HTML5](web/README.md#html5) |
+| Web with Shaka Player | Uses Shaka's built-in interstitial support to render overlays and resize the video. [Shaka guide](web/README.md#shaka) |
+| Android TV, Google TV, Fire TV, and Android with Media3 | Android module that attaches to the app's existing ExoPlayer instance. [Android guide](android/README.md) |
+| Apple TV and iOS with AVPlayer | Swift package with an HLS date range collector and a view that displays the creative. [Apple guide](apple/README.md) |
+| Native Roku apps | SceneGraph component that works with the app's existing video node. [Roku guide](roku/README.md) |
+| Samsung Tizen with AVPlay | JavaScript adapter that resizes the native video window and its HTML object. [Samsung guide](web/README.md#samsung-avplay) |
+| Video.js on the web or LG webOS | Adapter for the existing Video.js player and its HTML5 playback tech. [Video.js guide](web/README.md#videojs) |
+| HTML5 TV apps | Adapter for the video element and its container. [HTML5 guide](web/README.md#html5) |
 
-## Señal y reproducción
+## Ad cues and playback
 
-El backend puede entregar la oportunidad mediante una etiqueta HLS `EXT-X-DATERANGE` o un endpoint JSON de la sesión del espectador. Ambos transportan el mismo ID, horario y recurso. Usá el endpoint por sesión para decisiones personalizadas si el playout entrega un manifiesto compartido. Los tiempos se comparan con el cabezal real de reproducción. Una oportunidad vencida, una gráfica sin entrega o la falta de reloj dejan el programa en pantalla completa. [Contrato de señales](docs/signals.md)
+The backend can deliver a cue through an HLS `EXT-X-DATERANGE` tag or a JSON endpoint for the viewer's session. Both carry the same cue ID, display window, and creative URL. Use the session endpoint for personalized ads when the playout system serves a shared manifest. The SDK compares the display window with the program time at the viewer's playhead. The program stays at full size if the cue has expired, the ad server returns no creative, or the player cannot determine the program time. [Cue specification](docs/signals.md)
 
-En Teinformas, Eyevinn genera el programa y GAM administra las campañas. En el piloto FAST, MediaTailor es el punto de inserción de los spots de preroll y midroll. Los adaptadores de este repositorio presentan la L y el súper en el dispositivo. [Cómo se conecta Teinformas con GAM](docs/teinformas.md)
+For Teinformas, Eyevinn handles channel playout and Google Ad Manager (GAM) manages the campaigns. The FAST pilot uses MediaTailor as the insertion point for pre-roll and mid-roll spots. The player adapters render lower-third and L-shaped ads on the viewer's device. [How Teinformas connects to GAM](docs/teinformas.md)
 
-## Probar la integración
+## Test the integration
 
-El generador incluido produce un HLS de 18 segundos y ambas creatividades a partir de un patrón de prueba. Sirve para validar que el gráfico aparece en la ventana prevista, el audio continúa, el video vuelve a su tamaño y no se duplica la impresión. [Prueba reproducible](examples/README.md)
+The included generator creates an 18-second HLS test stream and both ad creatives. Use it to check that each graphic appears during its scheduled window, audio continues, the video returns to its original size, and each impression is counted once. [Run the playback test](examples/README.md)
 
-Los ejemplos web se importan como módulos ES. Para plataformas nativas, las guías indican cómo agregar el módulo Gradle, el Swift Package o el componente SceneGraph al proyecto del publisher. La distribución se realiza desde este repositorio privado. Las pruebas de módulos y simulación están documentadas en cada guía. La homologación de cada modelo de TV requiere reproducir el stream en ese dispositivo.
+Import the web adapters as ES modules. For native apps, follow the platform guide to add the Gradle module, Swift package, or SceneGraph component to the publisher's project. The SDK is distributed through this private repository. Each guide describes its module and simulation tests. To validate a specific TV model, play the stream on that device.
 
-## Qué se verificó
+## Verification
 
-| Plataforma | Evidencia de esta versión |
+| Platform | What was verified in this version |
 | --- | --- |
-| Shaka 5.3.5 | El paquete real creó y retiró las dos gráficas en un DOM de prueba, aplicó el squeeze y conservó el mismo video. La prueba también ejercitó el parser de la L nativa de Shaka. |
-| Android Media3 1.6.0 | ExoPlayer reprodujo HLS en un emulador Android 15. Las pruebas instrumentadas comprobaron geometría, restauración y recepción de la solicitud de impresión por HTTPS local. |
-| AVPlayer | AVPlayer reprodujo HLS en macOS, leyó las dos marcas y confirmó su posición después de tres saltos. UIKit se probó en Mac Catalyst. Se compiló para iOS y tvOS. |
-| Roku | BrighterScript validó los componentes y el intérprete ejecutó las pruebas de marcas, reloj, cortes y geometría. |
-| Video.js, AVPlay y HTML5 | Los adaptadores se probaron con un DOM de prueba y dobles de las APIs de plataforma. Queda por comprobar la salida de video en los televisores objetivo. |
+| Shaka 5.3.5 | The Shaka package rendered and removed both graphics in a test DOM. It resized the original video element for the L-shaped ad. The test also exercised Shaka's native HLS parser for that format. |
+| Android Media3 1.6.0 | ExoPlayer played HLS on an Android 15 emulator. Instrumented tests verified the layout, restoration of the original video size, and receipt of the impression request by a local HTTPS server. |
+| AVPlayer | AVPlayer played HLS on macOS, read both cues, and reported the expected playhead position after three seeks. The UIKit view was tested on Mac Catalyst. The package compiled for iOS and tvOS. |
+| Roku | BrighterScript validated the components. The BrightScript interpreter ran tests for cue parsing, playhead timing, ad breaks, and layout. |
+| Video.js, AVPlay, and HTML5 | The adapters were tested with a test DOM and platform API test doubles. Video output on the target TVs still needs device testing. |
