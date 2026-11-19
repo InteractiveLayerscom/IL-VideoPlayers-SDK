@@ -42,7 +42,7 @@
 .il-tv-shop .il-tv-cart-logo {align-self:center;margin:auto;max-width:40%;max-height:10cqh;object-fit:contain}
 .il-tv-shop .il-tv-total {justify-content:space-between;border-bottom:0}
 .il-tv-shop .il-tv-status {display:grid;gap:.7em;justify-items:center;text-align:center}
-.il-tv-shop .il-tv-qr {width:38%;width:min(19cqh,90%);height:auto;aspect-ratio:1;object-fit:contain;background:white;image-rendering:pixelated}
+.il-tv-shop .il-tv-qr {width:58%;width:min(max(154px,25cqh),82%);max-height:36cqh;height:auto;aspect-ratio:1;object-fit:contain;background:white;image-rendering:pixelated}
 .il-tv-shop[data-page=gallery] .il-tv-sheet {inset:0;width:100%;padding:5cqh 5cqw}
 .il-tv-shop[data-page=gallery] .il-tv-sheet::before,.il-tv-shop[data-page=gallery] .il-tv-sheet::after {
   content:'';position:absolute;inset:4.5% 6% auto 4%;height:38%;pointer-events:none;background:currentColor;
