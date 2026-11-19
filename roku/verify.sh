@@ -17,3 +17,9 @@ report=$(npm exec --yes --package=@rokucommunity/brs@0.47.6 -- brs --no-color --
 printf '%s\n' "$report"
 # The interpreter can return exit code zero after a BrightScript runtime error.
 printf '%s\n' "$report" | grep -Eq '^ROKU_OK [1-9][0-9]*$'
+feed_report=$(npm exec --yes --package=@rokucommunity/brs@0.47.6 -- brs --no-color --root . components/ILOverlay/ILOverlayFeedRequest.brs tests/feed.brs 2>&1) || {
+    printf '%s\n' "$feed_report" >&2
+    exit 1
+}
+printf '%s\n' "$feed_report"
+printf '%s\n' "$feed_report" | grep -Eq '^ROKU_FEED_OK 3$'

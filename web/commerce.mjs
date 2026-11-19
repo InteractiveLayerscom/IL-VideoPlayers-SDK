@@ -1,3 +1,5 @@
+import { openTVShop } from './tv-shop.mjs';
+
 export function isHttps(value) {
   if (typeof value !== 'string' || value.trim() !== value) return false;
   try {
@@ -26,22 +28,33 @@ function decimal(value) {
 export function normalizeCommerce(value) {
   if (!value || !validText(value.title, 256) || !isHttps(value.handoffUrl) ||
       !/^[A-Z]{3}$/.test(value.currency) || !Array.isArray(value.variants) ||
-      value.variants.length === 0 || value.variants.length > 100) return null;
+      value.variants.length === 0 || value.variants.length > 2048) return null;
   const price = decimal(value.price);
   if (price === null) return null;
   const ids = new Set();
   const variants = [];
   for (const variant of value.variants) {
-    if (!variant || !validText(variant.id, 128) || !validText(variant.label, 160) ||
+    if (!variant || !validText(variant.id, 128) || !validText(variant.label, 2048) ||
         ids.has(variant.id)) return null;
     const amount = variant.price == null ? price : decimal(variant.price);
     if (amount === null) return null;
     ids.add(variant.id);
-    variants.push({ id: variant.id, label: variant.label, price: amount });
+    const selectedOptions = Array.isArray(variant.selectedOptions) && variant.selectedOptions.length <= 3 &&
+      variant.selectedOptions.every(pair => pair && validText(pair.name, 512) && validText(pair.value, 512))
+      ? variant.selectedOptions.map(({name, value}) => ({name, value})) : [];
+    variants.push({ id: variant.id, label: variant.label, price: amount,
+      ...(selectedOptions.length ? { selectedOptions } : {}),
+      ...(typeof variant.availableForSale === 'boolean' ? { availableForSale: variant.availableForSale } : {}),
+      ...(isHttps(variant.imageUrl) ? { imageUrl: variant.imageUrl } : {}),
+    });
   }
   return {
     title: value.title, currency: value.currency, price, variants,
     locale: commerceLocale(value.locale), handoffUrl: value.handoffUrl,
+    ...(validText(value.description, 5000) ? { description: value.description } : {}),
+    ...(isHttps(value.imageUrl) ? { imageUrl: value.imageUrl } : {}),
+    ...(Array.isArray(value.images) ? { images: [...new Set(value.images.filter(isHttps))] } : {}),
+    ...(decimal(value.previousPrice) ? { previousPrice: decimal(value.previousPrice) } : {}),
     ...(isHttps(value.viewUrl) ? { viewUrl: value.viewUrl } : {}),
   };
 }
@@ -91,16 +104,76 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     if (options && isActive()) mount(cue, offer, isActive, trigger);
   }
 
+  function trackView(cue, offer) {
+    const key = JSON.stringify([cue.id, offer.id ?? null]);
+    if (offer.viewUrl && !viewed.has(key)) {
+      viewed.add(key);
+      void fetchImpl(offer.viewUrl, {mode:'no-cors', credentials:'omit', keepalive:true, redirect:'error'}).catch(() => {});
+    }
+  }
+  async function handoff(offer, variant, signal) {
+    const response = await fetchImpl(offer.handoffUrl, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({variantId:variant.id}),
+      signal, credentials:'omit', cache:'no-store', redirect:'error',
+    });
+    if (!response.ok) throw new Error('Cart unavailable');
+    const data = await response.json();
+    if (!isHttps(data.continueUrl)) throw new Error('Invalid checkout destination');
+    return data;
+  }
+  function mountTV(cue, offer, isActive, trigger, locale) {
+    const activeBefore = trigger ?? doc.activeElement;
+    const opener = doc.createElement('button');
+    opener.type = 'button';
+    opener.className = 'il-commerce il-tv-shop-trigger';
+    opener.textContent = copy[locale][cue.format === 'midroll' ? 3 : 0];
+    let flow;
+    function launch() {
+      if (!isActive() || flow) return;
+      opener.hidden = true;
+      trackView(cue, offer);
+      flow = openTVShop(stage, {
+        offer: { ...offer, imageUrl: offer.imageUrl ?? offer.images?.[0] ?? (cue.format !== 'midroll' ? cue.imageUrl : undefined) },
+        locale, brand:cue.brand,
+        onClose() {
+          if (trigger) { hide(); if (isActive() && trigger.isConnected) trigger.focus(); }
+          else { flow.dispose(); flow = null; opener.hidden = false; opener.focus(); }
+        },
+        async prepareCheckout(variant, signal) {
+          if (!isActive()) throw new Error('Offer expired');
+          const reply = await handoff(offer, variant, signal);
+          if (!isActive() || !isHttps(reply.qrImageUrl)) throw new Error('Invalid QR');
+          return reply.qrImageUrl;
+        },
+      });
+    }
+    root = {cue, dispose() {
+      const ownsFocus = doc.activeElement === opener || Boolean(flow);
+      flow?.dispose(); opener.remove();
+      if (ownsFocus && activeBefore?.isConnected) activeBefore.focus();
+    }};
+    if (trigger) launch();
+    else {
+      opener.addEventListener('click', launch);
+      opener.addEventListener('keydown', event => {
+        if (event.key !== 'OK' && event.key !== 'Enter') return;
+        event.preventDefault(); event.stopPropagation(); if (!event.repeat) launch();
+      });
+      stage.appendChild(opener); opener.focus();
+    }
+  }
+
   function mount(cue, offer, isActive, trigger) {
     hide();
     const locale = commerceLocale(options.locale ?? offer.locale);
-    const [view, productText, variantText, buy, scan, continueText, closeText, loading, errorText] = copy[locale];
+    if (options.tv) return mountTV(cue, offer, isActive, trigger, locale);
+    const [view, productText, variantText, buy, , continueText, closeText, loading, errorText] = copy[locale];
     const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency });
     const previousFocus = trigger ?? doc.activeElement;
     const shell = doc.createElement('div');
     shell.className = 'il-commerce il-commerce--' + cue.format;
     let request;
-    let variant = offer.variants[0];
+    let variant = offer.variants.find(v => v.availableForSale !== false) ?? offer.variants[0];
     function button(label, action) {
       const el = doc.createElement('button');
       el.type = 'button';
@@ -176,16 +249,17 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       variant = choice;
       result.replaceChildren();
       updateChoice();
-      if (options.tv) checkout.focus();
     }));
     choices.append(...buttons);
 
     function updateChoice() {
       price.textContent = money.format(Number(variant.price));
       buttons.forEach((element, index) => {
+        element.disabled = offer.variants[index].availableForSale === false;
         element.setAttribute('aria-pressed', String(offer.variants[index] === variant));
       });
-      checkout.setAttribute('aria-disabled', String(Boolean(request)));
+      checkout.disabled = variant.availableForSale === false;
+      checkout.setAttribute('aria-disabled', String(Boolean(request) || checkout.disabled));
     }
 
     function openPanel() {
@@ -194,13 +268,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       open.hidden = true;
       shell.classList.add('il-commerce--open');
       buttons[offer.variants.indexOf(variant)].focus();
-      const key = JSON.stringify([cue.id, offer.id ?? null]);
-      if (offer.viewUrl && !viewed.has(key)) {
-        viewed.add(key);
-        void fetchImpl(offer.viewUrl, {
-          mode: 'no-cors', credentials: 'omit', keepalive: true, redirect: 'error',
-        }).catch(() => {});
-      }
+      trackView(cue, offer);
     }
 
     function closePanel() {
@@ -226,30 +294,14 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       updateChoice();
       result.textContent = loading;
       try {
-        const response = await fetchImpl(offer.handoffUrl, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variantId: variant.id }), signal: current.signal,
-          credentials: 'omit', cache: 'no-store', redirect: 'error',
-        });
-        if (!response.ok) throw new Error('Cart unavailable');
-        const handoff = await response.json();
+        const reply = await handoff(offer, variant, current.signal);
         if (request !== current || current.signal.aborted || !isActive()) return;
-        if (!isHttps(handoff.continueUrl)) throw new Error('Invalid checkout destination');
-        if (options.tv) {
-          if (!isHttps(handoff.qrImageUrl)) throw new Error('Invalid QR destination');
-          const qr = doc.createElement('img');
-          qr.alt = scan;
-          qr.src = handoff.qrImageUrl;
-          qr.referrerPolicy = 'no-referrer';
-          qr.addEventListener('error', () => { if (qr.parentNode === result) result.textContent = errorText; });
-          result.replaceChildren(qr, doc.createTextNode(scan));
-          result.focus();
-        } else if (options.navigate) {
-          options.navigate(handoff.continueUrl);
+        if (options.navigate) {
+          options.navigate(reply.continueUrl);
           result.replaceChildren();
         } else {
           const link = doc.createElement('a');
-          link.href = handoff.continueUrl;
+          link.href = reply.continueUrl;
           link.textContent = continueText;
           link.target = '_blank';
           link.rel = 'noopener noreferrer';
@@ -272,13 +324,6 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
         event.preventDefault();
         event.stopPropagation();
         closePanel();
-        return;
-      }
-      if (options.tv && (event.key === 'Enter' || event.key === 'OK') &&
-          doc.activeElement?.matches('button:not([disabled])')) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!event.repeat) doc.activeElement.click();
         return;
       }
       if (panel.hidden || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -307,7 +352,6 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     updateChoice();
     stage.appendChild(shell);
     if (trigger) openPanel();
-    else if (options.tv) open.focus();
   }
   return { show, hide, open: openOffer, enabled: Boolean(options) };
 }

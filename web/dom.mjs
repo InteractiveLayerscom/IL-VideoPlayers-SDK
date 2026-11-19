@@ -65,6 +65,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
   }
 
   function show(cue, time, stillActive) {
+    if (cue.format === 'midroll') { commerce.show(cue, stillActive); return; }
     if (cue.scene) {
       scenes.show(cue, time, stillActive);
       return;

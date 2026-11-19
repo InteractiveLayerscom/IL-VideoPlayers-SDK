@@ -15,24 +15,27 @@ import org.json.JSONObject;
 
 final class OverlayNetwork {
     List<OverlayCue> windows(String endpoint, String session, long timeMs, String locale, String country,
-                            boolean video, boolean audio) throws IOException {
+                            boolean video, boolean audio, String creativeId, String deliveryId) throws IOException {
         Uri uri = Uri.parse(endpoint);
         Uri.Builder builder = uri.buildUpon().clearQuery();
         for (String key : uri.getQueryParameterNames()) {
             if (key.equals("sid") || key.equals("time") || key.equals("commerce") || key.equals("scene")
-                    || key.equals("scene_features")
+                    || key.equals("scene_features") || key.equals("shop_midroll") || key.equals("midroll_creative_id")
+                    || key.equals("midroll_delivery_id")
                     || (locale != null && key.equals("locale")) || (country != null && key.equals("country"))) continue;
             for (String value : uri.getQueryParameters(key)) builder.appendQueryParameter(key, value);
         }
         if (locale != null) builder.appendQueryParameter("commerce", "1")
                 .appendQueryParameter("locale", OverlayCommerce.language(locale));
+        if (creativeId != null && deliveryId != null) builder.appendQueryParameter("shop_midroll", "1")
+                .appendQueryParameter("midroll_creative_id", creativeId).appendQueryParameter("midroll_delivery_id", deliveryId);
         if (country != null) builder.appendQueryParameter("country", country);
         String features = "media-mask,media-crop";
         if (video) features += audio ? ",video,audio" : ",video";
         String url = builder.appendQueryParameter("scene", "1").appendQueryParameter("scene_features", features)
                 .appendQueryParameter("time", Long.toString(timeMs))
                 .appendQueryParameter("sid", session).build().toString();
-        return OverlayCue.fromSidecar(new String(read(url, 1024 * 1024), StandardCharsets.UTF_8));
+        return OverlayCue.fromSidecar(new String(read(url, (locale == null ? 1 : 8) * 1024 * 1024), StandardCharsets.UTF_8));
     }
 
     Bitmap image(OverlayCue cue) throws IOException {
@@ -43,23 +46,34 @@ final class OverlayNetwork {
         return staticImage(url, null, 4 * 1024 * 1024, true);
     }
 
+    Bitmap shopImage(String url, int size) throws IOException {
+        return staticImage(url, null, 4 * 1024 * 1024, true, size);
+    }
+
     Bitmap qrImage(String url) throws IOException {
         return staticImage(url, "image/png", 256 * 1024, false);
     }
 
     private Bitmap staticImage(String url, String mimeType, int limit, boolean allowGIF) throws IOException {
+        return staticImage(url, mimeType, limit, allowGIF, 0);
+    }
+
+    private Bitmap staticImage(String url, String mimeType, int limit, boolean allowGIF, int size) throws IOException {
         byte[] bytes = read(url, limit);
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
         boolean supported = OverlayCue.isStaticImage(bounds.outMimeType)
-                || (allowGIF && "image/gif".equals(bounds.outMimeType));
+                || (allowGIF && "image/gif".equals(bounds.outMimeType)) || (size > 0 && "image/webp".equals(bounds.outMimeType));
         if (!supported
                 || (mimeType != null && !mimeType.equals(bounds.outMimeType))
                 || bounds.outWidth <= 0 || bounds.outHeight <= 0
                 || bounds.outWidth > 4096 || bounds.outHeight > 4096
                 || (long) bounds.outWidth * bounds.outHeight > 4096L * 2160) return null;
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+        bounds.inJustDecodeBounds = false;
+        bounds.inSampleSize = 1;
+        while (size > 0 && Math.max(bounds.outWidth, bounds.outHeight) / bounds.inSampleSize > 2 * size) bounds.inSampleSize *= 2;
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
     }
 
     static final class Handoff {

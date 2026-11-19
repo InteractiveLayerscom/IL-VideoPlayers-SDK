@@ -63,7 +63,7 @@ final class UIKitSurfaceTests: XCTestCase {
             }.cgImage)
         surface.show(cue, image: bitmap)
         surface.layoutIfNeeded()
-        let panel = try XCTUnwrap(surface.subviews.compactMap { $0 as? CommercePanel }.first)
+        let panel = try XCTUnwrap(surface.subviews.compactMap { $0 as? PlayerCommercePanel }.first)
         XCTAssertFalse(panel.frame.isEmpty)
         XCTAssertTrue(surface.isUserInteractionEnabled)
         let trigger = try XCTUnwrap(descendants(of: panel, type: UIButton.self).first {
@@ -79,6 +79,7 @@ final class UIKitSurfaceTests: XCTestCase {
         surface.stop()
     }
 
+    #if !os(tvOS)
     @MainActor
     func testCompactProductCardCanSelectItsHundredthVariantAndKeepBuyVisible() throws {
         let variants = (1...100).map { ["id": "v\($0)", "label": "Talle \($0)", "price": "\($0).00"] }
@@ -96,7 +97,7 @@ final class UIKitSurfaceTests: XCTestCase {
         let photo = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { _ in }.cgImage)
         surface.show(cue, image: photo)
         surface.layoutIfNeeded()
-        let panel = try XCTUnwrap(surface.subviews.compactMap { $0 as? CommercePanel }.first)
+        let panel = try XCTUnwrap(surface.subviews.compactMap { $0 as? PlayerCommercePanel }.first)
         let trigger = try XCTUnwrap(descendants(of: panel, type: UIButton.self).first {
             $0.configuration?.title == "Ver producto"
         })
@@ -127,6 +128,8 @@ final class UIKitSurfaceTests: XCTestCase {
         XCTAssertTrue(surface.closeCommercePanel())
     }
 
+    #endif
+
     @MainActor
     func testBrandedSceneCardOpensInPortugueseWithReadableActionsAndClosesFromHeader() throws {
         let json = """
@@ -156,6 +159,136 @@ final class UIKitSurfaceTests: XCTestCase {
             XCTAssertLessThan(brightness, 0.25)
         }
         back.sendActions(for: .primaryActionTriggered)
+        XCTAssertEqual(closed, 1)
+    }
+
+    @MainActor
+    func testLastOf2048SKUsCanBeSelectedOnTelevisionAndMobile() throws {
+        let variants = (1...2048).map { ["id": "v\($0)", "label": "SKU \($0)", "price": $0 == 2048 ? "77" : "1"] }
+        let json: [String: Any] = ["title": "Shoes", "currency": "USD", "price": "1", "variants": variants,
+                                   "handoffUrl": "https://checkout-fixture.invalid/tv"]
+        let product = try JSONDecoder().decode(OverlayCommerce.self, from: JSONSerialization.data(withJSONObject: json))
+        let screen = CGRect(x: 0, y: 0, width: 960, height: 540)
+        let tv = TVCommercePanel(product, photo: nil, checkoutURL: nil, closed: {}) {}
+        defer { tv.dispose() }
+        tv.frame = tv.presentationFrame(in: screen)
+        tv.layoutIfNeeded()
+        try XCTUnwrap(descendants(of: tv, type: UIButton.self).first { $0.configuration?.title == "Add product" })
+            .sendActions(for: .primaryActionTriggered)
+        tv.frame = tv.presentationFrame(in: screen)
+        tv.layoutIfNeeded()
+        let rail = try XCTUnwrap(descendants(of: tv, type: UICollectionView.self).first)
+        let last = IndexPath(item: 2047, section: 0)
+        XCTAssertEqual(rail.numberOfItems(inSection: 0), 2048)
+        rail.scrollToItem(at: last, at: .centeredHorizontally, animated: false)
+        rail.layoutIfNeeded()
+        XCTAssertTrue(rail.indexPathsForVisibleItems.contains(last))
+        rail.delegate?.collectionView?(rail, didSelectItemAt: last)
+        XCTAssertTrue(descendants(of: tv, type: UILabel.self).contains { $0.text?.contains("77.00") == true })
+
+        let mobile = CommercePanel(product, photo: nil, checkoutURL: nil, closed: {}) {}
+        defer { mobile.dispose() }
+        let next = try XCTUnwrap(descendants(of: mobile, type: UIButton.self).first { $0.accessibilityLabel == "Next variants" })
+        for _ in 0..<20 { next.sendActions(for: .primaryActionTriggered) }
+        let finalSKU = try XCTUnwrap(descendants(of: mobile, type: UIButton.self).first { $0.configuration?.title == "SKU 2048" })
+        finalSKU.sendActions(for: .primaryActionTriggered)
+        XCTAssertFalse(next.isEnabled)
+        XCTAssertTrue(finalSKU.isSelected)
+        XCTAssertTrue(descendants(of: mobile, type: UILabel.self).contains { $0.text?.contains("77.00") == true })
+    }
+
+    @MainActor
+    func testLinearShopRequiresBothHostIdentifiersAndNeverUsesTheSpotAsArtwork() throws {
+        let json = """
+        [{"id":"delivery-8","format":"midroll","linearCreativeId":"creative-4","start":1000,"end":8000,
+          "imageUrl":"https://ads.example/video.mp4","mimeType":"video/mp4","impressionUrl":"https://ads.example/vast",
+          "commerce":{"title":"Shoes","price":"25","currency":"USD","variants":[{"id":"v42","label":"42"}],"handoffUrl":"https://ads.example/cart"}}]
+        """
+        let data = Data(json.utf8), at = Date(timeIntervalSince1970: 2)
+        let cue = try XCTUnwrap(try OverlayCue.decodeSidecar(data).first)
+        XCTAssertNil(cue.imageURL)
+        XCTAssertNil(OverlayTimeline([cue]).active(at: at))
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        let surface = ILOverlayPlayerView(player: AVPlayer(playerItem: item), source: .sidecar)
+        defer { surface.stop() }
+        surface.commerceEnabled = true
+        try surface.replaceSidecar(data, for: item)
+        surface.isInLinearAdBreak = true
+        surface.showMidroll(at: at)
+        XCTAssertTrue(surface.subviews.isEmpty)
+        surface.setLinearAdBreak(true, creativeID: "creative-4", deliveryID: "different")
+        surface.showMidroll(at: at)
+        XCTAssertTrue(surface.subviews.isEmpty)
+        surface.setLinearAdBreak(true, creativeID: "different", deliveryID: "delivery-8")
+        surface.showMidroll(at: at)
+        XCTAssertTrue(surface.subviews.isEmpty)
+        surface.setLinearAdBreak(true, creativeID: "creative-4", deliveryID: "delivery-8")
+        surface.showMidroll(at: at)
+        XCTAssertTrue(descendants(of: surface, type: UIButton.self).contains { $0.configuration?.title == "Buy" })
+        XCTAssertTrue(surface.playerLayer.player?.currentItem === item)
+        surface.setLinearAdBreak(false)
+        XCTAssertTrue(surface.subviews.isEmpty)
+        let base = try XCTUnwrap(URL(string: "https://ads.example/feed?sid=s-1&tag=t-2&start=1000&end=8000"))
+        let endpoint = try XCTUnwrap(ILOverlayPlayerView.commerceFeed(base, locale: "en", midrollCreativeID: "creative-4", midrollDeliveryID: "delivery-8"))
+        let query = try XCTUnwrap(URLComponents(url: endpoint, resolvingAgainstBaseURL: false)?.queryItems)
+        for item in [URLQueryItem(name: "shop_midroll", value: "1"), URLQueryItem(name: "midroll_creative_id", value: "creative-4"),
+                     URLQueryItem(name: "midroll_delivery_id", value: "delivery-8"), URLQueryItem(name: "sid", value: "s-1"),
+                     URLQueryItem(name: "tag", value: "t-2"), URLQueryItem(name: "scene", value: "1")] { XCTAssertTrue(query.contains(item)) }
+    }
+
+    @MainActor
+    func testTelevisionGalleryOptionsCartAndQRUseTheSelectedSKU() async throws {
+        let json = """
+        {"title":"Shoes","price":"45","currency":"USD","description":"Canvas shoes",
+         "imageUrl":"https://images.example/first.png","images":["https://images.example/other.png"],
+         "variants":[{"id":"42","label":"42","selectedOptions":[{"name":"Size","value":"42"}]},
+                     {"id":"v44","label":"44","price":"52","selectedOptions":[{"name":"Size","value":"44"}]}],
+         "handoffUrl":"https://checkout-fixture.invalid/tv"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        let requestsBefore = ShopifyFixture.tvCheckoutCount
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ShopifyFixture.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let bitmap = try XCTUnwrap(UIGraphicsImageRenderer(size: .init(width: 6, height: 6)).image { _ in }.cgImage)
+        var opened = 0, closed = 0
+        let panel = TVCommercePanel(offer, photo: nil, imageLoader: { _ in bitmap }, handoff: OverlayCheckout(session: session), checkoutURL: { _ in
+            XCTFail("TV must show the QR")
+        }, closed: { closed += 1 }) { opened += 1 }
+        defer { panel.dispose() }
+        let screen = CGRect(x: 0, y: 0, width: 1024, height: 576)
+        func tap(_ name: String) throws {
+            panel.frame = panel.presentationFrame(in: screen)
+            panel.layoutIfNeeded()
+            try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == name }).sendActions(for: .primaryActionTriggered)
+        }
+        try tap("Add product")
+        try tap("View photo gallery")
+        XCTAssertEqual(panel.presentationFrame(in: screen), screen)
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 1/2" })
+        try tap("›")
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 2/2" })
+        try tap("Exit")
+        let rail = try XCTUnwrap(descendants(of: panel, type: UICollectionView.self).first)
+        rail.delegate?.collectionView?(rail, didSelectItemAt: IndexPath(item: 1, section: 0))
+        try tap("Add to cart")
+        XCTAssertTrue(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("52.00") == true })
+        XCTAssertEqual(ShopifyFixture.tvCheckoutCount, requestsBefore)
+        try tap("Finish purchase")
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                self.descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Checkout QR code" && $0.image != nil }
+            }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [loaded], timeout: 5)
+        XCTAssertEqual(ShopifyFixture.tvCheckoutCount, requestsBefore + 1)
+        XCTAssertTrue(panel.closeDetails())
+        XCTAssertTrue(descendants(of: panel, type: UIButton.self).contains { $0.configuration?.title == "Finish purchase" })
+        XCTAssertTrue(panel.closeDetails())
+        XCTAssertTrue(panel.closeDetails())
+        XCTAssertTrue(panel.closeDetails())
+        XCTAssertEqual(opened, 1)
         XCTAssertEqual(closed, 1)
     }
 
@@ -213,9 +346,23 @@ final class UIKitSurfaceTests: XCTestCase {
 }
 
 private final class ShopifyFixture: URLProtocol {
+    private static let lock = NSLock()
+    private static var checkouts = 0
+    static var tvCheckoutCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return checkouts
+    }
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "checkout-fixture.invalid" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if let url = request.url, request.httpMethod == "GET", url.path == "/qr/v44" {
+            let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAGMAAABjAQMAAAC19SzWAAAABlBMVEUAAAD///+l2Z/dAAAAAnRSTlP//8i138cAAAAJcEhZcwAACxIAAAsSAdLdfvwAAADuSURBVDiNzdSxDQMhDAVQIwq6sAASa9DdSrBAIhZIVqJjDaRbADoKhOMoUZLm4isSKa7uNZxt/h3ge8EfqwKcOugEglPD4d3QmR44JRPSCBnCDh2d0fvknYx7hHR8eetsUzRfyNTOc9pNUbVs42uDm6q0hl50MpoTJjsX2x69fFJdisa1KoycWsIzgOgWOWE2pyQrrJHTVLfJJpTAqSXwzoRuWE1lp6MF2wunqorIAyiJnKiqMwJl40R36xXlRUZOlJejGgKfX8C2KK1QPEjcIb9I7PeuGdEbDs4EVpRrpOtakdNjvo6R0+//Pd/QFRjYqxDsyzUFAAAAAElFTkSuQmCC")!
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: png)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         var body = request.httpBody ?? Data()
         if let stream = request.httpBodyStream {
             stream.open()
@@ -233,9 +380,14 @@ private final class ShopifyFixture: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
+        if url.path == "/tv" {
+            Self.lock.lock()
+            Self.checkouts += 1
+            Self.lock.unlock()
+        }
         let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data("{\"continueUrl\":\"https://store.example/cart/\(id)\"}".utf8))
+        client?.urlProtocol(self, didLoad: Data("{\"continueUrl\":\"https://store.example/cart/\(id)\",\"qrImageUrl\":\"https://checkout-fixture.invalid/qr/\(id)\"}".utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}

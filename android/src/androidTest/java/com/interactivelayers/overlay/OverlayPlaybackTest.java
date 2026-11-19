@@ -208,17 +208,25 @@ public final class OverlayPlaybackTest {
             assertEquals("Gorra", next.getContentDescription());
             assertTrue(next.performClick());
             player.pause();
+            clickButton("Añadir producto");
+            clickButton("Ver galería de fotos");
+            clickButton("›");
+            assertTrue(overlays.closeCommercePanel());
             assertTrue(buttons("Roja").get(0).isSelected());
             clickButton("Verde");
             assertTrue(buttons("Verde").get(0).isSelected());
             assertFalse(buttons("Roja").get(0).isSelected());
-            clickButton("Comprar");
+            assertTrue(buttons("M").get(0).isSelected());
+            assertTrue(buttons("S").isEmpty());
+            clickButton("Añadir al carrito");
+            assertTrue(network.checkoutSelections.isEmpty());
+            clickButton("Finalizar compra");
         });
         await(() -> network.checkoutSelections.size() == 1 && network.impressions.contains("/measure/cap"));
         assertEquals(java.util.Collections.singletonList("/cap/cart"), network.checkoutDestinations);
         assertEquals(java.util.Collections.singletonList("{\"variantId\":\"green\"}"), network.checkoutSelections);
         activity.onActivity(a -> {
-            assertTrue(overlays.closeCommercePanel());
+            for (int stage = 0; stage < 4; stage++) assertTrue(overlays.closeCommercePanel());
             assertEquals("Gorra", view.findFocus().getContentDescription());
             overlays.setLinearAdActive(true);
             assertSame(original, content.getLayoutParams());
@@ -255,16 +263,26 @@ public final class OverlayPlaybackTest {
         assertEquals("AR", request.queryParameter("country"));
         activity.onActivity(a -> {
             clickButton("Ver producto");
-            assertEquals(buttons("Talle 42").get(0), view.findFocus());
+            assertEquals(buttons("Añadir producto").get(0), view.findFocus());
         });
+        assertCommerceFrame();
         Instrumentation remote = InstrumentationRegistry.getInstrumentation();
+        remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER);
+        activity.onActivity(a -> assertEquals(buttons("Talle 42").get(0), view.findFocus()));
         remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT);
         activity.onActivity(a -> assertEquals(buttons("Talle 43").get(0), view.findFocus()));
         remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER);
-        activity.onActivity(a -> assertEquals(buttons("Comprar").get(0), view.findFocus()));
-        assertCommerceFrame();
+        activity.onActivity(a -> {
+            assertTrue(buttons("Talle 43").get(0).isSelected());
+            clickButton("Añadir al carrito");
+            assertTrue(network.checkoutSelections.isEmpty());
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> assertEquals(buttons("Finalizar compra").get(0), view.findFocus()));
         remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER);
-        await(() -> network.impressions.contains("/measure/product-view") && qrShown());
+        await(() -> !network.checkoutSelections.isEmpty());
+        await(() -> qrShown());
+        assertTrue(network.impressions.contains("/measure/product-view"));
         assertEquals(java.util.Collections.singletonList("{\"variantId\":\"43\"}"), network.checkoutSelections);
         activity.onActivity(a -> {
             assertTrue(player.isPlaying());
@@ -298,41 +316,35 @@ public final class OverlayPlaybackTest {
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
             activity.onActivity(a -> {
                 assertTrue(panel[0].getHeight() <= ((View) panel[0].getParent()).getHeight());
+                clickButton("Add product");
                 View focus = buttons("Size 1").get(0);
                 assertEquals(focus, view.findFocus());
                 assertEquals(Color.BLACK, ((Button) focus).getCurrentTextColor());
-                Button buy = (Button) buttons("Buy").get(0);
-                assertEquals(Color.BLACK, buy.getCurrentTextColor());
-                // The two-column grid lets a remote move down the left column and across on the last row.
-                for (int row = 1; row < 50; row++) {
-                    focus = focus.focusSearch(View.FOCUS_DOWN);
-                    assertEquals("Size " + (row * 2 + 1), ((Button) focus).getText().toString());
-                    assertTrue(focus.requestFocus());
-                }
-                focus = focus.focusSearch(View.FOCUS_RIGHT);
-                assertEquals("Size 100", ((Button) focus).getText().toString());
-                assertTrue(focus.requestFocus());
-                Rect visible = new Rect();
-                assertTrue(focus.getLocalVisibleRect(visible));
-                assertEquals(focus.getHeight(), visible.height());
-                assertTrue(focus.performClick());
-                assertTrue(focus.isSelected());
-                assertTrue(view.hasFocus());
+                Button buy = (Button) buttons("Add to cart").get(0);
+                assertEquals(Color.WHITE, buy.getCurrentTextColor());
+                for (int page = 0; page < 8; page++) clickButton("›");
+                clickButton("Size 100");
+                assertTrue(buttons("Size 100").get(0).isSelected());
                 java.util.ArrayList<View> prices = new java.util.ArrayList<>();
                 panel[0].findViewsWithText(prices, "$100.00", View.FIND_VIEWS_WITH_TEXT);
                 assertEquals(1, prices.size());
             });
-            await(() -> buttons("Buy").get(0).getGlobalVisibleRect(new Rect()));
-            activity.onActivity(a -> clickButton("Buy"));
+            await(() -> buttons("Add to cart").get(0).getGlobalVisibleRect(new Rect()));
+            activity.onActivity(a -> { clickButton("Add to cart"); clickButton("Checkout"); });
             await(() -> !network.checkoutSelections.isEmpty() && qrVisible("Scan with your phone"));
             assertEquals(java.util.Collections.singletonList("{\"variantId\":\"sku-100\"}"), network.checkoutSelections);
             activity.onActivity(a -> {
+                assertTrue(panel[0].closeDetails());
+                assertTrue(panel[0].closeDetails());
                 clickButton("Size 99");
                 assertFalse(qrVisible("Scan with your phone"));
-                clickButton("Buy");
+                clickButton("Add to cart");
+                clickButton("Checkout");
                 // Let the worker queue its completed reply, then change variant before the UI receives it.
                 try { worker.submit(() -> {}).get(5, TimeUnit.SECONDS); }
                 catch (Exception e) { throw new AssertionError(e); }
+                assertTrue(panel[0].closeDetails());
+                assertTrue(panel[0].closeDetails());
                 clickButton("Size 98");
             });
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
@@ -342,6 +354,39 @@ public final class OverlayPlaybackTest {
             activity.onActivity(a -> { if (panel[0] != null) panel[0].dispose(); });
             worker.shutdownNow();
         }
+    }
+
+    @Test public void onlyAnExplicitMatchedMidrollDeliveryCanOpenTheShop() throws Exception {
+        activity.onActivity(a -> {
+            overlays = OverlayController.attachCommerce(view, network.url("/midroll?shop_midroll=1&midroll_creative_id=bad&midroll_delivery_id=bad"),
+                    "spot-session", "es", "AR", true);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> !network.sidecarRequests.isEmpty());
+        assertNull(network.sidecarRequests.get(0).queryParameter("shop_midroll"));
+        activity.onActivity(a -> {
+            assertTrue(buttons("Comprar").isEmpty());
+            overlays.setLinearAdActive(true, "creative-a", "delivery-a");
+        });
+        await(() -> !buttons("Comprar").isEmpty());
+        HttpUrl bound = network.sidecarRequests.get(network.sidecarRequests.size() - 1);
+        assertEquals("1", bound.queryParameter("shop_midroll"));
+        assertEquals("creative-a", bound.queryParameter("midroll_creative_id"));
+        assertEquals("delivery-a", bound.queryParameter("midroll_delivery_id"));
+        activity.onActivity(a -> clickButton("Comprar"));
+        await(() -> network.images.contains("/assets/boots.png") && network.impressions.contains("/measure/shop-view"));
+        activity.onActivity(a -> overlays.setLinearAdActive(true, "creative-a", "delivery-b"));
+        await(() -> "delivery-b".equals(network.sidecarRequests.get(network.sidecarRequests.size() - 1).queryParameter("midroll_delivery_id")));
+        activity.onActivity(a -> {
+            assertTrue(buttons("Comprar").isEmpty());
+            assertTrue(buttons("Añadir producto").isEmpty());
+            overlays.setLinearAdActive(true);
+            assertTrue(buttons("Comprar").isEmpty());
+            overlays.setLinearAdActive(false);
+        });
+        assertFalse(network.images.contains("/assets/spot.mp4"));
+        assertFalse(network.impressions.contains("/measure/vast"));
     }
 
     @Test public void handheldBuyLaunchesTheContinuationOfTheSelectedVariant() throws Exception {
@@ -474,12 +519,12 @@ public final class OverlayPlaybackTest {
 
     private void assertCommerceFrame() throws Exception {
         Rect stage = new Rect(), action = new Rect();
-        await(() -> view.getGlobalVisibleRect(stage) && buttons("Comprar").get(0).getGlobalVisibleRect(action));
+        await(() -> view.getGlobalVisibleRect(stage) && buttons("Añadir producto").get(0).getGlobalVisibleRect(action));
         long deadline = SystemClock.elapsedRealtime() + 2500;
         do {
             Bitmap screenshot = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
             int fill = screenshot.getPixel(action.left + action.width() / 5, action.centerY());
-            if (fill == Color.rgb(240, 240, 240)) {
+            if (fill == Color.rgb(65, 65, 65)) {
                 Bitmap card = Bitmap.createBitmap(screenshot, stage.left, stage.top, stage.width(), stage.height());
                 try (OutputStream out = PlatformTestStorageRegistry.getInstance().openOutputFile("commerce.png")) {
                     assertTrue(card.compress(Bitmap.CompressFormat.PNG, 100, out));

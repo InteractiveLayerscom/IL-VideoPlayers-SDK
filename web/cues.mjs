@@ -13,7 +13,7 @@ export function normalizeCue(item) {
     typeof item.id !== 'string' ||
     !item.id.trim() ||
     item.id.length > 256 ||
-    !['super', 'l', 'overlay'].includes(item.format) ||
+    !['super', 'l', 'overlay', 'midroll'].includes(item.format) ||
     !Number.isSafeInteger(item.start) ||
     !Number.isSafeInteger(item.end) ||
     item.start < 0 ||
@@ -22,6 +22,13 @@ export function normalizeCue(item) {
   )
     return null;
 
+  if (item.format === 'midroll') {
+    const commerce = normalizeCommerce(item.commerce);
+    if (!commerce ||
+        typeof item.linearCreativeId !== 'string' || !item.linearCreativeId.trim() || item.linearCreativeId.length > 256) return null;
+    return { id:item.id, linearCreativeId:item.linearCreativeId, format:item.format, start:item.start, end:item.end,
+      commerce, brand:normalizeBrand(item.brand), impressionUrl:null };
+  }
   const scene = normalizeScene(item.scene, item.format);
   const candidateMime = isHttps(item.imageUrl) ? item.mimeType ??
     (/\.jpe?g$/i.test(new URL(item.imageUrl).pathname) ? 'image/jpeg' : 'image/png') : null;
@@ -34,7 +41,7 @@ export function normalizeCue(item) {
     return offer && typeof value.id === 'string' && value.id.length > 0 && isHttps(value.imageUrl) ?
       { ...offer, id: value.id, imageUrl: value.imageUrl } : null;
   }) : [];
-  const brand = scene && normalizeBrand(item.brand);
+  const brand = normalizeBrand(item.brand);
   return {
     id: item.id,
     format: item.format,

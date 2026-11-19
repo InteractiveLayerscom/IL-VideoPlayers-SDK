@@ -12,6 +12,17 @@ function normalizeCue(item as Dynamic, https as Object) as Dynamic
     if type(item) <> "roAssociativeArray" then return invalid
     if not isText(item.id) or not isText(item.format) then return invalid
     if item.id.trim() = "" or len(item.id) > 256 then return invalid
+    if item.format = "midroll"
+        if not commerceText(item.linearCreativeId, 256) then return invalid
+        if not validUnixMs(item.start) or not validUnixMs(item["end"]) then return invalid
+        if item["end"] <= item.start then return invalid
+        offer = normalizeCommerce(item.commerce, https)
+        if offer = invalid then return invalid
+        cue = { id: item.id, format: "midroll", linearCreativeId: item.linearCreativeId, commerce: offer, start: item.start }
+        cue["end"] = item["end"]
+        if type(item.brand) = "roAssociativeArray" then cue.brand = item.brand
+        return cue
+    end if
     if item.format <> "super" and item.format <> "l" and item.format <> "overlay" then return invalid
     scene = normalizeScene(item.scene, item.format)
     imageUrl = invalid
@@ -79,10 +90,15 @@ function programTimeMs(sample as Dynamic, anchor as Dynamic) as Dynamic
     return anchor.programTimeMs + (sample.video - anchor.positionSeconds) * 1000#
 end function
 
-function activeCue(cues as Object, nowMs as Dynamic) as Dynamic
+function activeCue(cues as Object, nowMs as Dynamic, inBreak = false as Boolean, spot = invalid as Dynamic) as Dynamic
     if nowMs = invalid then return invalid
     for each cue in cues
-        if nowMs >= cue.start and nowMs < cue["end"] then return cue
+        if nowMs >= cue.start and nowMs < cue["end"]
+            if not inBreak and cue.format <> "midroll" then return cue
+            if inBreak and cue.format = "midroll" and spot <> invalid
+                if spot.creativeId = cue.linearCreativeId and spot.deliveryId = cue.id then return cue
+            end if
+        end if
     end for
     return invalid
 end function

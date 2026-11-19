@@ -60,6 +60,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private boolean enabled = true;
     private boolean closed;
     private boolean linearAd;
+    private String midrollCreativeId, midrollDeliveryId;
     private boolean secondaryVideo, secondaryVideoAudio;
     private LinearAdDetector adDetector;
 
@@ -125,8 +126,23 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
 
     /** Call from the start/end callbacks of your stitched linear ad integration. */
     public void setLinearAdActive(boolean active) {
+        setLinearAdActive(active, null, null);
+    }
+
+    /** Associates a playing VAST creative and its impression delivery with an opted-in shop. */
+    public void setLinearAdActive(boolean active, String creativeId, String deliveryId) {
         checkMainThread();
+        boolean shop = active && commerceLocale != null && OverlayCue.validIdentity(creativeId) && OverlayCue.validIdentity(deliveryId);
+        String creative = shop ? creativeId : null, delivery = shop ? deliveryId : null;
+        if (linearAd != active || !java.util.Objects.equals(creative, midrollCreativeId)
+                || !java.util.Objects.equals(delivery, midrollDeliveryId)) {
+            cancelPoll();
+            if (sidecar != null) cues.clear();
+            clearActive();
+        }
         linearAd = active;
+        midrollCreativeId = creative;
+        midrollDeliveryId = delivery;
         update();
     }
 
@@ -214,15 +230,17 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         if (!enabled || closed || view.getPlayer() != player || !view.isAttachedToWindow() || !view.hasWindowFocus()
                 || !view.isShown() || view.getWindowVisibility() != View.VISIBLE
                 || view.getAlpha() <= 0f || !view.getGlobalVisibleRect(visibleBounds)
-                || linearAd || player.isPlayingAd()
+                || ((linearAd || player.isPlayingAd()) && midrollCreativeId == null)
                 || (!player.isPlaying() && (player.getPlayWhenReady() || player.getPlaybackState() != Player.STATE_READY))) return C.TIME_UNSET;
         Timeline timeline = player.getCurrentTimeline();
         if (timeline.isEmpty()) return C.TIME_UNSET;
         timeline.getWindow(player.getCurrentMediaItemIndex(), window);
         long position = player.getContentPosition();
-        if (window.windowStartTimeMs == C.TIME_UNSET || position < 0) return C.TIME_UNSET;
+        if (window.windowStartTimeMs == C.TIME_UNSET || position < 0) {
+            return midrollCreativeId == null ? C.TIME_UNSET : System.currentTimeMillis();
+        }
         long time = window.windowStartTimeMs + position;
-        return adDetector != null && adDetector.isLinearAd(time) ? C.TIME_UNSET : time;
+        return midrollCreativeId == null && adDetector != null && adDetector.isLinearAd(time) ? C.TIME_UNSET : time;
     }
 
     private void update() {
@@ -235,7 +253,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             if (sidecar == null) readManifest();
             else if (player.isPlaying() && polling == null && SystemClock.elapsedRealtime() >= nextPoll) poll(time);
             OverlayCue cue = OverlayCue.at(cues.values(), time);
-            if (!player.isPlaying() && (cue == null || cue.scene == null)) {
+            if (!player.isPlaying() && (cue == null || (cue.scene == null && cue.linearCreativeId == null))) {
                 suspendRendering();
             } else {
                 present(cue, time);
@@ -266,10 +284,11 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private void poll(long timeMs) {
         long request = ++pollGeneration;
         boolean video = secondaryVideo, audio = secondaryVideoAudio;
+        String creative = midrollCreativeId, delivery = midrollDeliveryId;
         polling = workers.submit(() -> {
             List<OverlayCue> result;
             try {
-                result = network.windows(sidecar, sessionId, timeMs, commerceLocale, commerceCountry, video, audio);
+                result = network.windows(sidecar, sessionId, timeMs, commerceLocale, commerceCountry, video, audio, creative, delivery);
             } catch (IOException e) {
                 result = Collections.emptyList();
             }
@@ -280,6 +299,8 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
                 nextPoll = SystemClock.elapsedRealtime() + 750;
                 cues.clear();
                 for (OverlayCue cue : response) {
+                    if (creative != null && !(creative.equals(cue.linearCreativeId) && delivery.equals(cue.id))) continue;
+                    if (creative == null && cue.linearCreativeId != null) continue;
                     if (commerceLocale != null || cue.commerce == null || cue.scene != null) cues.put(cue.id, cue);
                 }
                 update();
@@ -315,6 +336,10 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         clearActive();
         if (cue == null) return;
         active = cue;
+        if (cue.linearCreativeId != null) {
+            commercePanel = new CommercePanel(layer.container(), cue, null, network, workers, television, () -> markOpened(cue));
+            return;
+        }
         if (cue.scene != null) {
             scene = new SceneViews(layer.container(), cue, network, workers, isTelevision(), secondaryVideo,
                     secondaryVideoAudio, this::measure,

@@ -164,36 +164,35 @@ sub main()
     check(rail.getChildCount() = 0, "conflicting END-DATE and DURATION are discarded")
     check(not overlay.callFunc("setManifest", "hls", header + "#EXT-X-STREAM-INF:BANDWIDTH=200000" + chr(10) + "video.m3u8"), "a master cannot substitute for the selected variant")
     testScene(overlay, video, rail, foot)
+    testMidroll(overlay, video)
     if m.failures = 0 then print "ROKU_OK"; m.checks
 end sub
 
 sub testShopping(overlay)
-    heading = overlay.findNode("ilCommerceHeading")
+    check(overlay.findNode("ilCommerceBuy").text = "Añadir producto", "intro offers product details before checkout")
+    key(overlay, "ok")
     price = overlay.findNode("ilCommercePrice")
-    check(heading <> invalid and price <> invalid, "detail separates the localized product heading and selected price")
-    if heading = invalid or price = invalid then return
-    check(heading.text = "Producto" and overlay.findNode("ilCommerceVariant").text = "Variante", "offer locale supplies detail labels")
-    check(overlay.findNode("ilCommerceBuy").text = "Comprar", "the primary action is Buy")
-    check(overlay.findNode("ilCommerceBuyBackground").color = "0xF0F0F0FF" and overlay.findNode("ilCommerceBuy").color = "0x202020FF", "an unbranded Buy button uses dark text on a light surface")
-    check(price.text = "USD 50", "the first variant supplies the initial price")
-    ' Left wraps to the last of a hundred SKUs without selecting it.
-    overlay.callFunc("handleCommerceKey", "left", true)
-    lastChip = overlay.findNode("ilCommerceChipLabel2")
-    check(lastChip.text = "Talle 100" and price.text = "USD 50", "the window reveals the focused last SKU while keeping the selected price")
-    overlay.callFunc("handleCommerceKey", "ok", true)
-    check(price.text = "USD 100,50", "OK confirms the focused SKU and localizes its price")
-    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(overlay.findNode("ilCommerceBuy").text = "Añadir al carrito", "details add the selected SKU to the local cart")
+    key(overlay, "left")
+    key(overlay, "ok")
+    check(price.text = "USD 100,50", "the last real variant can be selected from a long variant list")
+    key(overlay, "down")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceBuy").text = "Finalizar compra", "cart has a separate checkout action")
     qr = overlay.findNode("ilCommerceQr")
-    check(qr.visible and qr.uri = "https://ads.example/handoff/qr/sku-100.png", "Buy requests a QR from the selected offer and SKU")
-    card = overlay.findNode("ilCommerce")
-    background = overlay.findNode("ilCommerceBackground")
-    check(qr.translation[1] + qr.height <= background.height, "QR fits inside the product panel")
-    check(card.translation[1] >= 18 + 540 * .05 and card.translation[1] + background.height * card.scale[1] <= 18 + 540 * .95, "the complete QR panel fits the translated video's safe height")
-    overlay.callFunc("handleCommerceKey", "up", true)
-    overlay.callFunc("handleCommerceKey", "right", true)
-    check(qr.visible, "moving focus leaves the current checkout intact")
-    overlay.callFunc("handleCommerceKey", "ok", true)
-    check(not qr.visible and qr.uri = "" and price.text = "USD 50", "changing SKU discards the previous QR")
+    check(not qr.visible and qr.uri = "", "adding the item does not request checkout")
+    key(overlay, "ok")
+    check(qr.visible and qr.uri = "https://ads.example/handoff/qr/sku-100.png", "checkout sends the selected SKU")
+    key(overlay, "back")
+    check(not qr.visible and overlay.findNode("ilCommerceBuy").text = "Finalizar compra", "Back clears QR and returns to cart")
+    key(overlay, "back")
+    check(overlay.findNode("ilCommerceBuy").text = "Añadir al carrito", "cart returns to details")
+    key(overlay, "back")
+    check(overlay.findNode("ilCommerceBuy").text = "Añadir producto", "details return to intro")
+end sub
+
+sub key(overlay, action)
+    overlay.callFunc("handleCommerceKey", action, true)
 end sub
 
 function reported(overlay) as Boolean
@@ -261,20 +260,23 @@ sub testScene(overlay, video, rail, foot)
     check(overlay.findNode("ilCommerceName").text = "Gorra", "the second product retains its title")
     check(overlay.findNode("ilCommercePhoto").uri = "https://ads.example/cap.png", "the second product retains its true photo")
     check(overlay.productView.viewUrl = "https://ads.example/cap/view", "the view beacon keeps its offer identity")
-    check(overlay.findNode("ilCommerceHeading").text = "Produto" and overlay.findNode("ilCommerceClose").text = "Fechar", "the scene product uses its own Portuguese locale")
+    check(overlay.findNode("ilCommerceBuy").text = "Adicionar produto", "the scene product has its own Portuguese controls")
     check(overlay.findNode("ilCommerceLogo").uri = cue.brand.logoUrl, "the open product retains the brand logo")
-    check(overlay.findNode("ilCommerceBuyBackground").color = "0x006633FF" and overlay.findNode("ilCommerceBuy").color = "0xFFFFFFFF", "an explicit dark accent brands Buy with readable white text")
-    overlay.callFunc("handleCommerceKey", "right", true)
-    overlay.callFunc("handleCommerceKey", "ok", true)
-    overlay.callFunc("handleCommerceKey", "ok", true)
+    key(overlay, "ok")
+    key(overlay, "right")
+    key(overlay, "ok")
+    key(overlay, "down")
+    key(overlay, "ok")
+    key(overlay, "ok")
     check(overlay.findNode("ilCommerceQr").uri = "https://ads.example/cap/cart/qr/green.png", "scene checkout uses the selected product's handoff and SKU")
-    overlay.callFunc("handleCommerceKey", "down", true)
-    overlay.callFunc("handleCommerceKey", "ok", true)
-    check(not overlay.findNode("ilCommerce").visible and not overlay.findNode("ilCommerceQr").visible, "the Close control clears the QR and returns to scene navigation")
-    overlay.callFunc("handleCommerceKey", "left", true)
-    overlay.callFunc("handleCommerceKey", "ok", true)
-    check(overlay.findNode("ilCommerceHeading").text = "Product" and overlay.findNode("ilCommerceVariant").text = "Variant" and overlay.findNode("ilCommerceBuy").text = "Buy", "switching products localizes the complete control set")
-    check(overlay.callFunc("handleCommerceKey", "back", true), "back returns to the product scene")
+    for i = 1 to 4
+        key(overlay, "back")
+    end for
+    check(not overlay.findNode("ilCommerce").visible and not overlay.findNode("ilCommerceQr").visible, "leaving intro returns to scene navigation")
+    key(overlay, "left")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceBuy").text = "Add product", "switching products localizes the control set")
+    key(overlay, "back")
     overlay.linearBreak = true
     check(rail.getChildCount() = 0 and foot.getChildCount() = 0 and video.width = 960, "linear ads remove graphics and restore the program")
     overlay.linearBreak = false
@@ -293,4 +295,124 @@ sub testScene(overlay, video, rail, foot)
     cue.scene = invalid
     pulse(overlay, cue, "hls")
     check(rail.getChildCount() = 0, "an invalid image-only cue is still rejected")
+end sub
+
+sub testMidroll(overlay, video)
+    overlay.callFunc("attach", video, "game")
+    overlay.commerceEnabled = true
+    video.positionInfo = { epoch: 1, video: 1.5#, clip_id: 17 }
+    cue = { id: "delivery-2", linearCreativeId: "creative-1", format: "midroll", start: 1000 }
+    cue["end"] = 6000
+    url = "https://shop.example/"
+    cue.commerce = { title: "Tote", imageUrl: url + "tote.png", images: [url + "side.png", url + "ad.mp4", "file:///invalid"],
+        description: "Canvas carryall", previousPrice: "30.00", price: "18.00", currency: "USD", locale: "en",
+        handoffUrl: url + "handoff", viewUrl: url + "view", variants: [
+          {id: "black-s", label: "Black / S", availableForSale: false, selectedOptions: [{name:"Color", value:"Black"}, {name:"Size", value:"S"}]},
+          {id: "black-l", label: "Black / L", selectedOptions: [{name:"Color", value:"Black"}, {name:"Size", value:"L"}]},
+          {id: "brown-s", label: "Brown / S", imageUrl: url + "brown.png", price:"20.00", selectedOptions: [{name:"Size", value:"S"}, {name:"Color", value:"Brown"}]}] }
+    program = { id: "other", format: "super", start: 1000, imageUrl: url + "overlay.png" }
+    program["end"] = 6000
+    overlay.callFunc("setTimeline", "game", [cue, program])
+    check(overlay.findNode("ilPrimary").getChildCount() = 1 and not overlay.findNode("ilCommerce").visible, "midroll metadata cannot start a CTA during content")
+    overlay.callFunc("setLinearAd", true, {creativeId:"creative-1", deliveryId:"delivery-1"})
+    overlay.callFunc("setTimeline", "game", [program, cue])
+    check(overlay.findNode("ilPrimary").getChildCount() = 0 and not overlay.findNode("ilCommerce").visible, "a different delivery of the same creative suppresses both companions and normal overlays")
+    overlay.callFunc("setLinearAd", true, {creativeId:"wrong", deliveryId:"delivery-2"})
+    overlay.callFunc("setTimeline", "game", [cue])
+    check(not overlay.findNode("ilCommerce").visible, "the same delivery cannot bind to another creative")
+    overlay.callFunc("setLinearAd", true, {creativeId:"creative-1", deliveryId:"delivery-2"})
+    overlay.callFunc("setTimeline", "game", [program, cue])
+    check(overlay.findNode("ilCommerce").visible and overlay.findNode("ilCommerceTrigger").text = "Buy", "the bound VAST delivery shows Buy with no cue image or MIME")
+    check(overlay.findNode("ilPrimary").getChildCount() = 0 and video.width = 960, "midroll preserves the actual spot video")
+    key(overlay, "ok")
+    bg = overlay.findNode("ilCommerceBackground")
+    layer = overlay.findNode("ilCommerce")
+    check(bg.height * layer.scale[1] = video.height and abs(bg.width * layer.scale[0] / video.width - 0.4) < 0.001, "branded panel uses the full height and right forty percent of the video")
+    check(overlay.findNode("ilCommercePrevious").text = "Was USD 30.00", "the intro displays the previous price")
+    check(overlay.findNode("ilCommercePhoto").uri = url + "tote.png", "intro uses the catalog image")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceDescription").text = "Canvas carryall", "details display the product description")
+    check(overlay.findNode("ilCommerceOption0").text = "Color" and overlay.findNode("ilCommerceOption1").text = "Size", "details display both real Shopify axes")
+    key(overlay, "up")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceBackground").width = 1280, "gallery occupies the full video")
+    key(overlay, "right")
+    check(overlay.findNode("ilCommercePhoto").uri = url + "side.png", "gallery shows the next catalog photo")
+    key(overlay, "right")
+    check(overlay.findNode("ilCommercePhoto").uri = url + "brown.png", "gallery skips video and unsafe URLs")
+    key(overlay, "back")
+    key(overlay, "down")
+    key(overlay, "right")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommercePrice").text = "USD 20.00", "choosing Brown resolves to the available Brown/S SKU")
+    key(overlay, "down")
+    key(overlay, "right")
+    key(overlay, "ok")
+    key(overlay, "down")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceSummary").text = "Brown / S · 1 item", "the unavailable Brown/L choice cannot fabricate a SKU")
+    check(not overlay.findNode("ilCommerceQr").visible, "cart summary precedes the QR")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceQr").uri = url + "handoff/qr/brown-s.png", "midroll checkout preserves the actual selected SKU")
+    check(overlay.impression.id <> cue.id, "VAST owns impressions throughout shopping")
+    overlay.callFunc("setLinearAd", true, {creativeId:"creative-1", deliveryId:"delivery-3"})
+    check(not overlay.findNode("ilCommerce").visible and overlay.findNode("ilCommerceQr").uri = "", "switching spots immediately clears an open QR")
+    overlay.callFunc("setTimeline", "game", [cue])
+    check(not overlay.findNode("ilCommerce").visible, "a delayed response for the previous spot cannot reopen it")
+    overlay.callFunc("setLinearAd", false, invalid)
+    check(not overlay.findNode("ilCommerce").visible, "ending a break releases the shopping flow")
+
+    longName = string(512, "N")
+    values = [string(512, "A"), string(512, "B"), string(512, "C")]
+    label = string(506, "X") + values.join(" / ")
+    cue.commerce.variants = [{ id: "long-options", label: label, selectedOptions: [
+        {name: longName, value: values[0]}, {name: "Finish", value: values[1]}, {name: "Cut", value: values[2]}] }]
+    overlay.callFunc("setLinearAd", true, {creativeId:"creative-1", deliveryId:"delivery-2"})
+    overlay.callFunc("setTimeline", "game", [cue])
+    key(overlay, "ok")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceOption0").text = longName and overlay.findNode("ilCommerceChip2-0").text = values[2], "three option axes retain 512-character names and values")
+    key(overlay, "down")
+    key(overlay, "down")
+    key(overlay, "down")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceSummary").text = label + " · 1 item", "a 2048-character combined label remains available in the cart")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceQr").uri = url + "handoff/qr/long-options.png", "long option values retain their real checkout SKU")
+    overlay.callFunc("setLinearAd", false, invalid)
+
+    large = cue.commerce
+    large.variants = []
+    for i = 1 to 2048
+        large.variants.push({id: "sku" + i.toStr(), label: "Label " + i.toStr()})
+    end for
+    overlay.callFunc("setLinearAd", true, {creativeId:"creative-1", deliveryId:"delivery-2"})
+    cue.commerce = large
+    overlay.callFunc("setTimeline", "game", [cue])
+    key(overlay, "ok")
+    key(overlay, "ok")
+    key(overlay, "left")
+    key(overlay, "ok")
+    key(overlay, "down")
+    key(overlay, "ok")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceQr").uri = url + "handoff/qr/sku2048.png", "the legacy list retains every one of 2048 real SKUs")
+    overlay.linearBreak = false
+    check(not overlay.findNode("ilCommerce").visible, "legacy break end also closes the shop")
+    cue.imageUrl = url + "spot.mp4"
+    cue.mimeType = "video/mp4"
+    cue.commerce.imageUrl = url + "other.mp4"
+    cue.commerce.images = []
+    cue.commerce.variants = [{id: "no-stock", label: "Unavailable", availableForSale: false}]
+    overlay.callFunc("setLinearAd", true, {creativeId:"creative-1", deliveryId:"delivery-2"})
+    overlay.callFunc("setTimeline", "game", [cue])
+    key(overlay, "ok")
+    check(not overlay.findNode("ilCommercePhoto").visible, "neither a VAST MP4 nor a video catalog URL can become a product photo")
+    key(overlay, "ok")
+    key(overlay, "ok")
+    check(overlay.findNode("ilCommerceBuy").text = "Out of stock" and not overlay.findNode("ilCommerceQr").visible, "an unavailable catalog has no checkout transition")
+    video.positionInfo = { epoch: 1, video: 6#, clip_id: 17 }
+    overlay.callFunc("setTimeline", "game", [cue])
+    check(not overlay.findNode("ilCommerce").visible, "the midpoint shop expires with its exclusive cue end")
+    overlay.callFunc("setLinearAd", false, invalid)
 end sub

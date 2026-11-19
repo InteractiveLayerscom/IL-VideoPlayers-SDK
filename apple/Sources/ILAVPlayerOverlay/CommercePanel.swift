@@ -20,6 +20,10 @@ final class CommercePanel: UIView {
     private let status = UILabel()
     private let qr = UIImageView()
     private var chips: [UIButton] = []
+    private static let pageSize = 100
+    private var pageStart = 0
+    private let previousPage = UIButton(type: .system)
+    private let nextPage = UIButton(type: .system)
     private var choicesHeight: NSLayoutConstraint!
     private var qrHeight: NSLayoutConstraint!
     private var measuredWidth: CGFloat?
@@ -38,7 +42,7 @@ final class CommercePanel: UIView {
     #endif
 
     init(_ offer: OverlayCommerce, photo: CGImage?, photoURL: URL? = nil, brand: SceneBrand? = nil,
-         handoff: OverlayCheckout = .shared, checkoutURL: ((URL) -> Void)?, closed: (() -> Void)? = nil, opened: @escaping () -> Void) {
+         midroll: Bool = false, handoff: OverlayCheckout = .shared, checkoutURL: ((URL) -> Void)?, closed: (() -> Void)? = nil, opened: @escaping () -> Void) {
         self.offer = offer
         self.handoff = handoff
         onClose = closed
@@ -59,7 +63,7 @@ final class CommercePanel: UIView {
         money.currencyCode = offer.currency
 
         addSubview(open)
-        configure(open, title: labels.open, fill: accent ?? Self.gray(0x30)) { [weak self] in self?.openDetails() }
+        configure(open, title: midroll ? labels.buy : labels.open, fill: accent ?? Self.gray(0x30)) { [weak self] in self?.openDetails() }
 
         header.alignment = .center
         header.spacing = 6 * unit
@@ -124,18 +128,23 @@ final class CommercePanel: UIView {
         body.addArrangedSubview(choices)
         choicesHeight = choices.heightAnchor.constraint(equalToConstant: 0)
         choicesHeight.isActive = true
-        for (index, variant) in offer.variants.enumerated() {
-            let chip = UIButton(type: .system)
-            configure(chip, title: variant.label, fill: Self.gray(0x30), selected: accent ?? Self.gray(0x51)) {
-                [weak self] in self?.select(index)
-            }
-            choices.addSubview(chip)
-            chips.append(chip)
+        selection = offer.variants.firstIndex(where: \.available) ?? 0
+        pageStart = selection / Self.pageSize * Self.pageSize
+        if offer.variants.count > Self.pageSize {
+            let pages = UIStackView(arrangedSubviews: [previousPage, nextPage])
+            pages.spacing = 6 * unit
+            pages.distribution = .fillEqually
+            configure(previousPage, title: "‹", fill: Self.gray(0x30)) { [weak self] in self?.page(by: -1) }
+            configure(nextPage, title: "›", fill: Self.gray(0x30)) { [weak self] in self?.page(by: 1) }
+            previousPage.accessibilityLabel = offer.locale == "es" ? "Variantes anteriores" : offer.locale == "pt-BR" ? "Variantes anteriores" : "Previous variants"
+            nextPage.accessibilityLabel = offer.locale == "es" ? "Variantes siguientes" : offer.locale == "pt-BR" ? "Próximas variantes" : "Next variants"
+            body.addArrangedSubview(pages)
         }
+        showChips()
         configure(checkout, title: labels.buy, fill: accent ?? Self.gray(0xf0),
                   ink: accent == nil ? Self.gray(0x20) : foreground) { [weak self] in self?.buy() }
         addSubview(checkout)
-        select(0)
+        select(selection)
         setExpanded(closed != nil)
         if expanded { didOpen() }
     }
@@ -163,7 +172,7 @@ final class CommercePanel: UIView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
-        [expanded ? chips[selection] : open]
+        [expanded ? (chips.first(where: \.isSelected) ?? checkout) : open]
     }
 
     #if os(tvOS)
@@ -216,7 +225,7 @@ final class CommercePanel: UIView {
     }
 
     // Compare the composited button colors, including translucent brand tokens.
-    private static func readable(_ preferred: UIColor, on fill: UIColor, backdrop: UIColor?) -> UIColor {
+    static func readable(_ preferred: UIColor, on fill: UIColor, backdrop: UIColor?) -> UIColor {
         func components(_ color: UIColor) -> (SIMD3<Double>, Double) {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
             color.getRed(&r, green: &g, blue: &b, alpha: &a)
@@ -237,11 +246,42 @@ final class CommercePanel: UIView {
         return (base + 0.05) / 0.05 > 1.05 / (base + 0.05) ? .black : .white
     }
 
+    private func page(by offset: Int) {
+        let start = pageStart + offset * Self.pageSize
+        guard offer.variants.indices.contains(start) else { return }
+        pageStart = start
+        showChips()
+        updateLayout()
+        layoutIfNeeded()
+        scroll.scrollRectToVisible(choices.convert(CGRect(x: 0, y: 0, width: 1, height: 40), to: scroll), animated: false)
+    }
+
+    private func showChips() {
+        chips.forEach { $0.removeFromSuperview() }
+        chips.removeAll()
+        measuredWidth = nil
+        let end = min(pageStart + Self.pageSize, offer.variants.count)
+        for index in pageStart..<end {
+            let variant = offer.variants[index]
+            let chip = UIButton(type: .system)
+            configure(chip, title: variant.label, fill: Self.gray(0x30), selected: accent ?? Self.gray(0x51)) {
+                [weak self] in self?.select(index)
+            }
+            chip.tag = index
+            chip.isSelected = index == selection
+            chip.isEnabled = variant.available
+            choices.addSubview(chip)
+            chips.append(chip)
+        }
+        previousPage.isEnabled = pageStart > 0
+        nextPage.isEnabled = end < offer.variants.count
+    }
+
     private func select(_ index: Int) {
         cancel()
-        chips[selection].isSelected = false
         selection = index
-        chips[index].isSelected = true
+        for chip in chips { chip.isSelected = chip.tag == selection }
+        checkout.isEnabled = offer.variants[selection].available
         let value = offer.variants[index].price
         price.text = money.string(from: NSDecimalNumber(decimal: value)) ?? value.description
         updateLayout()
@@ -290,14 +330,14 @@ final class CommercePanel: UIView {
     private func cancel() {
         task?.cancel()
         task = nil
-        checkout.isEnabled = true
+        checkout.isEnabled = offer.variants[selection].available
         status.isHidden = true
         qr.isHidden = true
         qr.image = nil
     }
 
     private func buy() {
-        guard task == nil else { return }
+        guard task == nil, offer.variants[selection].available else { return }
         let variant = offer.variants[selection].id
         checkout.isEnabled = false
         showStatus(labels.preparing)
@@ -346,6 +386,14 @@ final class CommercePanel: UIView {
     private func updateLayout() {
         setNeedsLayout()
         superview?.setNeedsLayout()
+    }
+
+    func presentationFrame(in bounds: CGRect) -> CGRect {
+        let bottom = bounds.maxY - bounds.height * 0.11
+        let right = bounds.maxX - bounds.width * 0.06
+        let size = sizeThatFits(CGSize(width: bounds.width, height: bounds.height * 0.86))
+        return CGRect(x: max(bounds.minX, right - size.width), y: bottom - size.height,
+                      width: min(size.width, right - bounds.minX), height: size.height)
     }
 
     override func sizeThatFits(_ size: CGSize) -> CGSize {

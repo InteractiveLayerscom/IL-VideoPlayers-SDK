@@ -3,10 +3,10 @@ function commerceText(value as Dynamic, limit as Integer) as Boolean
     return len(value) <= limit and value.trim() <> ""
 end function
 
-function commercePrice(value as Dynamic) as Dynamic
+function commercePrice(value as Dynamic, decimal = invalid as Dynamic) as Dynamic
     if isNumber(value) then value = value.toStr()
     if not isText(value) then return invalid
-    decimal = createObject("roRegex", "^\d{1,12}(\.\d{1,6})?$", "")
+    if decimal = invalid then decimal = createObject("roRegex", "^\d{1,12}(\.\d{1,6})?$", "")
     if decimal.isMatch(value) then return value
     return invalid
 end function
@@ -27,22 +27,50 @@ function normalizeCommerce(item as Dynamic, https as Object) as Dynamic
     if not currency.isMatch(item.currency) then return invalid
     if not commerceText(item.handoffUrl, 4096) then return invalid
     if not https.isMatch(item.handoffUrl) then return invalid
-    price = commercePrice(item.price)
+    decimal = createObject("roRegex", "^\d{1,12}(\.\d{1,6})?$", "")
+    price = commercePrice(item.price, decimal)
     if price = invalid or type(item.variants) <> "roArray" then return invalid
-    if item.variants.count() < 1 or item.variants.count() > 100 then return invalid
+    if item.variants.count() < 1 or item.variants.count() > 2048 then return invalid
     result = { title: item.title, currency: item.currency, locale: commerceLocale(item.locale),
                handoffUrl: item.handoffUrl, price: price, variants: [] }
+    if commerceText(item.description, 5000) then result.description = item.description
+    result.previousPrice = commercePrice(item.previousPrice, decimal)
+    videoPath = createObject("roRegex", "\.(mp4|m3u8|mov|webm)([?#]|$)", "i")
+    if shopImage(item.imageUrl, https, videoPath) then result.imageUrl = item.imageUrl
+    result.images = []
+    if type(item.images) = "roArray"
+        for each url in item.images
+            if shopImage(url, https, videoPath) then result.images.push(url)
+        end for
+    end if
     ids = {}
     ids.setModeCaseSensitive()
     for each variant in item.variants
         if type(variant) <> "roAssociativeArray" then return invalid
-        if not commerceText(variant.id, 128) or not commerceText(variant.label, 160) then return invalid
+        if not commerceText(variant.id, 128) or not commerceText(variant.label, 2048) then return invalid
         if ids.doesExist(variant.id) then return invalid
         variantPrice = price
-        if variant.price <> invalid then variantPrice = commercePrice(variant.price)
+        if variant.price <> invalid then variantPrice = commercePrice(variant.price, decimal)
         if variantPrice = invalid then return invalid
         ids[variant.id] = true
-        result.variants.push({ id: variant.id, label: variant.label, price: variantPrice })
+        row = { id: variant.id, label: variant.label, price: variantPrice, available: true }
+        if type(variant.availableForSale) = "roBoolean" or type(variant.availableForSale) = "Boolean"
+            row.available = variant.availableForSale
+        end if
+        if shopImage(variant.imageUrl, https, videoPath) then row.imageUrl = variant.imageUrl
+        row.options = []
+        if type(variant.selectedOptions) = "roArray"
+            if variant.selectedOptions.count() <= 3
+                for each pair in variant.selectedOptions
+                    if type(pair) <> "roAssociativeArray" or not commerceText(pair.name, 512) or not commerceText(pair.value, 512)
+                        row.options = []
+                        exit for
+                    end if
+                    row.options.push({ name: pair.name, value: pair.value })
+                end for
+            end if
+        end if
+        result.variants.push(row)
     end for
     if commerceText(item.viewUrl, 4096)
         if https.isMatch(item.viewUrl) then result.viewUrl = item.viewUrl
@@ -50,19 +78,28 @@ function normalizeCommerce(item as Dynamic, https as Object) as Dynamic
     return result
 end function
 
+function shopImage(url as Dynamic, https as Object, videoPath as Object) as Boolean
+    if not commerceText(url, 4096) then return false
+    return https.isMatch(url) and not videoPath.isMatch(url)
+end function
+
 function commerceCopy(locale as String) as Object
     if locale = "es"
         return { trigger: "OK · Ver producto", heading: "Producto", variant: "Variante", buy: "Comprar", close: "Cerrar",
-            scan: "Escaneá el código con tu celular", preparing: "Preparando tu carrito…", failed: "No se pudo preparar el carrito. Intentá de nuevo." }
+            addProduct: "Añadir producto", addCart: "Añadir al carrito", cart: "Carrito de compras", finish: "Finalizar compra", gallery: "Ver galería de fotos", back: "Volver", total: "Total", unit: "1 unidad", was: "Antes", unavailable: "Sin stock", retry: "Reintentar",
+            scan: "Escaneá y finalizá la compra", preparing: "Preparando tu carrito…", failed: "No se pudo preparar el carrito. Intentá de nuevo." }
     else if locale = "pt-BR"
         return { trigger: "OK · Ver produto", heading: "Produto", variant: "Variante", buy: "Comprar", close: "Fechar",
-            scan: "Escaneie com seu celular", preparing: "Preparando seu carrinho…", failed: "Não foi possível preparar o carrinho. Tente novamente." }
+            addProduct: "Adicionar produto", addCart: "Adicionar ao carrinho", cart: "Carrinho de compras", finish: "Finalizar compra", gallery: "Ver galeria de fotos", back: "Voltar", total: "Total", unit: "1 unidade", was: "Antes", unavailable: "Sem estoque", retry: "Tentar novamente",
+            scan: "Escaneie e finalize a compra", preparing: "Preparando seu carrinho…", failed: "Não foi possível preparar o carrinho. Tente novamente." }
     end if
     return { trigger: "OK · View product", heading: "Product", variant: "Variant", buy: "Buy", close: "Close",
-        scan: "Scan with your phone", preparing: "Preparing your cart…", failed: "Could not prepare the cart. Try again." }
+        addProduct: "Add product", addCart: "Add to cart", cart: "Shopping cart", finish: "Checkout", gallery: "View photo gallery", back: "Back", total: "Total", unit: "1 item", was: "Was", unavailable: "Out of stock", retry: "Retry",
+        scan: "Scan to complete your purchase", preparing: "Preparing your cart…", failed: "Could not prepare the cart. Try again." }
 end function
 
 sub initializeCommerce()
+    m.top.focusable = true
     m.panel = m.top.findNode("ilCommerce")
     m.panelBackground = m.top.findNode("ilCommerceBackground")
     m.panelDetail = m.top.findNode("ilCommerceDetail")
@@ -73,39 +110,31 @@ sub initializeCommerce()
     m.panelBuy = m.top.findNode("ilCommerceBuy")
     m.panelBuyBackground = m.top.findNode("ilCommerceBuyBackground")
     m.panelClose = m.top.findNode("ilCommerceClose")
-    m.panelVariant = m.top.findNode("ilCommerceVariant")
-    m.panelRange = m.top.findNode("ilCommerceRange")
     m.panelStatus = m.top.findNode("ilCommerceStatus")
     m.panelQr = m.top.findNode("ilCommerceQr")
     m.panelLogo = m.top.findNode("ilCommerceLogo")
     m.panelPhoto = m.top.findNode("ilCommercePhoto")
-    m.closeFocus = sceneOutline(m.panelClose, 116, 38, 3, "0xFFFFFFFF")
-    m.buyFocus = sceneOutline(m.panelDetail, 428, 66, 3, "0xFFFFFFFF")
-    m.buyFocus.translation = [16, 328]
-
-    chipRow = m.top.findNode("ilCommerceChips")
-    chipFont = createObject("roSGNode", "Font")
-    chipFont.uri = "font:SystemFontFile"
-    chipFont.size = 20
-    m.panelChips = []
-    for slot = 0 to 2
-        tile = chipRow.createChild("Rectangle")
-        tile.translation = [slot * 142, 0]
-        tile.width = 132
-        tile.height = 54
-        label = tile.createChild("Label")
-        label.id = "ilCommerceChipLabel" + slot.toStr()
-        label.translation = [6, 0]
-        label.width = 120
-        label.height = 54
-        label.font = chipFont
-        label.horizAlign = "center"
-        label.vertAlign = "center"
-        label.wrap = true
-        label.maxLines = 2
-        label.ellipsizeOnBoundary = true
-        outline = sceneOutline(tile, 132, 54, 3, "0xFFFFFFFF")
-        m.panelChips.push({ tile: tile, label: label, outline: outline })
+    m.panelPrevious = m.top.findNode("ilCommercePrevious")
+    m.panelDescription = m.top.findNode("ilCommerceDescription")
+    m.panelSummary = m.top.findNode("ilCommerceSummary")
+    m.panelTotal = m.top.findNode("ilCommerceTotal")
+    m.panelAmount = m.top.findNode("ilCommerceAmount")
+    m.galleryPrev = m.top.findNode("ilCommerceGalleryPrev")
+    m.galleryNext = m.top.findNode("ilCommerceGalleryNext")
+    m.galleryFrame = sceneOutline(m.panelDetail, 1200, 664, 2, "0xFFFFFF99")
+    m.galleryFrame.translation = [40, 28]
+    m.galleryBackground = m.top.findNode("ilCommerceGalleryBackground")
+    m.panelGallery = m.top.findNode("ilCommerceGallery")
+    m.panelArrows = m.top.findNode("ilCommerceArrows")
+    m.galleryLeft = m.top.findNode("ilCommerceGalleryLeft")
+    m.galleryRight = m.top.findNode("ilCommerceGalleryRight")
+    m.optionGroup = m.top.findNode("ilCommerceChips")
+    m.closeFocus = sceneOutline(m.panelClose, 100, 36, 2, "0xFFFFFFFF")
+    m.galleryFocus = sceneOutline(m.panelGallery, 282, 36, 2, "0xFFFFFFFF")
+    m.buyFocus = sceneOutline(m.panelDetail, 412, 62, 3, "0xFFFFFFFF")
+    m.shopWidgets = []
+    for axis = 0 to 2
+        m.shopWidgets.push(createShopOptionRow(axis))
     end for
     m.panelQr.observeFieldScoped("loadStatus", "onQrLoad")
     m.commerceHTTPS = createObject("roRegex", "^https://([a-z0-9]([a-z0-9.-]*[a-z0-9])?|\[[a-f0-9:.]+\])(:[0-9]+)?([/?#][^\s]*)?$", "i")
@@ -135,19 +164,13 @@ sub showCommerce()
     offer = currentOffer()
     if offer = invalid or m.panel.visible then return
     m.commerceOpen = false
-    m.commerceChoice = 0
-    m.commerceFocus = 0
-    m.commerceWindow = 0
-    ' Rows follow the remote's vertical cycle: variants, Buy, Close.
-    m.commerceRow = 0
     m.commerceLabels = commerceCopy(offer.locale)
     m.commerceMessage = ""
+    m.shopPage = "intro"
+    m.shopFocusKey = "action"
     m.panelTrigger.text = m.commerceLabels.trigger
-    m.panelHeading.text = m.commerceLabels.heading
-    m.panelVariant.text = m.commerceLabels.variant
-    m.panelBuy.text = m.commerceLabels.buy
-    m.panelClose.text = m.commerceLabels.close
-    m.panelName.text = offer.title
+    if m.active.format = "midroll" then m.panelTrigger.text = m.commerceLabels.buy
+    m.shopRows = invalid
     applyCommerceBrand()
     m.panel.visible = true
     renderCommerce()
@@ -157,15 +180,21 @@ sub showCommerce()
     end if
 end sub
 
-sub hideCommerce()
-    if m.panel.visible
-        cancelCart()
-        m.panel.visible = false
-        m.panelPhoto.uri = ""
-        m.panelLogo.uri = ""
-        m.panelLogo.visible = false
-    end if
+sub releaseShop()
+    cancelCart()
+    m.panel.visible = false
+    for each photo in [m.panelPhoto, m.panelLogo, m.galleryLeft, m.galleryRight]
+        photo.uri = ""
+    end for
+    m.shopRows = invalid
+    m.shopAxes = invalid
+    m.shopPhotos = invalid
+    m.shopPhotoIds = invalid
     m.scenePanelOffer = invalid
+end sub
+
+sub hideCommerce()
+    if m.panel.visible then releaseShop()
     if m.top.commerceAutoFocus and m.top.hasFocus()
         if m.previousCommerceFocus <> invalid
             m.previousCommerceFocus.setFocus(true)
@@ -185,6 +214,7 @@ sub cancelCart()
     end if
     m.panelQr.visible = false
     m.panelQr.uri = ""
+    m.shopQrUrl = ""
     m.commerceMessage = ""
 end sub
 
@@ -206,7 +236,7 @@ sub applyCommerceBrand()
     if brand = invalid then brand = {}
     m.panelBackground.color = commerceColor(brand.background, "#202020")
     foreground = commerceColor(brand.foreground, "#FFFFFF")
-    for each label in [m.panelTrigger, m.panelHeading, m.panelClose, m.panelName, m.panelPrice, m.panelVariant, m.panelRange, m.panelStatus]
+    for each label in [m.panelTrigger, m.panelHeading, m.panelClose, m.panelName, m.panelPrice, m.panelPrevious, m.panelDescription, m.panelSummary, m.panelTotal, m.panelAmount, m.panelGallery, m.panelArrows, m.galleryPrev, m.galleryNext, m.panelStatus]
         label.color = foreground
     end for
     m.panelBuyBackground.color = "0xF0F0F0FF"
@@ -228,83 +258,11 @@ sub applyCommerceBrand()
     if isText(brand.logoUrl)
         if m.commerceHTTPS.isMatch(brand.logoUrl) then logoUrl = brand.logoUrl
     end if
+    m.panelGallery.color = "0xFFFFFFFF"
+    m.shopInk = foreground
+    m.shopLogoUrl = logoUrl
     m.panelLogo.uri = logoUrl
     m.panelLogo.visible = logoUrl <> ""
-end sub
-
-sub renderCommerce()
-    offer = currentOffer()
-    if offer = invalid or not m.panel.visible then return
-    m.panelTrigger.visible = not m.commerceOpen
-    m.panelDetail.visible = m.commerceOpen
-    ' Layout uses a 720p reference surface, including the QR image and its quiet zone.
-    scale = m.commerceVideoHeight / 720
-    if scale * 460 > m.commerceVideoWidth * 0.88 then scale = m.commerceVideoWidth * 0.88 / 460
-    width = m.panelTrigger.width
-    height = m.panelTrigger.height
-    y = m.commerceVideoHeight * 0.94 - height * scale
-    if m.commerceOpen
-        width = 460
-        height = 410
-        if m.commerceMessage <> "" then height = 494
-        if m.panelQr.visible then height = 612
-        y = (m.commerceVideoHeight - height * scale) / 2
-    end if
-    x = m.commerceVideoWidth * 0.94 - width * scale
-    m.panel.translation = [m.video.translation[0] + x, m.video.translation[1] + y]
-    m.panel.scale = [scale, scale]
-    m.panelBackground.width = width
-    m.panelBackground.height = height
-    if not m.commerceOpen then return
-
-    url = m.active.imageUrl
-    if offer.imageUrl <> invalid then url = offer.imageUrl
-    if m.panelPhoto.uri <> url then m.panelPhoto.uri = url
-    amount = offer.variants[m.commerceChoice].price
-    if offer.locale <> "en" then amount = amount.replace(".", ",")
-    m.panelPrice.text = offer.currency + " " + amount
-    m.closeFocus.visible = m.commerceRow = 2
-    m.buyFocus.visible = m.commerceRow = 1
-    renderCommerceChips(offer.variants)
-    m.panelStatus.visible = m.commerceMessage <> ""
-    m.panelStatus.text = m.commerceMessage
-    if m.panelQr.visible
-        m.panelQr.translation = [22, 406]
-        m.panelStatus.translation = [224, 406]
-        m.panelStatus.width = 214
-        m.panelStatus.height = 184
-    else
-        m.panelStatus.translation = [22, 400]
-        m.panelStatus.width = 416
-        m.panelStatus.height = 78
-    end if
-end sub
-
-sub renderCommerceChips(variants as Object)
-    slots = m.panelChips.count()
-    if m.commerceFocus < m.commerceWindow then m.commerceWindow = m.commerceFocus
-    if m.commerceFocus >= m.commerceWindow + slots then m.commerceWindow = m.commerceFocus - slots + 1
-    for slot = 0 to slots - 1
-        index = m.commerceWindow + slot
-        chip = m.panelChips[slot]
-        chip.tile.visible = index < variants.count()
-        if chip.tile.visible
-            chip.label.text = variants[index].label
-            chip.tile.color = "0x303030FF"
-            chip.label.color = "0xFFFFFFFF"
-            if index = m.commerceChoice
-                chip.tile.color = m.chipSelectedColor
-                chip.label.color = m.chipSelectedText
-            end if
-            chip.outline.visible = m.commerceRow = 0 and index = m.commerceFocus
-        end if
-    end for
-    m.panelRange.visible = variants.count() > slots
-    if m.panelRange.visible
-        first = m.commerceWindow + 1
-        last = m.commerceWindow + slots
-        m.panelRange.text = first.toStr() + "–" + last.toStr() + " / " + variants.count().toStr()
-    end if
 end sub
 
 function onKeyEvent(key as String, press as Boolean) as Boolean
@@ -322,46 +280,86 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
     if not m.commerceOpen
         if key <> "ok" then return false
         m.commerceOpen = true
-        m.commerceFocus = m.commerceChoice
-        m.commerceRow = 0
         trackProductView()
-        renderCommerce()
+        enterShopPage("intro", "action")
         return true
     end if
-    if key = "back" or (key = "ok" and m.commerceRow = 2)
-        cancelCart()
-        m.commerceOpen = false
-        if m.scenePanelOffer <> invalid
-            m.scenePanelOffer = invalid
-            m.panel.visible = false
-            m.panelPhoto.uri = ""
-            m.panelLogo.uri = ""
-            updateSceneFocus()
+    if key = "back"
+        shopBack()
+        return true
+    end if
+    if key = "up" or key = "down"
+        stepBy = 1
+        if key = "up" then stepBy = -1
+        index = 0
+        for i = 0 to m.shopControls.count() - 1
+            if m.shopControls[i] = m.shopFocusKey then index = i
+        end for
+        n = m.shopControls.count()
+        m.shopFocusKey = m.shopControls[(index + n + stepBy) mod n]
+    else if key = "left" or key = "right"
+        stepBy = 1
+        if key = "left" then stepBy = -1
+        if m.shopPage = "gallery"
+            n = m.shopPhotos.count()
+            if n > 0 then m.shopPhotoIndex = (m.shopPhotoIndex + n + stepBy) mod n
+        else if left(m.shopFocusKey, 3) = "row"
+            row = m.shopRows[val(mid(m.shopFocusKey, 4))]
+            n = row.values.count()
+            row.focus = (row.focus + n + stepBy) mod n
+        end if
+    else if key = "ok"
+        if m.shopFocusKey = "back"
+            shopBack()
             return true
+        else if m.shopFocusKey = "gallery"
+            enterShopPage("gallery", "back")
+        else if left(m.shopFocusKey, 3) = "row"
+            row = m.shopRows[val(mid(m.shopFocusKey, 4))]
+            index = row.candidates[row.focus]
+            if index >= 0 then selectShopVariant(index)
+        else if m.shopPage = "intro"
+            enterShopPage("detail", "row0")
+        else if m.shopPage = "detail" and currentOffer().variants[m.commerceChoice].available
+            enterShopPage("cart", "action")
+        else if m.shopPage = "cart" or (m.shopPage = "qr" and m.commerceMessage = m.commerceLabels.failed)
+            enterShopPage("qr", "back")
+            prepareCart()
         end if
-    else if key = "up" or key = "down"
-        increment = 1
-        if key = "up" then increment = 2
-        m.commerceRow = (m.commerceRow + increment) mod 3
-    else if (key = "left" or key = "right") and m.commerceRow = 0
-        total = currentOffer().variants.count()
-        increment = 1
-        if key = "left" then increment = total - 1
-        m.commerceFocus = (m.commerceFocus + increment) mod total
-    else if key = "ok" and m.commerceRow = 0
-        if m.commerceChoice <> m.commerceFocus
-            m.commerceChoice = m.commerceFocus
-            cancelCart()
-        end if
-        m.commerceRow = 1
-    else if key = "ok" and m.commerceRow = 1
-        prepareCart()
     else
         return false
     end if
     renderCommerce()
     return true
 end function
+
+sub enterShopPage(page as String, focusKey as String)
+    cancelCart()
+    m.shopPage = page
+    m.shopFocusKey = focusKey
+    renderCommerce()
+end sub
+
+sub shopBack()
+    if m.shopPage = "qr"
+        enterShopPage("cart", "action")
+    else if m.shopPage = "gallery"
+        enterShopPage("detail", "gallery")
+    else if m.shopPage = "cart"
+        enterShopPage("detail", "action")
+    else if m.shopPage = "detail"
+        enterShopPage("intro", "action")
+    else
+        cancelCart()
+        m.commerceOpen = false
+        if m.scenePanelOffer <> invalid
+            releaseShop()
+            updateSceneFocus()
+        else
+            renderCommerce()
+        end if
+    end if
+end sub
 
 sub trackProductView()
     cue = m.active
@@ -382,6 +380,7 @@ sub prepareCart()
     task = createObject("roSGNode", "ILOverlayFeedRequest")
     if task = invalid
         m.commerceMessage = m.commerceLabels.failed
+        m.shopFocusKey = "action"
         return
     end if
     m.commerceMessage = m.commerceLabels.preparing
@@ -399,13 +398,14 @@ sub receiveCart()
     m.cartTask.unobserveFieldScoped("result")
     m.cartTask = invalid
     m.commerceMessage = m.commerceLabels.failed
+    m.shopFocusKey = "action"
     if result.status >= 200 and result.status < 300 and isText(result.body)
         answer = parseJson(result.body)
         if type(answer) = "roAssociativeArray"
             if isText(answer.continueUrl) and isText(answer.qrImageUrl)
                 if m.commerceHTTPS.isMatch(answer.continueUrl) and m.commerceHTTPS.isMatch(answer.qrImageUrl)
-                    m.panelQr.uri = answer.qrImageUrl
-                    m.panelQr.visible = true
+                    m.shopQrUrl = answer.qrImageUrl
+                    m.shopFocusKey = "back"
                     m.commerceMessage = m.commerceLabels.scan
                 end if
             end if
@@ -416,7 +416,9 @@ end sub
 
 sub onQrLoad()
     if m.panelQr.visible and m.panelQr.loadStatus = "failed"
+        m.shopQrUrl = ""
         m.panelQr.visible = false
+        m.shopFocusKey = "action"
         m.commerceMessage = m.commerceLabels.failed
         renderCommerce()
     end if

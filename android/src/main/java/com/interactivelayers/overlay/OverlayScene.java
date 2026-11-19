@@ -45,6 +45,7 @@ final class OverlayScene {
                 JSONObject product = products.optJSONObject(i);
                 OverlayCommerce offer = OverlayCommerce.parse(product);
                 String imageUrl = address(product, "imageUrl");
+                if (imageUrl == null && offer != null && !offer.images.isEmpty()) imageUrl = offer.images.get(0);
                 String id = product == null ? "" : product.optString("id");
                 offers.add(offer != null && imageUrl != null && !id.isEmpty() ? new Offer(id, imageUrl, offer) : null);
             }

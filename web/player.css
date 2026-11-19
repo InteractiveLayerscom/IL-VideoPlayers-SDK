@@ -1,3 +1,4 @@
+@import './tv-shop.css';
 [data-il-hold] { visibility: hidden !important; }
 [data-il-unsqueeze] { transform: none !important; transition: none !important; }
 
@@ -112,3 +113,6 @@
 .il-commerce-result a { display: inline-block; }
 .il-scene-action { cursor: pointer; }
 .il-scene-action:focus { box-shadow: inset 0 0 0 3px #fff; outline: none; }
+
+.il-tv-shop-trigger { padding:.55em .95em; border:1px solid #eee; border-radius:.35em; background:#171717db; color:#fff; cursor:pointer; }
+.il-tv-shop-trigger[hidden] { display:none; }
