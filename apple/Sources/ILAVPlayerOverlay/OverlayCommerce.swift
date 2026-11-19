@@ -9,11 +9,13 @@ struct OverlayCommerce: Equatable, Decodable {
         let id: String
         let label: String
         let price: Decimal
+        let previousPrice: Decimal?
         let options: [Option]
         let available: Bool
         let imageURL: URL?
     }
 
+    let vendor: String?
     let title: String
     let description: String?
     let images: [URL]
@@ -25,9 +27,10 @@ struct OverlayCommerce: Equatable, Decodable {
     let viewURL: URL?
     let variants: [Variant]
     let price: Decimal
+    let previousPrice: Decimal?
 
-    enum Field: String, CodingKey { case title, description, images, imageUrl, currency, locale, handoffUrl, viewUrl, variants, price }
-    enum VariantField: String, CodingKey { case id, label, price, selectedOptions, availableForSale, imageUrl }
+    enum Field: String, CodingKey { case vendor, title, description, images, imageUrl, currency, locale, handoffUrl, viewUrl, variants, price, previousPrice }
+    enum VariantField: String, CodingKey { case id, label, price, previousPrice, selectedOptions, availableForSale, imageUrl }
 
     init(from decoder: Decoder) throws {
         let row = try decoder.container(keyedBy: Field.self)
@@ -53,11 +56,13 @@ struct OverlayCommerce: Equatable, Decodable {
             let options = (try? item.decode([Option].self, forKey: .selectedOptions)) ?? []
             let validOptions = options.allSatisfy { Self.valid($0.name, max: 512) && Self.valid($0.value, max: 512) }
                 && Set(options.map(\.name)).count == options.count
-            variants.append(.init(id: id, label: label, price: amount, options: validOptions ? options : [],
+            variants.append(.init(id: id, label: label, price: amount, previousPrice: Self.amount(item, field: .previousPrice), options: validOptions ? options : [],
                                   available: (try? item.decodeIfPresent(Bool.self, forKey: .availableForSale)) ?? true,
                                   imageURL: OverlayCue.httpsURL(try? item.decode(String.self, forKey: .imageUrl))))
         }
         self.title = title
+        vendor = (try? row.decode(String.self, forKey: .vendor))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        previousPrice = Self.amount(row, field: .previousPrice)
         description = (try? row.decode(String.self, forKey: .description)).flatMap { $0.isEmpty ? nil : $0 }
         let addresses = (try? row.decode([String].self, forKey: .images)) ?? []
         var unique = Set<URL>()
@@ -73,6 +78,12 @@ struct OverlayCommerce: Equatable, Decodable {
             && Set(variants.map { Set($0.options) }).count == variants.count ? names : []
         self.variants = variants
         self.price = price
+    }
+
+    func previousPrice(for variant: Variant) -> Decimal? {
+        guard let previous = variant.previousPrice ?? (variant.price == price ? previousPrice : nil),
+              previous > variant.price else { return nil }
+        return previous
     }
 
     struct Choice {

@@ -85,7 +85,7 @@ Usá `ILOverlayPlayerView(player: player, source: .sidecar)` y habilitá `surfac
 
 En tvOS, el control remoto elige variantes y abre el QR. En iOS, la misma acción abre la continuación en el navegador. La app puede asignar `openCheckoutURL` para usar su navegación de compra y llamar a `closeCommercePanel()` para ofrecer primero el cierre de la ficha al gestionar Atrás. [Contrato de compra](../docs/signals.md#compra-con-shopify)
 
-En tvOS, la portada abre el detalle, desde donde se puede recorrer la galería y elegir las opciones de una variante disponible. **Añadir al carrito** conserva una unidad de esa variante. **Finalizar compra** solicita el QR de Shopify. Atrás vuelve al paso anterior. En iOS, **Comprar** conserva la navegación por enlace.
+En tvOS, la tienda ocupa un panel lateral. **Elegir opciones** abre el detalle si hay varias variantes disponibles. Con una sola, **Ver detalles** abre la ficha. El detalle permite recorrer la galería y elegir una variante. **Agregar al carrito** conserva una unidad de esa variante. **Continuar con el QR** solicita el QR de Shopify. Atrás vuelve al paso anterior. En iOS, **Comprar** conserva la navegación por enlace.
 
 ### Tienda durante un midroll VAST
 

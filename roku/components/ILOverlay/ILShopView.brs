@@ -13,7 +13,10 @@ sub shopLabel(node as Object, value as Dynamic, x as Float, y as Float, w as Flo
 end sub
 
 sub shopPoster(node as Object, url as Dynamic, x as Float, y as Float, w as Float, h as Float)
-    if not isText(url) or url = "" then return
+    if not isText(url) or url = ""
+        node.uri = ""
+        return
+    end if
     ' Bound decoded gallery textures on memory-constrained boxes.
     if node.width <> w or node.height <> h
         node.loadWidth = int(w * m.shopDecodeScale)
@@ -76,9 +79,11 @@ end function
 sub shopAction(caption as String)
     focused = m.shopFocusKey = "action"
     m.panelBuyBackground.opacity = 1
-    shopPlace(m.panelBuyBackground, 52, 626, 400, 50)
-    shopLabel(m.panelBuy, caption, 52, 626, 400, 50)
-    m.buyFocus.translation = [46, 620]
+    shopPlace(m.buyLeft, 32, 626, 50, 50)
+    shopPlace(m.buyRight, 456, 626, 50, 50)
+    shopPlace(m.panelBuyBackground, 57, 626, 424, 50)
+    shopLabel(m.panelBuy, caption, 32, 626, 474, 50)
+    m.buyFocus.translation = [26, 620]
     m.buyFocus.visible = focused
 end sub
 
@@ -92,9 +97,9 @@ sub renderCommerce()
     m.panel.scale = [sx, sy]
     m.shopDecodeScale = sy
     if m.shopDecodeScale > 2 then m.shopDecodeScale = 2
-    x = 768
+    w = 538
+    x = 1280 - w
     y = 0
-    w = 512
     h = 720
     if not m.commerceOpen
         w = m.panelTrigger.width
@@ -102,14 +107,11 @@ sub renderCommerce()
         x = 1220 - w
         y = 680 - h
         if m.active.format = "midroll" then y = 550
-    else if m.shopPage = "gallery"
-        x = 0
-        w = 1280
     end if
     m.panel.translation = [m.video.translation[0] + x * sx, m.video.translation[1] + y * sy]
     m.panelBackground.width = w
     m.panelBackground.height = h
-    m.panelBackground.opacity = 0.91
+    m.panelBackground.opacity = 0.96
     if not m.commerceOpen then return
 
     for each node in m.panelDetail.getChildren(-1, 0)
@@ -118,42 +120,51 @@ sub renderCommerce()
     if m.shopRows = invalid then setupShop(offer)
     page = m.shopPage
     selected = offer.variants[m.commerceChoice]
-    photo = invalid
-    if m.shopPhotos.count() > 0 then photo = m.shopPhotos[m.shopPhotoIndex]
-    if page = "intro" or page = "cart" or page = "qr"
-        if selected.imageUrl <> invalid
-            photo = selected.imageUrl
-        else if m.shopPhotos.count() > 0
-            photo = m.shopPhotos[0]
-        end if
-    end if
+    photo = shopProductPhoto(selected)
+    if page = "gallery" and m.shopPhotos.count() > 0 then photo = m.shopPhotos[m.shopPhotoIndex]
     price = shopMoney(offer, selected.price)
+    previous = selected.previousPrice
+    if previous = invalid and m.shopAvailableCount > 0 and m.commerceChoice = m.shopDefaultChoice and shopPriceKey(selected.price) = shopPriceKey(offer.price)
+        previous = offer.previousPrice
+    end if
+    before = invalid
+    if isText(previous)
+        if shopPriceKey(previous) > shopPriceKey(selected.price) then before = m.commerceLabels.was + " " + shopMoney(offer, previous)
+    end if
     copy = m.commerceLabels
     m.shopControls = ["back"]
     if page = "intro"
-        shopPoster(m.panelPhoto, photo, 48, 64, 416, 237)
-        shopLabel(m.panelHeading, copy.heading, 44, 319, 302, 38)
-        shopLabel(m.panelName, offer.title, 44, 360, 424, 65)
-        if offer.previousPrice <> invalid
-            if shopPriceKey(offer.previousPrice) > shopPriceKey(selected.price)
-                shopLabel(m.panelPrevious, copy.was + " " + shopMoney(offer, offer.previousPrice), 44, 433, 420, 25)
-            end if
+        shopPoster(m.panelPhoto, photo, 32, 84, 474, 234)
+        shopLabel(m.panelHeading, offer.vendor, 32, 327, 474, 34)
+        shopLabel(m.panelName, offer.title, 32, 363, 474, 64)
+        range = shopPriceKey(m.shopLowPrice) <> shopPriceKey(m.shopHighPrice)
+        coverPrice = shopMoney(offer, m.shopLowPrice)
+        if range then coverPrice += " – " + shopMoney(offer, m.shopHighPrice)
+        shopLabel(m.panelPrice, coverPrice, 32, 431, 474, 44)
+        if not range then shopLabel(m.panelPrevious, before, 32, 477, 474, 30)
+        shopLabel(m.panelDescription, offer.description, 32, 510, 474, 64)
+        if m.shopAxes.count() > 1 and m.shopAvailableCount > 1
+            axes = []
+            for each axis in m.shopAxes
+                axes.push(axis.name)
+            end for
+            shopLabel(m.panelSummary, axes.join(" · "), 32, 574, 474, 38)
         end if
-        shopLabel(m.panelPrice, price, 44, 464, 420, 50)
-        shopPoster(m.panelLogo, m.shopLogoUrl, 150, 534, 205, 54)
-        shopAction(copy.addProduct)
+        caption = copy.details
+        if m.shopAvailableCount > 1 then caption = copy.options
+        shopAction(caption)
         m.shopControls.push("action")
     else if page = "detail"
         shopLabel(m.panelName, offer.title, 32, 66, 400, 60)
-        shopPoster(m.panelLogo, m.shopLogoUrl, 350, 17, 104, 43)
         shopPoster(m.panelPhoto, photo, 32, 127, 436, 112)
-        if photo <> invalid
+        if m.shopPhotos.count() > 0
             shopPlace(m.galleryBackground, 178, 202, 282, 36)
             shopLabel(m.panelGallery, copy.gallery, 178, 202, 282, 36)
             m.galleryFocus.visible = m.shopFocusKey = "gallery"
             m.shopControls.push("gallery")
         end if
-        shopLabel(m.panelPrice, price, 32, 240, 438, 38)
+        shopLabel(m.panelPrice, price, 32, 240, 236, 38)
+        shopLabel(m.panelPrevious, before, 270, 240, 232, 38)
         shopLabel(m.panelDescription, offer.description, 32, 277, 445, 48)
         renderShopOptions()
         caption = copy.unavailable
@@ -169,7 +180,6 @@ sub renderCommerce()
         shopPoster(m.panelPhoto, photo, 42, 149, 98, 100)
         shopLabel(m.panelName, offer.title, 157, 146, 318, 66)
         shopLabel(m.panelSummary, selected.label + " · " + copy.unit, 157, 218, 314, 68)
-        shopPoster(m.panelLogo, m.shopLogoUrl, 144, 336, 220, 78)
         shopLabel(m.panelTotal, copy.total, 44, 524, 111, 77)
         shopLabel(m.panelAmount, price, 152, 524, 310, 77)
         shopAction(copy.finish)
@@ -191,28 +201,18 @@ sub renderCommerce()
         end if
     else if page = "gallery"
         n = m.shopPhotos.count()
-        m.galleryFrame.visible = true
+        shopPoster(m.panelPhoto, photo, 32, 110, 474, 338)
         if n > 1
-            shopLabel(m.galleryPrev, "‹", 31, 318, 45, 64)
-            shopLabel(m.galleryNext, "›", 1204, 318, 45, 64)
-            shopPoster(m.galleryLeft, m.shopPhotos[(m.shopPhotoIndex + n - 1) mod n], 60, 160, 264, 310)
-            shopPoster(m.galleryRight, m.shopPhotos[(m.shopPhotoIndex + 1) mod n], 956, 160, 264, 310)
-            m.galleryLeft.opacity = 0.6
-            m.galleryRight.opacity = 0.6
+            shopLabel(m.galleryPrev, "‹", 41, 455, 68, 64)
+            shopLabel(m.galleryNext, "›", 429, 455, 68, 64)
         end if
-        shopPoster(m.panelPhoto, photo, 342, 94, 596, 419)
         position = m.shopPhotoIndex + 1
-        shopLabel(m.panelArrows, position.toStr() + " / " + n.toStr(), 425, 498, 430, 45)
-        shopLabel(m.panelName, offer.title, 58, 546, 730, 61)
-        shopLabel(m.panelPrice, price, 58, 609, 505, 60)
-        shopLabel(m.panelDescription, offer.description, 590, 553, 545, 100)
-        shopPoster(m.panelLogo, m.shopLogoUrl, 1002, 31, 185, 60)
+        shopLabel(m.panelArrows, position.toStr() + " / " + n.toStr(), 109, 460, 320, 54)
+        shopLabel(m.panelName, offer.title, 32, 540, 474, 68)
+        shopLabel(m.panelPrice, price, 32, 613, 474, 53)
     end if
-    if page = "gallery"
-        shopLabel(m.panelClose, "‹ " + copy.back, 60, 49, 100, 36)
-    else
-        shopLabel(m.panelClose, "‹ " + copy.back, 27, 20, 100, 36)
-    end if
+    shopPoster(m.panelLogo, m.shopLogoUrl, 367, 18, 140, 40)
+    shopLabel(m.panelClose, "‹ " + copy.back, 27, 20, 100, 36)
     m.closeFocus.visible = m.shopFocusKey = "back"
 end sub
 

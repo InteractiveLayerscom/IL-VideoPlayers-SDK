@@ -36,8 +36,6 @@
                 <Font role="font" uri="font:SystemFontFile" size="22" />
             </Label>
             <Group id="ilCommerceDetail" visible="false">
-                <Poster id="ilCommerceGalleryLeft" loadDisplayMode="scaleToFit" />
-                <Poster id="ilCommerceGalleryRight" loadDisplayMode="scaleToFit" />
                 <Poster id="ilCommercePhoto" loadDisplayMode="scaleToFit" />
                 <Poster id="ilCommerceLogo" loadDisplayMode="scaleToFit" />
                 <Poster id="ilCommerceQr" loadDisplayMode="scaleToFit" />
@@ -86,6 +84,8 @@
                 </Label>
                 <Group id="ilCommerceChips" />
                 <Rectangle id="ilCommerceBuyBackground" color="0xF0F0F0FF" />
+                <Poster id="ilCommerceBuyLeft" uri="pkg:/components/ILOverlay/ellipse.png" loadDisplayMode="scaleToFill" />
+                <Poster id="ilCommerceBuyRight" uri="pkg:/components/ILOverlay/ellipse.png" loadDisplayMode="scaleToFill" />
                 <Label id="ilCommerceBuy" vertAlign="center" horizAlign="center" color="0x202020FF">
                     <Font role="font" uri="font:BoldSystemFontFile" size="23" />
                 </Label>

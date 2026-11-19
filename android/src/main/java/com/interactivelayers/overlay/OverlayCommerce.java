@@ -14,14 +14,15 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 final class OverlayCommerce {
-    final String title, description;
+    final String title, description, vendor;
     final List<String> images, dimensions;
     final String currency;
     final String locale;
     final String handoffUrl;
     final String viewUrl;
     final List<Variant> variants;
-    final BigDecimal price;
+    final BigDecimal price, previousPrice, minimumPrice, maximumPrice;
+    final int availableCount;
     private final OptionGroup stock = new OptionGroup();
 
     // Each prefix keeps catalog order and the available SKUs that share it.
@@ -33,7 +34,7 @@ final class OverlayCommerce {
     static final class Variant {
         final String id;
         final String label;
-        final BigDecimal price;
+        final BigDecimal price, previousPrice;
 
         final String imageUrl;
         final Map<String, String> options;
@@ -41,6 +42,7 @@ final class OverlayCommerce {
 
         Variant(String id, String label, BigDecimal price, JSONObject row) {
             imageUrl = https(row, "imageUrl");
+            previousPrice = amount(row.opt("previousPrice"));
             options = options(row.optJSONArray("selectedOptions"));
             available = row.isNull("availableForSale") || Boolean.TRUE.equals(row.opt("availableForSale"));
             this.id = id;
@@ -53,6 +55,8 @@ final class OverlayCommerce {
                             String viewUrl, BigDecimal price, List<Variant> variants) {
         this.title = title;
         description = text(row, "description", 8192);
+        vendor = text(row, "vendor", 512);
+        previousPrice = amount(row.opt("previousPrice"));
         LinkedHashSet<String> gallery = new LinkedHashSet<>();
         String main = https(row, "imageUrl");
         if (main != null) gallery.add(main);
@@ -79,6 +83,17 @@ final class OverlayCommerce {
                 prefix = child;
             }
         }
+        BigDecimal min = null, max = null;
+        int count = 0;
+        for (Variant variant : variants) {
+            if (!variant.available) continue;
+            count++;
+            min = min == null ? variant.price : min.min(variant.price);
+            max = max == null ? variant.price : max.max(variant.price);
+        }
+        availableCount = count;
+        minimumPrice = min == null ? price : min;
+        maximumPrice = max == null ? price : max;
         this.currency = currency;
         this.locale = locale;
         this.handoffUrl = handoffUrl;
@@ -118,12 +133,26 @@ final class OverlayCommerce {
         return -1;
     }
 
-    List<String> photos(int selected, String productImage) {
+    BigDecimal previousPrice(int selected) {
+        Variant variant = variants.get(selected);
+        BigDecimal previous = variant.previousPrice;
+        if (previous == null && selected == firstAvailable() && variant.price.compareTo(price) == 0) previous = previousPrice;
+        return previous != null && previous.compareTo(variant.price) > 0 ? previous : null;
+    }
+
+    String productPhoto(int selected, String fallback) {
+        String sku = variants.get(selected).imageUrl;
+        if (sku != null) return sku;
+        if (!images.isEmpty()) return images.get(0);
+        return OverlayCue.isHttps(fallback) ? fallback : null;
+    }
+
+    List<String> photos(int selected, String fallback) {
         Set<String> photos = new LinkedHashSet<>();
-        String variantImage = variants.get(selected).imageUrl;
-        if (variantImage != null) photos.add(variantImage);
-        if (OverlayCue.isHttps(productImage)) photos.add(productImage);
+        String primary = productPhoto(selected, fallback);
+        if (primary != null) photos.add(primary);
         photos.addAll(images);
+        if (OverlayCue.isHttps(fallback)) photos.add(fallback);
         return new ArrayList<>(photos);
     }
 

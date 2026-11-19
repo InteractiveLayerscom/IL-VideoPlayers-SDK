@@ -59,7 +59,7 @@ test('a TV sends one localized offer request, chooses a variant, and removes the
   stage.querySelector('img').dispatchEvent(new window.Event('load'));
   const button = text => [...stage.querySelectorAll('button')].find(el => el.textContent === text);
   button('Ver producto').click();
-  button('Añadir producto').click();
+  button('Elegir opciones').click();
   const choice = button('Talle 42');
   assert.equal(window.document.activeElement, choice);
   choice.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
@@ -71,18 +71,18 @@ test('a TV sends one localized offer request, chooses a variant, and removes the
   assert.equal(stage.querySelector('.il-tv-price').textContent,
     new Intl.NumberFormat('es', { style: 'currency', currency: 'USD' }).format(47));
   key('ArrowDown');
-  assert.equal(window.document.activeElement, button('Añadir al carrito'));
+  assert.equal(window.document.activeElement, button('Agregar al carrito'));
   key('Enter');
   assert.equal(requests.filter(({url}) => url.pathname === '/handoff').length, 0);
-  assert.equal(window.document.activeElement, button('Finalizar compra'));
+  assert.equal(window.document.activeElement, button('Continuar con el QR'));
   key('Enter');
   await pending();
   assert.equal(requests.filter(({ url }) => url.pathname === '/view').length, 1);
   assert.deepEqual(JSON.parse(requests.find(({ url }) => url.pathname === '/handoff').options.body),
     { variantId: '43' });
-  assert.equal(stage.querySelector('img[alt="Escaneá y finalizá la compra"]')?.src, 'https://ads.example/qr.png');
+  assert.equal(stage.querySelector('img[alt="Escaneá para pagar en Shopify"]')?.src, 'https://ads.example/qr.png');
   key('Escape');
-  assert.equal(window.document.activeElement, button('Finalizar compra'));
+  assert.equal(window.document.activeElement, button('Continuar con el QR'));
   key('Escape');
   assert.equal(button('Talle 43').getAttribute('aria-pressed'), 'true');
   key('Escape');
@@ -197,6 +197,10 @@ test('TV shows only valid Shopify combinations, photo gallery and the selected S
     availableForSale, selectedOptions:[{name:'Color',value:color},{name:'Size',value:size}]});
   const product = {...cue.commerce, imageUrl:cue.imageUrl, images:['https://ads.example/side.png'], description:'Canvas',
     viewUrl:undefined, variants:[variant('b-s','Blue','S','12'),variant('b-m','Blue','M','13'),variant('t-m','Tan','M','15'),variant('t-l','Tan','L','16',false)]};
+  product.vendor = 'Andén';
+  product.variants[2].previousPrice = '19';
+  const tanPhoto = 'https://ads.example/tan.png';
+  product.variants[2].imageUrl = tanPhoto;
   const posted = [];
   const shop = commerceSurface(stage,{tv:true,locale:'en'},async (_, options) => {
     posted.push(JSON.parse(options.body));
@@ -204,12 +208,34 @@ test('TV shows only valid Shopify combinations, photo gallery and the selected S
   });
   const btn = value => [...stage.querySelectorAll('button')].find(el => el.textContent === value || el.getAttribute('aria-label') === value);
   shop.open(cue, product, stage.querySelector('button'), () => true);
-  btn('Add product').click(); btn('View photo gallery').click(); btn('Next').click();
+  assert.equal(stage.querySelector('.il-tv-intro-info h2').textContent, product.title);
+  assert.equal(stage.querySelector('.il-tv-from').textContent, 'From');
+  assert.match(stage.querySelector('.il-tv-price').textContent, /12/);
+  assert.equal(stage.querySelector('.il-tv-vendor').textContent, 'Andén');
+  assert.equal(stage.querySelector('.il-tv-description').textContent, 'Canvas');
+  assert.match(stage.querySelector('.il-tv-facts').textContent, /ColorBlue · Tan/);
+  btn('View photos').click(); btn('Back').click();
+  assert.equal(stage.querySelector('.il-tv-shop').dataset.page, 'intro');
+  btn('Choose options').click(); btn('View photos').click(); btn('Next').click();
   assert.equal(stage.querySelector('.il-tv-feature').src, product.images[0]);
-  btn('Back').click(); btn('Tan').click();
+  btn('Back').click();
+  assert.equal(stage.querySelector('.il-tv-hero').src, product.imageUrl);
+  btn('Tan').click();
+  assert.equal(stage.querySelector('.il-tv-hero').src, tanPhoto);
+  btn('View photos').click();
+  assert.equal(stage.querySelector('.il-tv-feature').src, tanPhoto);
+  btn('Next').click(); btn('Back').click();
+  assert.equal(stage.querySelector('.il-tv-hero').src, tanPhoto);
+  btn('Blue').click();
+  assert.equal(stage.querySelector('.il-tv-hero').src, product.imageUrl);
+  btn('Tan').click();
   assert.equal(btn('S').disabled,true); assert.equal(btn('L').disabled,true); assert.equal(btn('M').getAttribute('aria-pressed'),'true');
   assert.match(stage.querySelector('.il-tv-price').textContent,/15/);
-  btn('Add to cart').click(); assert.deepEqual(posted,[]); btn('Checkout').click();
+  assert.match(stage.querySelector('.il-tv-prices del').textContent,/19/);
+  btn('Add to cart').click(); assert.deepEqual(posted,[]);
+  assert.equal(stage.querySelector('.il-tv-thumb').src, tanPhoto);
+  btn('Continue to QR').click();
+  assert.equal(stage.querySelector('.il-tv-thumb').src, tanPhoto);
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(posted,[{variantId:'t-m'}]);
   shop.hide(); window.close();
@@ -235,4 +261,24 @@ test('a linked midroll requests only its live VAST delivery, draws no MP4 as ima
   sdk.setLinearAd(false); await settle(); assert.equal(stage.querySelector('.il-tv-shop'),null);
   assert.equal(urls.at(-1).searchParams.has('midroll_delivery_id'),false);
   sdk.destroy(); window.close();
+});
+
+test('web product window follows the selected SKU photo, falling back to the product cover', () => {
+  const {window} = new JSDOM('<main><button>Shop</button></main>');
+  const stage = window.document.querySelector('main');
+  const cover = 'https://ads.example/cover.png', sand = 'https://ads.example/sand.png';
+  const product = {...cue.commerce, imageUrl:cover, viewUrl:undefined, variants:[
+    {id:'sand-s', label:'Sand S', price:'12', imageUrl:sand},
+    {id:'sand-m', label:'Sand M', price:'13', imageUrl:sand},
+    {id:'plain', label:'Plain', price:'10'},
+  ]};
+  const shop = commerceSurface(stage, {locale:'en'});
+  shop.open(cue, product, stage.querySelector('button'), () => true);
+  const image = () => stage.querySelector('.il-commerce-summary img');
+  const choose = name => [...stage.querySelectorAll('button')].find(el => el.textContent === name).click();
+  assert.equal(image().src, sand);
+  choose('Sand M'); assert.equal(image().src, sand);
+  choose('Plain'); assert.equal(image().src, cover);
+  choose('Sand S'); assert.equal(image().src, sand);
+  shop.hide(); window.close();
 });

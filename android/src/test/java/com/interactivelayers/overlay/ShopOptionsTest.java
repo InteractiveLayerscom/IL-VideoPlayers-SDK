@@ -37,6 +37,27 @@ public final class ShopOptionsTest {
         assertEquals("Cotton", offer.description);
     }
 
+    @Test public void coverPriceRangeIgnoresUnavailableVariantsAndKeepsMarkdownsWithTheirSku() throws Exception {
+        JSONObject catalog = new JSONObject().put("title", "Bag").put("vendor", "Andén").put("price", 12)
+                .put("currency", "USD").put("previousPrice", 16).put("handoffUrl", "https://shop.example/cart");
+        JSONObject sold = variant("sold", "Grey", "XS", false).put("price", 4);
+        JSONObject low = variant("low", "Blue", "S", true).put("price", 10);
+        JSONObject high = variant("high", "Red", "M", true).put("price", 14).put("previousPrice", 18);
+        OverlayCommerce product = OverlayCommerce.parse(catalog.put("variants", new JSONArray().put(sold).put(low).put(high)));
+        assertEquals("Andén", product.vendor);
+        assertEquals("10", product.minimumPrice.toPlainString());
+        assertEquals("14", product.maximumPrice.toPlainString());
+        assertNull(product.previousPrice(1));
+        assertEquals("18", product.previousPrice(2).toPlainString());
+        product = OverlayCommerce.parse(catalog.put("variants", new JSONArray().put(sold).put(low.put("price", 12))));
+        assertEquals(product.minimumPrice, product.maximumPrice);
+        assertEquals(1, product.availableCount);
+        assertEquals("16", product.previousPrice(1).toPlainString());
+        JSONObject samePrice = variant("same-price", "Green", "M", true).put("price", 12);
+        product = OverlayCommerce.parse(catalog.put("variants", new JSONArray().put(low).put(samePrice)));
+        assertNull(product.previousPrice(1));
+    }
+
     @Test public void longOptionLabelsKeepTheWholeSkuSelectable() throws Exception {
         String value = String.join("", java.util.Collections.nCopies(220, "ñ"));
         OverlayCommerce catalog = offer(new JSONArray().put(variant("sku", value, "M", true)));

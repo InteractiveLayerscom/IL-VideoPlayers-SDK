@@ -154,10 +154,10 @@ for (const kind of ['HTML5', 'Video.js', 'AVPlay', 'Shaka']) {
       assert.equal(panel.querySelector('.il-tv-hero').src, 'https://ads.example/cap.png');
       assert.equal(panel.querySelector('.il-tv-logo').src, 'https://ads.example/logo.png');
       const button = label => [...panel.querySelectorAll('button')].find(button => button.textContent === label);
-      button('Add product').click();
+      button('Choose options').click();
       button('Verde').click();
       button('Add to cart').click();
-      button('Checkout').click();
+      button('Continue to QR').click();
       await settle();
       assert.deepEqual(requests.slice(1).map(([url]) => url.pathname), ['/cap/view', '/cap/cart']);
       assert.deepEqual(JSON.parse(requests.at(-1)[1].body), { variantId: 'green' });
