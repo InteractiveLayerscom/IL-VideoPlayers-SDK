@@ -1,0 +1,33 @@
+{
+  "name": "@interactivelayers/player-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./web/index.mjs",
+    "./shaka": "./web/shaka.mjs",
+    "./player.css": "./web/player.css"
+  },
+  "files": [
+    "web",
+    "docs",
+    "examples",
+    "android/README.md",
+    "android/evidence",
+    "apple/README.md",
+    "roku/README.md",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "shaka-player": "5.3.5"
+  },
+  "description": "Player adapters for contextual overlays and L-shaped ads on FAST channels",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/InteractiveLayerscom/IL-VideoPlayers-SDK.git"
+  }
+}

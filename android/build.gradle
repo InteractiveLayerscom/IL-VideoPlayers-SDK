@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.library' version '8.11.0'
+}
+
+group = 'com.interactivelayers'
+version = '0.1.0'
+
+def testMediaDirectory = layout.buildDirectory.dir('generated/assets/overlayAndroidTest')
+
+android {
+    namespace 'com.interactivelayers.overlay'
+    compileSdk 35
+    defaultConfig {
+        minSdk 23
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    sourceSets.androidTest.assets.srcDir(testMediaDirectory)
+    testOptions.targetSdk = 35
+}
+
+// Instrumentation plays three seconds of synthetic MPEG-TS. The AAR contains no test media.
+def testMedia = tasks.register('generateOverlayTestMedia', Exec) {
+    def segment = testMediaDirectory.get().file('green.ts').asFile
+    outputs.file(segment)
+    doFirst { segment.parentFile.mkdirs() }
+    commandLine 'ffmpeg', '-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i',
+            'color=c=green:s=128x72:r=5', '-t', '3', '-c:v', 'libx264', '-preset',
+            'ultrafast', '-profile:v', 'baseline', '-pix_fmt', 'yuv420p', '-g', '15',
+            '-f', 'mpegts', '-y', segment
+}
+tasks.matching { it.name == 'mergeDebugAndroidTestAssets' }.configureEach { dependsOn(testMedia) }
+
+dependencies {
+    api 'androidx.media3:media3-ui:1.6.0'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.6.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    androidTestImplementation 'com.squareup.okhttp3:okhttp-tls:4.12.0'
+}

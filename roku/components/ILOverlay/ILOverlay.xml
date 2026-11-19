@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="ILOverlay" extends="Group">
+    <interface>
+        <function name="attach" />
+        <function name="detach" />
+        <function name="setTimeline" />
+        <function name="setManifest" />
+        <function name="setClockAnchor" />
+        <function name="getProgramTimeMs" />
+        <field id="linearBreak" type="boolean" onChange="refresh" />
+        <field id="seeking" type="boolean" onChange="refresh" />
+        <field id="impression" type="assocarray" alwaysNotify="true" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILTimeline.brs" />
+    <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILManifest.brs" />
+    <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILOverlay.brs" />
+    <children>
+        <Timer id="ilClock" duration="0.1" repeat="true" />
+        <Group id="ilArt" visible="false">
+            <Group id="ilPrimary" />
+            <Group id="ilSecondary" />
+        </Group>
+    </children>
+</component>

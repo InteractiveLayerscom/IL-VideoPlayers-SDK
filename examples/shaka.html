@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prueba de gráficos con Shaka</title>
+<link rel="stylesheet" href="../web/player.css">
+<style>
+  body { margin: 1rem auto; padding: 0 1rem; max-width: 72rem; font: 1rem system-ui; }
+  main { position: relative; aspect-ratio: 16 / 9; background: black; }
+  video, #client, #server { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #client, #server { pointer-events: none; }
+</style>
+<main>
+  <video playsinline controls aria-label="Canal de prueba"></video>
+  <div id="client"></div><div id="server"></div>
+</main>
+<p role="status"></p>
+<script src="../node_modules/shaka-player/dist/shaka-player.compiled.js"></script>
+<script type="module">
+  import { attachShaka } from '../web/shaka.mjs';
+  const video = document.querySelector('video');
+  const info = document.querySelector('[role=status]');
+  const params = new URLSearchParams(location.search);
+  shaka.polyfill.installAll();
+  const player = new shaka.Player();
+  try {
+    await player.attach(video);
+    const sdk = attachShaka({ player, clientContainer: document.querySelector('#client'),
+      serverContainer: document.querySelector('#server'), eventsUrl: params.get('events'),
+      sessionId: params.get('sid') || undefined });
+    await player.load(params.get('src') || './fixture/il.m3u8');
+    addEventListener('pagehide', async () => {
+      await player.unload(); sdk.destroy(); await player.destroy();
+    }, { once: true });
+  } catch (err) {
+    info.textContent = 'No se pudo cargar el HLS de prueba. ' + (err.code || err.message);
+  }
+</script>
+</html>

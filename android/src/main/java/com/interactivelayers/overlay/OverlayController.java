@@ -1,0 +1,296 @@
+package com.interactivelayers.overlay;
+
+import android.graphics.Bitmap;
+import android.graphics.Rect;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.view.View;
+import androidx.media3.common.C;
+import androidx.media3.common.Player;
+import androidx.media3.common.Timeline;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.hls.HlsManifest;
+import androidx.media3.ui.PlayerView;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+/** Presents IL graphics on the existing Media3 player. All public methods run on the main thread. */
+@UnstableApi
+public final class OverlayController implements AutoCloseable, Player.Listener, View.OnAttachStateChangeListener {
+    /** Optional predicate for apps that expose stitched ad breaks on the program timeline. */
+    public interface LinearAdDetector { boolean isLinearAd(long programTimeMs); }
+
+    private final PlayerView view;
+    private final Player player;
+    private final String sidecar;
+    private final String sessionId;
+    private final OverlayNetwork network = new OverlayNetwork();
+    private final ExecutorService workers = Executors.newFixedThreadPool(2);
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable pulse = this::update;
+    private final Timeline.Window window = new Timeline.Window();
+    private final Rect visibleBounds = new Rect();
+    private final Map<String, OverlayCue> cues = new LinkedHashMap<>();
+    private final Set<String> measured = new HashSet<>();
+    private final OverlayLayer layer;
+    private OverlayCue active;
+    private Object lastManifest;
+    private Future<?> polling;
+    private Future<?> imageRequest;
+    private long nextPoll;
+    private long pollGeneration;
+    private long imageGeneration;
+    private boolean enabled = true;
+    private boolean closed;
+    private boolean linearAd;
+    private LinearAdDetector adDetector;
+
+    /** Reads overlay DATERANGEs from the HLS media playlist already loaded by the player. */
+    public static OverlayController attach(PlayerView view) {
+        return new OverlayController(view, null, null);
+    }
+
+    /** Uses the session JSON endpoint as the source of graphics. A null ID generates a session UUID. */
+    public static OverlayController attach(PlayerView view, String sidecarUrl, String sessionId) {
+        return new OverlayController(view, sidecarUrl, sessionId);
+    }
+
+    private OverlayController(PlayerView view, String sidecarUrl, String sessionId) {
+        checkMainThread();
+        this.view = view;
+        this.player = view.getPlayer();
+        if (player == null || player.getApplicationLooper() != Looper.getMainLooper()) {
+            throw new IllegalArgumentException("Set a main-thread Media3 Player on the PlayerView before attaching");
+        }
+        if (sidecarUrl != null && !OverlayCue.isHttps(sidecarUrl)) {
+            throw new IllegalArgumentException("Expected an absolute HTTPS sidecar URL");
+        }
+        if (view.getTag(R.id.il_overlay_controller) != null) {
+            throw new IllegalStateException("Close the previous overlay controller before attaching again");
+        }
+        this.sidecar = sidecarUrl;
+        this.sessionId = sessionId == null ? UUID.randomUUID().toString() : sessionId;
+        layer = new OverlayLayer(view, this::measure);
+        view.setTag(R.id.il_overlay_controller, this);
+        view.addOnAttachStateChangeListener(this);
+        player.addListener(this);
+        update();
+    }
+
+    /** Suspends graphics and restores the original layout. Media playback remains owned by the app. */
+    public void stop() {
+        checkMainThread();
+        enabled = false;
+        update();
+    }
+
+    public void start() {
+        checkMainThread();
+        if (!closed) {
+            enabled = true;
+            update();
+        }
+    }
+
+    /** Call from the start/end callbacks of your stitched linear ad integration. */
+    public void setLinearAdActive(boolean active) {
+        checkMainThread();
+        linearAd = active;
+        update();
+    }
+
+    public void setLinearAdDetector(LinearAdDetector detector) {
+        checkMainThread();
+        adDetector = detector;
+        update();
+    }
+
+    @Override public void close() {
+        checkMainThread();
+        if (closed) return;
+        stop();
+        closed = true;
+        player.removeListener(this);
+        view.removeOnAttachStateChangeListener(this);
+        view.setTag(R.id.il_overlay_controller, null);
+        layer.remove();
+        cues.clear();
+        measured.clear();
+        lastManifest = null;
+        adDetector = null;
+        workers.shutdownNow();
+    }
+
+    @Override public void onViewAttachedToWindow(View v) { update(); }
+    @Override public void onViewDetachedFromWindow(View v) {
+        main.removeCallbacks(pulse);
+        suspendRendering();
+    }
+
+    @Override public void onEvents(Player player, Player.Events events) {
+        if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+            cues.clear();
+            lastManifest = null;
+            clearActive();
+            cancelPoll();
+        } else if (sidecar != null && events.contains(Player.EVENT_POSITION_DISCONTINUITY)) {
+            cues.clear();
+            clearActive();
+            cancelPoll();
+        }
+        update();
+    }
+
+    private static void checkMainThread() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            throw new IllegalStateException("Use OverlayController on the main thread");
+        }
+    }
+
+    private long programTime() {
+        if (!enabled || closed || view.getPlayer() != player || !view.isAttachedToWindow() || !view.hasWindowFocus()
+                || !view.isShown() || view.getWindowVisibility() != View.VISIBLE
+                || view.getAlpha() <= 0f || !view.getGlobalVisibleRect(visibleBounds)
+                || linearAd || !player.isPlaying() || player.isPlayingAd()) return C.TIME_UNSET;
+        Timeline timeline = player.getCurrentTimeline();
+        if (timeline.isEmpty()) return C.TIME_UNSET;
+        timeline.getWindow(player.getCurrentMediaItemIndex(), window);
+        long position = player.getContentPosition();
+        if (window.windowStartTimeMs == C.TIME_UNSET || position < 0) return C.TIME_UNSET;
+        long time = window.windowStartTimeMs + position;
+        return adDetector != null && adDetector.isLinearAd(time) ? C.TIME_UNSET : time;
+    }
+
+    private void update() {
+        main.removeCallbacks(pulse);
+        if (closed) return;
+        long time = programTime();
+        if (time == C.TIME_UNSET) {
+            suspendRendering();
+        } else {
+            if (sidecar == null) readManifest();
+            else if (polling == null && SystemClock.elapsedRealtime() >= nextPoll) poll(time);
+            present(OverlayCue.at(cues.values(), time));
+            measure();
+        }
+        if (enabled && view.isAttachedToWindow()) main.postDelayed(pulse, 200);
+    }
+
+    private void readManifest() {
+        Object manifest = player.getCurrentManifest();
+        if (manifest == lastManifest) return;
+        lastManifest = manifest;
+        if (!(manifest instanceof HlsManifest)) {
+            cues.clear();
+            return;
+        }
+        for (OverlayCue cue : OverlayCue.fromTags(((HlsManifest) manifest).mediaPlaylist.tags)) {
+            cues.put(cue.id, cue);
+        }
+        // Keep playable DVR cues across playlist refreshes, including updates that omit a tag.
+        Iterator<OverlayCue> history = cues.values().iterator();
+        while (history.hasNext()) {
+            if (history.next().end <= window.windowStartTimeMs) history.remove();
+        }
+    }
+
+    private void poll(long timeMs) {
+        long request = ++pollGeneration;
+        polling = workers.submit(() -> {
+            List<OverlayCue> result;
+            try {
+                result = network.windows(sidecar, sessionId, timeMs);
+            } catch (IOException e) {
+                result = Collections.emptyList();
+            }
+            List<OverlayCue> response = result;
+            main.post(() -> {
+                if (request != pollGeneration || closed) return;
+                polling = null;
+                nextPoll = SystemClock.elapsedRealtime() + 750;
+                cues.clear();
+                for (OverlayCue cue : response) cues.put(cue.id, cue);
+                update();
+            });
+        });
+    }
+
+    private void cancelPoll() {
+        pollGeneration++;
+        if (polling != null) polling.cancel(true);
+        polling = null;
+        nextPoll = 0;
+    }
+
+    private void suspendRendering() {
+        if (sidecar != null) {
+            if (polling != null || nextPoll != 0) cancelPoll();
+            cues.clear();
+        }
+        clearActive();
+    }
+
+    private void present(OverlayCue cue) {
+        if (active != null && cue != null && active.id.equals(cue.id)
+                && active.imageUrl.equals(cue.imageUrl) && active.format.equals(cue.format)
+                && java.util.Objects.equals(active.mimeType, cue.mimeType)) {
+            active = cue;
+            return;
+        }
+        clearActive();
+        if (cue == null) return;
+        active = cue;
+        long request = ++imageGeneration;
+        imageRequest = workers.submit(() -> {
+            Bitmap image = null;
+            try {
+                image = network.image(cue);
+            } catch (IOException ignored) {
+                // An unavailable image is never presented or measured.
+            }
+            Bitmap loaded = image;
+            main.post(() -> {
+                if (request != imageGeneration || closed) return;
+                imageRequest = null;
+                if (loaded != null && currentCueIsActive()) layer.show(active, loaded);
+            });
+        });
+    }
+
+    private void clearActive() {
+        if (active == null) return;
+        imageGeneration++;
+        if (imageRequest != null) imageRequest.cancel(true);
+        imageRequest = null;
+        active = null;
+        layer.clear();
+    }
+
+    private boolean currentCueIsActive() {
+        if (active == null) return false;
+        long time = programTime();
+        OverlayCue selected = time == C.TIME_UNSET ? null : OverlayCue.at(cues.values(), time);
+        return selected != null && active.id.equals(selected.id);
+    }
+
+    private void measure() {
+        if (active == null || active.impressionUrl == null || measured.contains(active.id)
+                || !layer.isDrawnAndVisible() || !currentCueIsActive()) return;
+        String url = active.impressionUrl;
+        measured.add(active.id);
+        workers.execute(() -> {
+            try { network.impression(url); } catch (IOException ignored) {}
+        });
+    }
+}

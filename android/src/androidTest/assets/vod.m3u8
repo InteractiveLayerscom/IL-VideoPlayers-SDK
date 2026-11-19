@@ -1,0 +1,9 @@
+#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:3
+#EXT-X-PROGRAM-DATE-TIME:2026-11-19T00:00:00Z
+#EXT-X-DATERANGE:ID="vod",CLASS="com.interactivelayers.overlay",START-DATE="2026-11-19T00:00:00Z",DURATION=3,X-IL-FORMAT="super",X-ASSET-URI="https://assets.invalid/s.png",X-IL-IMPRESSION-URI="https://measure.invalid/vod"
+#EXTINF:3,
+green.ts
+#EXT-X-ENDLIST
