@@ -8,7 +8,8 @@ final class TVCommercePanel: UIView {
     private let offer: OverlayCommerce
     private let brand: SceneBrand?
     private let fallback: UIImage?
-    private let mainPhoto: URL?
+    private let productPhoto: SelectedProductPhoto
+    private var mainPhoto: URL? { productPhoto.coverURL }
     private let imageLoader: (URL) async throws -> CGImage
     private let handoff: OverlayCheckout
     private let midroll: Bool
@@ -16,6 +17,7 @@ final class TVCommercePanel: UIView {
     private let onClose: (() -> Void)?
     private let background: UIColor
     private let ink: UIColor
+    private let focusAccent: UIColor
     private let money = NumberFormatter()
     private var stage: Stage
     private var selection: Int
@@ -31,7 +33,6 @@ final class TVCommercePanel: UIView {
     private var header = UIStackView()
     private var scale: CGFloat = 1
     private var rails: [TVOptionRail] = []
-    private var galleryBorder: UIView?
     private let cache = NSCache<NSURL, UIImage>()
 
     init(_ offer: OverlayCommerce, photo: CGImage?, photoURL: URL? = nil, brand: SceneBrand? = nil,
@@ -43,15 +44,16 @@ final class TVCommercePanel: UIView {
         self.midroll = midroll
         self.handoff = handoff
         self.imageLoader = imageLoader
-        mainPhoto = offer.imageURL ?? photoURL
+        productPhoto = SelectedProductPhoto(coverURL: offer.imageURL ?? photoURL, bitmap: photo, load: imageLoader)
         fallback = photo.map(UIImage.init(cgImage:))
         onClose = closed
         onOpen = opened
         stage = closed == nil ? .entry : .cover
         selection = offer.variants.firstIndex(where: \.available) ?? 0
-        let base = UIColor.sceneColor(brand?.background) ?? UIColor(white: 0.12, alpha: 1)
-        background = base.withAlphaComponent(min(0.92, base.cgColor.alpha))
-        ink = CommercePanel.readable(UIColor.sceneColor(brand?.foreground) ?? .white, on: base, backdrop: .black)
+        background = UIColor(white: 0.085, alpha: 0.98)
+        ink = .white
+        focusAccent = CommercePanel.readable(UIColor.sceneColor(brand?.accent) ?? UIColor(red: 0.71, green: 0.78, blue: 1, alpha: 1),
+                                             on: UIColor(white: 0.085, alpha: 1), backdrop: .black)
         super.init(frame: .zero)
         cache.totalCostLimit = 32 * 1024 * 1024
         cache.countLimit = 8
@@ -74,7 +76,7 @@ final class TVCommercePanel: UIView {
     private var selectionSummary: String {
         variant.options.isEmpty ? variant.label : variant.options.map(\.value).joined(separator: " · ")
     }
-    private var selectedPhoto: URL? { variant.imageURL ?? mainPhoto ?? offer.images.first }
+    private var selectedPhoto: URL? { variant.imageURL ?? mainPhoto }
     private var gallery: [URL?] {
         var seen = Set<URL>()
         let urls = ([mainPhoto].compactMap { $0 } + offer.images + [variant.imageURL].compactMap { $0 })
@@ -90,10 +92,8 @@ final class TVCommercePanel: UIView {
             let width = min(bounds.width * 0.85, 155 * unit), height = min(bounds.height, 48 * unit)
             return CGRect(x: bounds.maxX - width - bounds.width * 0.025, y: bounds.maxY - height - bounds.height * 0.07,
                           width: width, height: height)
-        case .gallery: return bounds
         default:
-            let ratio: CGFloat = stage == .details || stage == .qr ? 0.34 : 0.41
-            let width = min(bounds.width, max(205 * unit, bounds.width * ratio))
+            let width = min(bounds.width, max(205 * unit, bounds.width * 0.42))
             return CGRect(x: bounds.maxX - width, y: bounds.minY, width: width, height: bounds.height)
         }
     }
@@ -101,29 +101,20 @@ final class TVCommercePanel: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         if stage == .entry { focus?.frame = bounds; return }
-        let gallery = stage == .gallery
-        galleryBorder?.frame = bounds.insetBy(dx: bounds.width * 0.04, dy: bounds.height * 0.04)
-        let inset: CGFloat
-        switch stage {
-        case .cover, .cart: inset = bounds.width * 0.14
-        case .gallery: inset = bounds.width * 0.065
-        default: inset = min(bounds.width * 0.065, 26 * scale)
-        }
-        let top = gallery ? bounds.height * 0.065 : min(bounds.height * 0.045, 22 * scale)
+        let inset = min(bounds.width * 0.07, 30 * scale)
+        let top = min(bounds.height * 0.05, 27 * scale)
         let width = max(1, bounds.width - 2 * inset)
         let head = min(44 * scale, bounds.height * 0.12)
         header.frame = CGRect(x: inset, y: top, width: width, height: head)
         let foot = footer.arrangedSubviews.isEmpty ? 0 : footer.systemLayoutSizeFitting(
             CGSize(width: width, height: 0), withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel).height
-        let bottom = stage == .cover ? bounds.height * 0.075 : top
-        footer.frame = CGRect(x: inset, y: max(header.frame.maxY, bounds.height - bottom - foot), width: width, height: foot)
+        footer.frame = CGRect(x: inset, y: max(header.frame.maxY, bounds.height - top - foot), width: width, height: foot)
         let y = header.frame.maxY + 5 * scale
         scroll.frame = CGRect(x: inset, y: y, width: width, height: max(0, footer.frame.minY - y - 8 * scale))
         let height = body.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
                                                    verticalFittingPriority: .fittingSizeLevel).height
-        let bodyTop = gallery ? max(0, (scroll.bounds.height - height) / 2) : 0
-        body.frame = CGRect(x: 0, y: bodyTop, width: width, height: height)
-        scroll.contentSize = CGSize(width: width, height: bodyTop + height)
+        body.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        scroll.contentSize = body.bounds.size
     }
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] { focus.map { [$0] } ?? super.preferredFocusEnvironments }
@@ -148,6 +139,7 @@ final class TVCommercePanel: UIView {
     }
 
     func dispose() {
+        productPhoto.cancel()
         checkout?.cancel()
         media.forEach { $0.cancel() }
         removeFromSuperview()
@@ -177,28 +169,25 @@ final class TVCommercePanel: UIView {
         return result
     }
 
-    private func button(_ value: String, fill: UIColor = UIColor.black.withAlphaComponent(0.16), action: @escaping () -> Void) -> UIButton {
+    private func button(_ value: String, fill: UIColor = UIColor(white: 0.23, alpha: 1), outlined: Bool = false, action: @escaping () -> Void) -> UIButton {
         let button = UIButton(type: .system)
         var config = UIButton.Configuration.plain()
         config.title = value
         config.baseForegroundColor = CommercePanel.readable(ink, on: fill, backdrop: background)
         config.background.backgroundColor = fill
-        config.background.strokeColor = ink.withAlphaComponent(0.82)
-        config.background.strokeWidth = scale
-        config.cornerStyle = .fixed
-        config.background.cornerRadius = 5 * scale
+        config.background.strokeColor = UIColor(white: 0.46, alpha: 1)
+        config.background.strokeWidth = outlined ? scale : 0
+        config.cornerStyle = .capsule
         let font = UIFont.systemFont(ofSize: 16 * scale, weight: .semibold)
         config.titleTextAttributesTransformer = .init { var a = $0; a.font = font; return a }
         config.contentInsets = .init(top: 7*scale, leading: 10*scale, bottom: 7*scale, trailing: 10*scale)
         button.configuration = config
-        let selected = UIColor.sceneColor(brand?.accent) ?? ink
-        let selectedInk = CommercePanel.readable(background, on: selected, backdrop: .black)
-        button.configurationUpdateHandler = { control in
+        button.configurationUpdateHandler = { [focusAccent, scale] control in
             var appearance = config
             if control.isFocused {
-                appearance.baseForegroundColor = selectedInk
-                appearance.background.backgroundColor = selected
-                appearance.background.strokeWidth = 3
+                appearance.background.strokeColor = focusAccent
+                appearance.background.strokeWidth = 3 * scale
+                appearance.background.strokeOutset = 2 * scale
             }
             control.alpha = control.isEnabled ? 1 : 0.45
             control.configuration = appearance
@@ -225,9 +214,20 @@ final class TVCommercePanel: UIView {
         return view
     }
 
+    private func selectedImageView() -> UIImageView {
+        let image = UIImageView()
+        image.contentMode = .scaleAspectFit
+        image.clipsToBounds = true
+        image.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        productPhoto.display(variant, in: image)
+        return image
+    }
+
     private func hero(_ height: CGFloat) {
         guard selectedPhoto != nil || fallback != nil else { return }
-        let view = photo(selectedPhoto, fallback: fallback)
+        let view = selectedImageView()
+        view.backgroundColor = UIColor(white: 0.14, alpha: 1)
+        view.layer.cornerRadius = 10 * scale
         view.heightAnchor.constraint(equalToConstant: height * scale).isActive = true
         body.addArrangedSubview(view)
     }
@@ -240,16 +240,6 @@ final class TVCommercePanel: UIView {
         focus = nil
         accessibilityViewIsModal = stage != .entry
         backgroundColor = stage == .entry ? .clear : background
-        galleryBorder = nil
-        if stage == .gallery {
-            let border = UIView()
-            border.isUserInteractionEnabled = false
-            border.layer.borderWidth = scale
-            border.layer.cornerRadius = 14 * scale
-            border.layer.borderColor = ink.cgColor
-            addSubview(border)
-            galleryBorder = border
-        }
         if stage == .entry {
             let trigger = button(midroll ? text("Buy", "Comprar", "Comprar") : text("View product", "Ver producto", "Ver produto"),
                                  fill: UIColor.black.withAlphaComponent(0.8)) { [weak self] in
@@ -274,74 +264,86 @@ final class TVCommercePanel: UIView {
         scroll.addSubview(body)
         addSubview(scroll)
         addSubview(footer)
-        let heading: String = stage == .cart || stage == .qr ? text("Shopping cart", "Carrito de compras", "Carrinho de compras") :
-            (stage == .details ? offer.title : "")
-        if !heading.isEmpty { header.addArrangedSubview(label(heading, 17, bold: true)) }
-        if stage != .cover, let logo = brand?.logoURL {
+        let heading: String
+        switch stage {
+        case .gallery: heading = text("Photos", "Fotos", "Fotos")
+        case .cart: heading = text("Shopping cart", "Carrito de compras", "Carrinho de compras")
+        case .qr: heading = "Shopify"
+        case .details: heading = offer.title
+        default: heading = ""
+        }
+        if !heading.isEmpty {
+            let title = label(heading, 19, bold: true)
+            title.numberOfLines = 1
+            header.addArrangedSubview(title)
+        }
+        if let logo = brand?.logoURL {
             let view = photo(logo)
-            view.widthAnchor.constraint(equalToConstant: 56 * scale).isActive = true
-            view.heightAnchor.constraint(equalToConstant: 32 * scale).isActive = true
+            view.widthAnchor.constraint(equalToConstant: 54 * scale).isActive = true
+            view.heightAnchor.constraint(equalToConstant: 30 * scale).isActive = true
             header.addArrangedSubview(view)
         }
         header.addArrangedSubview(UIView())
-        let back = button(stage == .gallery ? text("Exit", "Salir", "Sair") : "‹") { [weak self] in self?.closeDetails() }
-        back.accessibilityLabel = stage == .gallery ? text("Exit", "Salir", "Sair") : text("Back", "Atrás", "Voltar")
-        if stage == .gallery { header.insertArrangedSubview(back, at: 0) }
-        else { header.addArrangedSubview(back) }
+        let back = button("‹", fill: .clear, outlined: true) { [weak self] in self?.closeDetails() }
+        back.accessibilityLabel = text("Back", "Atrás", "Voltar")
+        header.addArrangedSubview(back)
         focus = back
         switch stage {
         case .cover:
-            if selectedPhoto != nil || fallback != nil {
-                let space = UIView()
-                let image = photo(selectedPhoto, fallback: fallback)
-                image.translatesAutoresizingMaskIntoConstraints = false
-                space.addSubview(image)
-                NSLayoutConstraint.activate([space.heightAnchor.constraint(equalToConstant: 199 * scale),
-                    image.widthAnchor.constraint(equalTo: space.widthAnchor),
-                    image.heightAnchor.constraint(equalTo: space.heightAnchor, multiplier: 0.64),
-                    image.centerXAnchor.constraint(equalTo: space.centerXAnchor), image.centerYAnchor.constraint(equalTo: space.centerYAnchor)])
-                body.addArrangedSubview(space)
+            hero(196)
+            if let vendor = offer.vendor, !vendor.isEmpty {
+                let label = label(vendor, 15, bold: true)
+                label.textColor = UIColor(white: 0.73, alpha: 1)
+                body.addArrangedSubview(label)
             }
-            let title = UIStackView(arrangedSubviews: [label(offer.title, 23, bold: true)])
-            title.alignment = .center
-            if let logo = brand?.logoURL {
-                let image = photo(logo)
-                image.widthAnchor.constraint(equalToConstant: 54 * scale).isActive = true
-                image.heightAnchor.constraint(equalToConstant: 35 * scale).isActive = true
-                title.addArrangedSubview(image)
-            }
+            let title = label(offer.title, 30, bold: true)
+            title.numberOfLines = 2
             body.addArrangedSubview(title)
-            body.addArrangedSubview(label(price, 25, bold: true))
-            primary(text("Add product", "Añadir producto", "Adicionar produto")) { [weak self] in self?.go(.details) }
+            let available = offer.variants.filter(\.available)
+            let minimum = available.map(\.price).min() ?? variant.price
+            let from = available.contains { $0.price > minimum }
+            let previous = offer.previousPrice(for: variant)
+            let sameDiscount = !from && available.allSatisfy { offer.previousPrice(for: $0) == previous }
+            addPrice(minimum, from: from, previous: sameDiscount ? previous : nil)
+            if let description = offer.description {
+                let caption = label(description, 16)
+                caption.numberOfLines = 3
+                body.addArrangedSubview(caption)
+            }
+            if available.count > 1 {
+                let dimensions = offer.optionNames.compactMap { name -> String? in
+                    let values = Set(available.compactMap { $0.options.first { $0.name == name }?.value })
+                    return values.count > 1 ? "\(name) (\(values.count))" : nil
+                }
+                let summary = dimensions.isEmpty ? "\(available.count) " + text("variants", "variantes", "variantes") : dimensions.joined(separator: " · ")
+                let caption = label(summary, 14)
+                caption.numberOfLines = 2
+                caption.textColor = UIColor(white: 0.73, alpha: 1)
+                body.addArrangedSubview(caption)
+            }
+            let titleCTA = available.count > 1 ? text("Choose options", "Elegir opciones", "Escolher opções")
+                : text("View details", "Ver detalles", "Ver detalhes")
+            primary(titleCTA) { [weak self] in self?.go(.details) }
         case .details:
+            hero(134)
             if !gallery.isEmpty {
-                let preview = UIView()
-                preview.layer.borderWidth = scale
-                preview.layer.borderColor = ink.withAlphaComponent(0.8).cgColor
-                let image = photo(selectedPhoto, fallback: fallback)
-                image.translatesAutoresizingMaskIntoConstraints = false
-                preview.addSubview(image)
                 let showPhotos = button(text("View photo gallery", "Ver galería de fotos", "Ver galeria de fotos")) { [weak self] in
                     guard let self else { return }
                     self.galleryIndex = self.gallery.firstIndex(of: self.selectedPhoto) ?? 0
                     self.go(.gallery)
                 }
-                showPhotos.translatesAutoresizingMaskIntoConstraints = false
-                preview.addSubview(showPhotos)
-                NSLayoutConstraint.activate([preview.heightAnchor.constraint(equalToConstant: 142 * scale),
-                    image.centerXAnchor.constraint(equalTo: preview.centerXAnchor), image.centerYAnchor.constraint(equalTo: preview.centerYAnchor),
-                    image.widthAnchor.constraint(equalTo: preview.widthAnchor, multiplier: 0.72),
-                    image.heightAnchor.constraint(equalTo: preview.heightAnchor, multiplier: 0.8),
-                    showPhotos.trailingAnchor.constraint(equalTo: preview.trailingAnchor), showPhotos.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
-                    showPhotos.widthAnchor.constraint(lessThanOrEqualTo: preview.widthAnchor)])
-                body.addArrangedSubview(preview)
+                body.addArrangedSubview(showPhotos)
             }
-            body.addArrangedSubview(label(price, 20, bold: true))
-            if let description = offer.description { body.addArrangedSubview(label(description, 14)) }
+            addPrice(variant.price, previous: offer.previousPrice(for: variant))
+            if let description = offer.description {
+                let caption = label(description, 15)
+                caption.numberOfLines = 3
+                body.addArrangedSubview(caption)
+            }
             let names: [String?] = offer.optionNames.isEmpty ? [nil] : offer.optionNames.map(Optional.some)
             for name in names {
                 body.addArrangedSubview(label(name ?? text("Variant", "Variante", "Variante"), 16, bold: true))
-                let rail = TVOptionRail(choices: offer.choices(for: name, selected: selection), ink: ink, scale: scale) { [weak self] index in
+                let rail = TVOptionRail(choices: offer.choices(for: name, selected: selection), ink: ink, accent: focusAccent, scale: scale) { [weak self] index in
                     guard let self else { return }
                     self.selection = index
                     self.render()
@@ -354,17 +356,19 @@ final class TVCommercePanel: UIView {
                 rails.append(rail)
                 body.addArrangedSubview(rail)
             }
-            primary(text("Add to cart", "Añadir al carrito", "Adicionar ao carrinho"), enabled: variant.available) { [weak self] in self?.go(.cart) }
+            primary(text("Add to cart", "Agregar al carrito", "Adicionar ao carrinho"), enabled: variant.available) { [weak self] in self?.go(.cart) }
             if let rail = rails.first { focus = rail }
         case .gallery: renderGallery()
         case .cart:
             let row = UIStackView()
             row.spacing = 10 * scale
             row.alignment = .center
-            let thumb = photo(selectedPhoto, fallback: fallback)
-            thumb.widthAnchor.constraint(equalToConstant: 65 * scale).isActive = true
-            thumb.heightAnchor.constraint(equalToConstant: 60 * scale).isActive = true
-            row.addArrangedSubview(thumb)
+            if productPhoto.hasPhoto(for: variant) {
+                let thumb = selectedImageView()
+                thumb.widthAnchor.constraint(equalToConstant: 65 * scale).isActive = true
+                thumb.heightAnchor.constraint(equalToConstant: 60 * scale).isActive = true
+                row.addArrangedSubview(thumb)
+            }
             let lines = UIStackView(arrangedSubviews: [label(offer.title, 17, bold: true), label(selectionSummary, 15)])
             lines.axis = .vertical
             row.addArrangedSubview(lines)
@@ -375,7 +379,7 @@ final class TVCommercePanel: UIView {
             let total = UIStackView(arrangedSubviews: [label("Total", 21, bold: true), UIView(), label(price, 21, bold: true)])
             footer.addArrangedSubview(rule())
             footer.addArrangedSubview(total)
-            primary(text("Finish purchase", "Finalizar compra", "Finalizar compra")) { [weak self] in self?.startCheckout() }
+            primary(text("Continue to QR", "Continuar con el QR", "Continuar para o QR")) { [weak self] in self?.startCheckout() }
         case .qr:
             hero(135)
             body.addArrangedSubview(label(offer.title, 18, bold: true))
@@ -388,7 +392,7 @@ final class TVCommercePanel: UIView {
                 image.isAccessibilityElement = true
                 image.accessibilityLabel = text("Checkout QR code", "Código QR de compra", "Código QR de compra")
                 footer.addArrangedSubview(image)
-                footer.addArrangedSubview(label(text("Scan to complete your purchase", "Escaneá y finalizá la compra", "Escaneie e finalize a compra"), 16))
+                footer.addArrangedSubview(label(text("Scan to pay on Shopify", "Escaneá para pagar en Shopify", "Escaneie para pagar na Shopify"), 16))
             } else if failed {
                 body.addArrangedSubview(label(text("Could not prepare your cart", "No se pudo preparar el carrito", "Não foi possível preparar o carrinho"), 16))
                 primary(text("Retry", "Reintentar", "Tentar novamente")) { [weak self] in self?.startCheckout() }
@@ -401,6 +405,22 @@ final class TVCommercePanel: UIView {
         setNeedsFocusUpdate()
     }
 
+    private func addPrice(_ value: Decimal, from: Bool = false, previous: Decimal?) {
+        let amount = money.string(from: NSDecimalNumber(decimal: value)) ?? value.description
+        let prefix = from ? text("From", "Desde", "A partir de") + " " : ""
+        let row = UIStackView(arrangedSubviews: [label(prefix + amount, 23, bold: true)])
+        row.alignment = .firstBaseline
+        row.spacing = 10 * scale
+        if let previous, let formatted = money.string(from: NSDecimalNumber(decimal: previous)) {
+            let old = label(formatted, 15)
+            old.attributedText = NSAttributedString(string: formatted, attributes: [.strikethroughStyle: NSUnderlineStyle.single.rawValue])
+            old.textColor = UIColor(white: 0.71, alpha: 1)
+            row.addArrangedSubview(old)
+        }
+        row.addArrangedSubview(UIView())
+        body.addArrangedSubview(row)
+    }
+
     private func rule() -> UIView {
         let line = UIView()
         line.backgroundColor = ink.withAlphaComponent(0.65)
@@ -409,61 +429,50 @@ final class TVCommercePanel: UIView {
     }
 
     private func primary(_ title: String, enabled: Bool = true, _ handler: @escaping () -> Void) {
-        let control = button(title, action: handler)
+        let control = button(title, fill: UIColor(white: 0.96, alpha: 1), action: handler)
         control.isEnabled = enabled
-        let row = UIView()
-        control.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(control)
-        NSLayoutConstraint.activate([control.heightAnchor.constraint(equalToConstant: 46 * scale),
-            control.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: 0.8),
-            control.centerXAnchor.constraint(equalTo: row.centerXAnchor), control.topAnchor.constraint(equalTo: row.topAnchor),
-            control.bottomAnchor.constraint(equalTo: row.bottomAnchor)])
-        footer.addArrangedSubview(row)
+        control.heightAnchor.constraint(equalToConstant: 48 * scale).isActive = true
+        footer.addArrangedSubview(control)
         if enabled { focus = control }
     }
 
     private func renderGallery() {
         let images = gallery
         guard images.indices.contains(galleryIndex) else { return }
-        let strip = UIStackView()
-        strip.spacing = 14 * scale
-        strip.alignment = .center
-        func arrow(_ direction: Int) -> UIButton {
-            let move = button(direction < 0 ? "‹" : "›") { [weak self] in
-                guard let self else { return }
-                self.galleryIndex = (self.galleryIndex + direction + images.count) % images.count
-                self.render()
-                if let system = UIFocusSystem.focusSystem(for: self), let focus = self.focus {
-                    system.requestFocusUpdate(to: focus)
-                    system.updateFocusIfNeeded()
-                }
-            }
-            move.accessibilityLabel = direction < 0 ? text("Previous photo", "Foto anterior", "Foto anterior") : text("Next photo", "Foto siguiente", "Próxima foto")
-            move.widthAnchor.constraint(equalToConstant: 44 * scale).isActive = true
-            return move
-        }
-        if images.count > 1 { strip.addArrangedSubview(arrow(-1)) }
         let center = photo(images[galleryIndex], fallback: images[galleryIndex] == nil ? fallback : nil)
+        center.layer.cornerRadius = 10 * scale
+        center.backgroundColor = UIColor(white: 0.14, alpha: 1)
         center.isAccessibilityElement = true
         center.accessibilityLabel = text("Photo", "Foto", "Foto") + " \(galleryIndex + 1)/\(images.count)"
-        center.heightAnchor.constraint(equalToConstant: 305 * scale).isActive = true
-        strip.addArrangedSubview(center)
+        center.heightAnchor.constraint(equalToConstant: 245 * scale).isActive = true
+        body.addArrangedSubview(center)
         if images.count > 1 {
-            let left = (galleryIndex - 1 + images.count) % images.count
-            let right = (galleryIndex + 1) % images.count
-            let previous = photo(images[left], fallback: images[left] == nil ? fallback : nil)
-            let following = photo(images[right], fallback: images[right] == nil ? fallback : nil)
-            strip.insertArrangedSubview(previous, at: 1)
-            strip.addArrangedSubview(following)
-            for view in [previous, following] {
-                view.widthAnchor.constraint(equalTo: center.widthAnchor, multiplier: 0.65).isActive = true
-                view.heightAnchor.constraint(equalTo: center.heightAnchor, multiplier: 0.7).isActive = true
+            let controls = UIStackView()
+            controls.alignment = .center
+            controls.spacing = 12 * scale
+            func arrow(_ direction: Int) -> UIButton {
+                let move = button(direction < 0 ? "‹" : "›") { [weak self] in
+                    guard let self else { return }
+                    self.galleryIndex = (self.galleryIndex + direction + images.count) % images.count
+                    self.render()
+                    if let focus = self.focus, let system = UIFocusSystem.focusSystem(for: self) {
+                        system.requestFocusUpdate(to: focus)
+                        system.updateFocusIfNeeded()
+                    }
+                }
+                move.accessibilityLabel = direction < 0 ? text("Previous photo", "Foto anterior", "Foto anterior") : text("Next photo", "Foto siguiente", "Próxima foto")
+                move.widthAnchor.constraint(equalToConstant: 46 * scale).isActive = true
+                return move
             }
+            controls.addArrangedSubview(arrow(-1))
+            let count = label("\(galleryIndex + 1) / \(images.count)", 15)
+            count.textAlignment = .center
+            controls.addArrangedSubview(count)
             let next = arrow(1)
-            strip.addArrangedSubview(next)
+            controls.addArrangedSubview(next)
+            body.addArrangedSubview(controls)
             focus = next
         }
-        body.addArrangedSubview(strip)
         footer.addArrangedSubview(label(offer.title, 22, bold: true))
         footer.addArrangedSubview(label(price, 18, bold: true))
         if let description = offer.description {
@@ -498,13 +507,15 @@ final class TVCommercePanel: UIView {
 private final class TVOptionRail: UICollectionView, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
     private let choices: [OverlayCommerce.Choice]
     private let ink: UIColor
+    private let accent: UIColor
     private let scale: CGFloat
     private let choose: (Int) -> Void
     private var initialScroll = true
 
-    init(choices: [OverlayCommerce.Choice], ink: UIColor, scale: CGFloat, choose: @escaping (Int) -> Void) {
+    init(choices: [OverlayCommerce.Choice], ink: UIColor, accent: UIColor, scale: CGFloat, choose: @escaping (Int) -> Void) {
         self.choices = choices
         self.ink = ink
+        self.accent = accent
         self.scale = scale
         self.choose = choose
         let layout = UICollectionViewFlowLayout()
@@ -549,11 +560,13 @@ private final class TVOptionRail: UICollectionView, UICollectionViewDataSource, 
         cell.accessibilityTraits = [.button]
         if choice.selected { cell.accessibilityTraits.insert(.selected) }
         if choice.index == nil { cell.accessibilityTraits.insert(.notEnabled) }
-        cell.configurationUpdateHandler = { [ink, scale] view, state in
+        cell.configurationUpdateHandler = { [ink, accent, scale] view, state in
             view.contentView.backgroundColor = state.isFocused ? ink : (choice.selected ? ink.withAlphaComponent(0.28) : .clear)
             label.textColor = state.isFocused ? CommercePanel.readable(.black, on: ink, backdrop: .black) : ink
             view.layer.borderWidth = (state.isFocused ? 3 : 1) * scale
-            view.layer.borderColor = ink.cgColor
+            view.clipsToBounds = true
+            view.layer.cornerRadius = 10 * scale
+            view.layer.borderColor = state.isFocused ? accent.cgColor : ink.withAlphaComponent(0.45).cgColor
             view.alpha = choice.index == nil ? 0.42 : 1
         }
         cell.setNeedsUpdateConfiguration()

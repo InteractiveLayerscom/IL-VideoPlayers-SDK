@@ -68,7 +68,7 @@ El SDK hace un GET a `viewUrl` una vez por cue al abrir la ficha. En Roku, el ho
 
 El endpoint web debe permitir los orígenes habilitados mediante CORS, incluido el preflight de POST con `Content-Type: application/json`. Publicá la respuesta de sesión y los enlaces de compra por HTTPS. Las integraciones del SDK solo usan el contrato de anuncios. La sesión de checkout y las credenciales corresponden al backend.
 
-Las imágenes de la galería y `variants[].imageUrl` son opcionales. Cada combinación conserva su ID de Shopify, sus opciones, precio y disponibilidad. Las ofertas anteriores que solo incluyen `label` se muestran como una lista de variantes. La identidad visual de la tienda se entrega en `cue.brand` con `accent`, `background`, `foreground` y `logoUrl`.
+La portada de TV puede mostrar `vendor`, `description`, las opciones disponibles y el precio inicial del catálogo. La galería usa `images`. Las fotos de la ficha, el resumen y el pago siguen `variants[].imageUrl`, con la portada del producto como alternativa. Cada combinación conserva su ID de Shopify, opciones, precio y disponibilidad. `variants[].previousPrice` indica el precio anterior de ese SKU en la moneda del mercado. Las ofertas anteriores que solo incluyen `label` se muestran como una lista de variantes. La identidad visual de la tienda se entrega en `cue.brand` con `accent`, `background`, `foreground` y `logoUrl`.
 
 ### Tienda vinculada a un midroll
 

@@ -1,8 +1,6 @@
 package com.interactivelayers.overlay;
 
 import android.graphics.Bitmap;
-import android.graphics.Color;
-import android.graphics.drawable.StateListDrawable;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -35,11 +33,6 @@ final class TvShopView extends LinearLayout {
         this.host = host;
         setOrientation(VERTICAL);
         setClickable(true);
-    }
-
-    float fraction() {
-        if (stage == Stage.GALLERY) return 1;
-        return stage == Stage.COVER || stage == Stage.CART ? .41f : .36f;
     }
 
     private String l(String en, String es, String pt) { return host.l(en, es, pt); }
@@ -82,13 +75,13 @@ final class TvShopView extends LinearLayout {
         host.clearPhotos();
         removeAllViews();
         focus = null;
-        int tint = (host.background & 0xffffff) | 0xe0000000;
-        setPadding(dp(10), dp(7), dp(10), dp(8));
+        int tint = (host.background & 0xffffff) | 0xf5000000;
+        setPadding(dp(14), dp(9), dp(14), dp(10));
         setBackgroundColor(tint);
+        header();
         if (stage == Stage.GALLERY) {
             gallery();
         } else {
-            header();
             ScrollView scroll = new ScrollView(getContext());
             scroll.setFocusable(false);
             scroll.setSmoothScrollingEnabled(false);
@@ -101,16 +94,33 @@ final class TvShopView extends LinearLayout {
             switch (stage) {
                 case COVER:
                     hero(false);
-                    titleAndBrand(body);
-                    text(body, price(), 22, true);
-                    primary(l("Add product", "Añadir producto", "Adicionar produto"), () -> show(Stage.DETAIL), true);
+                    if (host.offer.vendor != null) text(body, host.offer.vendor, 13, false);
+                    text(body, host.offer.title, 20, true);
+                    boolean range = host.offer.minimumPrice.compareTo(host.offer.maximumPrice) != 0;
+                    String coverPrice = host.money.format(host.offer.minimumPrice);
+                    if (range) coverPrice += " – " + host.money.format(host.offer.maximumPrice);
+                    text(body, coverPrice, 22, true);
+                    if (!range) previousPrice();
+                    if (host.offer.description != null) {
+                        TextView description = host.label(host.offer.description, 14, false);
+                        description.setMaxLines(3);
+                        description.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                        body.addView(description, host.spaced(5));
+                    }
+                    if (host.offer.dimensions.size() > 1 && host.offer.availableCount > 1)
+                        text(body, android.text.TextUtils.join(" · ", host.offer.dimensions), 13, false);
+                    String action = host.offer.availableCount > 1 ? l("Choose options", "Elegir opciones", "Escolher opções")
+                            : l("View details", "Ver detalles", "Ver detalhes");
+                    primary(action, () -> show(Stage.DETAIL), true);
                     break;
                 case DETAIL:
                     hero(true);
+                    text(body, host.offer.title, 18, true);
                     text(body, price(), 17, true);
+                    previousPrice();
                     if (host.offer.description != null) text(body, host.offer.description, 13, false);
                     options();
-                    primary(l("Add to cart", "Añadir al carrito", "Adicionar ao carrinho"), () -> show(Stage.CART), available());
+                    primary(l("Add to cart", "Agregar al carrito", "Adicionar ao carrinho"), () -> show(Stage.CART), available());
                     break;
                 case CART:
                     cart();
@@ -130,37 +140,32 @@ final class TvShopView extends LinearLayout {
     private void header() {
         LinearLayout bar = host.row();
         addView(bar);
-        String title = stage == Stage.DETAIL ? host.offer.title
-                : stage == Stage.COVER ? host.copy[1] : l("Shopping cart", "Carrito de compras", "Carrinho de compras");
-        TextView heading = host.label(stage == Stage.COVER ? "" : title, 15, true);
-        heading.setGravity(Gravity.CENTER);
-        bar.addView(heading, new LayoutParams(0, -2, 1));
-        if (stage == Stage.DETAIL && host.brand != null && host.brand.logoUrl != null)
-            bar.addView(host.photo(host.brand.logoUrl, 100, false), new LayoutParams(dp(38), dp(26)));
         Button back = host.button("←", host::closeDetails, false);
-        back.setContentDescription(l("Back", "Volver", "Voltar"));
+        back.setContentDescription(l("Back", "Atrás", "Voltar"));
         bar.addView(back, new LayoutParams(dp(42), dp(32)));
+        String heading = stage == Stage.CART || stage == Stage.HANDOFF
+                ? l("Shopping cart", "Carrito de compras", "Carrinho de compras") : host.copy[1];
+        TextView title = host.label(heading, 14, true);
+        title.setGravity(Gravity.CENTER);
+        bar.addView(title, new LayoutParams(0, -2, 1));
+        if (host.brand != null && host.brand.logoUrl != null)
+            bar.addView(host.photo(host.brand.logoUrl, 160, false), new LayoutParams(dp(48), dp(28)));
         focus = back;
     }
 
-    private void titleAndBrand(LinearLayout section) {
-        LinearLayout line = host.row();
-        section.addView(line, host.spaced(6));
-        line.addView(host.label(host.offer.title, 18, true), new LayoutParams(0, -2, 1));
-        if (host.brand != null && host.brand.logoUrl != null)
-            line.addView(host.photo(host.brand.logoUrl, 160, false), new LayoutParams(dp(56), dp(30)));
+    private void previousPrice() {
+        java.math.BigDecimal price = host.offer.previousPrice(host.selection);
+        if (price == null) return;
+        TextView before = host.label(host.money.format(price), 13, false);
+        before.setPaintFlags(before.getPaintFlags() | android.graphics.Paint.STRIKE_THRU_TEXT_FLAG);
+        body.addView(before, host.spaced(2));
     }
 
     private void text(LinearLayout section, String value, int size, boolean bold) {
         section.addView(host.label(value, size, bold), host.spaced(4));
     }
 
-    private String currentPhoto() {
-        List<String> photos = host.gallery();
-        if (photos.isEmpty()) return null;
-        photoIndex = Math.max(0, Math.min(photoIndex, photos.size() - 1));
-        return photos.get(photoIndex);
-    }
+    private String productPhoto() { return host.offer.productPhoto(host.selection, host.photoUrl); }
 
     private int playerHeight() {
         View parent = (View) host.getParent();
@@ -168,14 +173,14 @@ final class TvShopView extends LinearLayout {
     }
 
     private void hero(boolean galleryLink) {
-        String url = currentPhoto();
+        String url = productPhoto();
         if (url == null && host.fallback == null) return;
         FrameLayout art = new FrameLayout(getContext());
-        int height = Math.round(playerHeight() * (stage == Stage.COVER ? .40f : .25f));
+        int height = Math.round(playerHeight() * (stage == Stage.COVER ? .33f : .25f));
         art.addView(host.photo(url, 720, true), new FrameLayout.LayoutParams(-1, -1));
         body.addView(art, new LayoutParams(-1, height));
         if (galleryLink) {
-            Button gallery = host.button(l("View gallery", "Ver galería de fotos", "Ver galeria de fotos"), () -> show(Stage.GALLERY), false);
+            Button gallery = host.button(l("View gallery", "Ver galería de fotos", "Ver galeria de fotos"), () -> { photoIndex = 0; show(Stage.GALLERY); }, false);
             gallery.setTextSize(12);
             art.addView(gallery, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT));
         }
@@ -208,7 +213,6 @@ final class TvShopView extends LinearLayout {
                 if (next < 0) return;
                 host.select(next);
                 focusDimension = dimension;
-                photoIndex = 0;
                 for (int d = dimension + 1; d < host.offer.dimensions.size(); d++) pages.remove(d);
                 render();
             }, false);
@@ -227,17 +231,8 @@ final class TvShopView extends LinearLayout {
 
     private void primary(String value, Runnable action, boolean enabled) {
         Button button = host.button(enabled ? value : l("Sold out", "Agotado", "Esgotado"), action, true);
-        int base = host.background;
-        int focusFill = Color.rgb((Color.red(base) * 85 + 255 * 15) / 100,
-                (Color.green(base) * 85 + 255 * 15) / 100, (Color.blue(base) * 85 + 255 * 15) / 100);
-        StateListDrawable edge = new StateListDrawable();
-        edge.addState(new int[]{android.R.attr.state_focused}, host.shape(focusFill, host.foreground, 2, 5));
-        edge.addState(new int[]{}, host.shape(Color.TRANSPARENT, host.foreground, 1, 5));
-        button.setBackground(edge);
-        button.setTextColor(host.foreground);
         button.setEnabled(enabled);
         LayoutParams params = host.spaced(6);
-        if (stage == Stage.COVER || stage == Stage.CART) params.setMargins(dp(12), dp(6), dp(12), dp(2));
         addView(button, params);
         if (enabled && stage != Stage.DETAIL) focus = button;
     }
@@ -245,7 +240,7 @@ final class TvShopView extends LinearLayout {
     private void cart() {
         LinearLayout item = host.row();
         body.addView(item, host.spaced(10));
-        item.addView(host.photo(currentPhoto(), 240, true), new LayoutParams(dp(60), dp(56)));
+        item.addView(host.photo(productPhoto(), 240, true), new LayoutParams(dp(60), dp(56)));
         LinearLayout detail = new LinearLayout(getContext());
         detail.setOrientation(VERTICAL);
         item.addView(detail, new LayoutParams(0, -2, 1));
@@ -256,7 +251,7 @@ final class TvShopView extends LinearLayout {
         addView(total, host.spaced(6));
         total.addView(host.label("Total", 17, true), new LayoutParams(0, -2, 1));
         total.addView(host.label(price(), 18, true));
-        primary(l("Checkout", "Finalizar compra", "Finalizar compra"), host::buy, available());
+        primary(l("Continue to QR", "Continuar con el QR", "Continuar com o QR"), host::buy, available());
     }
 
     private void handoffBody() {
@@ -277,7 +272,7 @@ final class TvShopView extends LinearLayout {
             focus = qr;
         }
         TextView message = host.label(code == null ? handoffMessage :
-                l("Scan to complete your purchase", "Escaneá y finalizá la compra", "Escaneie e finalize a compra"), 14, false);
+                host.copy[3], 14, false);
         message.setGravity(Gravity.CENTER);
         message.setAccessibilityLiveRegion(ACCESSIBILITY_LIVE_REGION_POLITE);
         body.addView(message, host.spaced(6));
@@ -285,39 +280,22 @@ final class TvShopView extends LinearLayout {
     }
 
     private void gallery() {
-        LinearLayout frame = new LinearLayout(getContext());
-        frame.setOrientation(VERTICAL);
-        frame.setPadding(dp(8), dp(6), dp(8), dp(6));
-        frame.setBackground(host.shape(Color.TRANSPARENT, host.foreground, 1, 12));
-        addView(frame, new LayoutParams(-1, -1));
-        LinearLayout top = host.row();
-        frame.addView(top);
-        Button exit = host.button(l("Exit", "Salir", "Sair"), () -> show(Stage.DETAIL), false);
-        top.addView(exit);
-        top.addView(new View(getContext()), new LayoutParams(0, 1, 1));
-        if (host.brand != null && host.brand.logoUrl != null)
-            top.addView(host.photo(host.brand.logoUrl, 180, false), new LayoutParams(dp(70), dp(30)));
-        LinearLayout strip = host.row();
-        frame.addView(strip, new LayoutParams(-1, 0, 1));
         List<String> photos = host.gallery();
+        String url = photos.isEmpty() ? null : photos.get(photoIndex);
+        addView(host.photo(url, 960, true), new LayoutParams(-1, 0, 1));
+        LinearLayout navigation = host.row();
+        navigation.setGravity(Gravity.CENTER);
+        addView(navigation, host.spaced(6));
         Button prev = arrow(false, photos.size()), next = arrow(true, photos.size());
-        strip.addView(prev, new LayoutParams(dp(42), -2));
-        for (int d = -1; d <= 1; d++) {
-            int i = photoIndex + d;
-            String url = i >= 0 && i < photos.size() ? photos.get(i) : null;
-            ImageView shot = host.photo(url, d == 0 ? 1280 : 320, d == 0);
-            LayoutParams width = new LayoutParams(0, -1, d == 0 ? 3 : 1);
-            strip.addView(shot, width);
-            if (d != 0) {
-                shot.setAlpha(.65f);
-                shot.setScaleX(.8f);
-                shot.setScaleY(.8f);
-            }
-        }
-        strip.addView(next, new LayoutParams(dp(42), -2));
-        text(frame, host.offer.title, 17, true);
-        text(frame, price(), 17, true);
-        focus = next.isEnabled() ? next : prev.isEnabled() ? prev : exit;
+        navigation.addView(prev, new LayoutParams(dp(42), -2));
+        TextView position = host.label((photoIndex + 1) + " / " + Math.max(1, photos.size()), 14, true);
+        position.setGravity(Gravity.CENTER);
+        navigation.addView(position, new LayoutParams(0, -2, 1));
+        navigation.addView(next, new LayoutParams(dp(42), -2));
+        text(this, host.offer.title, 17, true);
+        text(this, price(), 16, false);
+        if (next.isEnabled()) focus = next;
+        else if (prev.isEnabled()) focus = prev;
     }
 
     private Button arrow(boolean forward, int n) {

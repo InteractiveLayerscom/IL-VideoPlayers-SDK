@@ -51,16 +51,28 @@ sub setupShop(offer as Object)
         videoPath = createObject("roRegex", "\.(mp4|m3u8|mov|webm)([?#]|$)", "i")
         if shopImage(m.active.imageUrl, m.commerceHTTPS, videoPath) then addShopPhoto(m.active.imageUrl)
     end if
+    m.shopCoverPhoto = invalid
+    if m.shopPhotos.count() > 0 then m.shopCoverPhoto = m.shopPhotos[0]
+    m.shopAvailableCount = 0
+    m.shopLowPrice = offer.price
+    m.shopHighPrice = offer.price
     m.commerceChoice = 0
     found = false
     for i = 0 to offer.variants.count() - 1
         variant = offer.variants[i]
         addShopPhoto(variant.imageUrl)
+        if variant.available
+            price = shopPriceKey(variant.price)
+            if m.shopAvailableCount = 0 or price < shopPriceKey(m.shopLowPrice) then m.shopLowPrice = variant.price
+            if m.shopAvailableCount = 0 or price > shopPriceKey(m.shopHighPrice) then m.shopHighPrice = variant.price
+            m.shopAvailableCount += 1
+        end if
         if variant.available and not found
             found = true
             m.commerceChoice = i
         end if
     end for
+    m.shopDefaultChoice = m.commerceChoice
     m.shopPhotoIndex = 0
     selectShopVariant(m.commerceChoice)
 end sub
@@ -72,11 +84,15 @@ sub addShopPhoto(url as Dynamic)
     m.shopPhotos.push(url)
 end sub
 
+function shopProductPhoto(variant as Object) as Dynamic
+    if isText(variant.imageUrl) then return variant.imageUrl
+    return m.shopCoverPhoto
+end function
+
 sub selectShopVariant(index as Integer)
     variants = currentOffer().variants
     selected = variants[index]
     m.commerceChoice = index
-    if selected.imageUrl <> invalid then m.shopPhotoIndex = m.shopPhotoIds[selected.imageUrl]
     m.shopRows = []
     if m.shopAxes.count() = 0
         row = { name: m.commerceLabels.variant, values: [], candidates: [], focus: index, selected: index }

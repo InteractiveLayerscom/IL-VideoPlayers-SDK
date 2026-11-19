@@ -11,6 +11,7 @@ import android.graphics.Color;
 import android.util.LruCache;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.view.Gravity;
@@ -143,7 +144,7 @@ final class CommercePanel extends LinearLayout {
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         if (expanded) {
             int available = MeasureSpec.getSize(widthSpec);
-            int width = tv ? Math.round(available * shop.fraction())
+            int width = tv ? Math.round(available * .42f)
                     : Math.min(dp(390), Math.max(dp(258), Math.round(available * .39f)));
             widthSpec = MeasureSpec.makeMeasureSpec(Math.min(available, width), MeasureSpec.EXACTLY);
         }
@@ -277,9 +278,9 @@ final class CommercePanel extends LinearLayout {
         body.addView(label(offer.title, 20, true), spaced(6));
         LinearLayout hero = row();
         body.addView(hero, spaced(8));
-        List<String> gallery = gallery();
-        if (!gallery.isEmpty() || fallback != null) {
-            ImageView shot = photo(gallery.isEmpty() ? null : gallery.get(0), 160, true);
+        String photoUrl = offer.productPhoto(selection, this.photoUrl);
+        if (photoUrl != null || fallback != null) {
+            ImageView shot = photo(photoUrl, 160, true);
             LayoutParams thumb = new LayoutParams(dp(62), dp(62));
             thumb.rightMargin = dp(12);
             hero.addView(shot, thumb);
@@ -396,11 +397,22 @@ final class CommercePanel extends LinearLayout {
         int base = primary ? (accent != null ? accent : PRIMARY) : NEUTRAL;
         int selected = accent != null ? accent : SELECTED;
         int ink = primary && accent == null ? 0xff171717 : foreground;
-        int focus = readable(0xffffffff, base);
-        int selectedFocus = readable(0xffffffff, selected);
+        int ring = tv ? (accent != null ? accent : 0xffb4c6ff) : Color.WHITE;
+        int focus = readable(ring, base);
+        int selectedFocus = readable(ring, selected);
         StateListDrawable states = new StateListDrawable();
         states.addState(new int[]{android.R.attr.state_focused, android.R.attr.state_selected}, shape(selected, selectedFocus, 3, 7));
-        states.addState(new int[]{android.R.attr.state_focused}, shape(base, focus, 3, 7));
+        if (tv && primary) {
+            int halo = readable(ring, background);
+            LayerDrawable highlighted = new LayerDrawable(new android.graphics.drawable.Drawable[]{
+                    shape(halo, halo, 0, 9), shape(base, background, 2, 7)
+            });
+            int inset = dp(3);
+            highlighted.setLayerInset(1, inset, inset, inset, inset);
+            states.addState(new int[]{android.R.attr.state_focused}, highlighted);
+        } else {
+            states.addState(new int[]{android.R.attr.state_focused}, shape(base, focus, 3, 7));
+        }
         states.addState(new int[]{android.R.attr.state_pressed}, shape(selected, 0xffffffff, 2, 7));
         states.addState(new int[]{android.R.attr.state_selected}, shape(selected, 0xffaaaaaa, 1, 7));
         states.addState(new int[]{}, shape(base, primary ? base : EDGE, 1, 7));
@@ -418,14 +430,14 @@ final class CommercePanel extends LinearLayout {
         switch (locale) {
             case "es":
                 return new String[]{"Ver producto", "Producto", "Comprar",
-                        "Escaneá el código con tu celular", "Cerrar", "Preparando tu carrito…",
+                        "Escaneá para pagar en Shopify", "Cerrar", "Preparando tu carrito…",
                         "No se pudo preparar el carrito. Intentá de nuevo.", "Variante"};
             case "pt-BR":
                 return new String[]{"Ver produto", "Produto", "Comprar",
-                        "Escaneie com seu celular", "Fechar", "Preparando seu carrinho…",
+                        "Escaneie para pagar na Shopify", "Fechar", "Preparando seu carrinho…",
                         "Não foi possível preparar o carrinho. Tente novamente.", "Variante"};
             default:
-                return new String[]{"View product", "Product", "Buy", "Scan with your phone",
+                return new String[]{"View product", "Product", "Buy", "Scan to pay on Shopify",
                         "Close", "Preparing your cart…", "Could not prepare the cart. Try again.", "Variant"};
         }
     }

@@ -17,6 +17,9 @@ final class CommercePanel: UIView {
     private let choices = UIView()
     private let checkout = UIButton(type: .system)
     private let price = UILabel()
+    private let product = UIImageView()
+    private let summary = UIStackView()
+    private let selectedPhoto: SelectedProductPhoto
     private let status = UILabel()
     private let qr = UIImageView()
     private var chips: [UIButton] = []
@@ -42,9 +45,11 @@ final class CommercePanel: UIView {
     #endif
 
     init(_ offer: OverlayCommerce, photo: CGImage?, photoURL: URL? = nil, brand: SceneBrand? = nil,
-         midroll: Bool = false, handoff: OverlayCheckout = .shared, checkoutURL: ((URL) -> Void)?, closed: (() -> Void)? = nil, opened: @escaping () -> Void) {
+         midroll: Bool = false, imageLoader: @escaping (URL) async throws -> CGImage = OverlayArtwork.loadSceneImage,
+         handoff: OverlayCheckout = .shared, checkoutURL: ((URL) -> Void)?, closed: (() -> Void)? = nil, opened: @escaping () -> Void) {
         self.offer = offer
         self.handoff = handoff
+        selectedPhoto = SelectedProductPhoto(coverURL: offer.imageURL ?? photoURL, bitmap: photo, load: imageLoader)
         onClose = closed
         let background = UIColor.sceneColor(brand?.background) ?? Self.gray(0x20)
         foreground = Self.readable(UIColor.sceneColor(brand?.foreground) ?? .white, on: background, backdrop: nil)
@@ -92,8 +97,6 @@ final class CommercePanel: UIView {
         let name = label(offer.title, size: 19, weight: .bold)
         name.numberOfLines = 2
         body.addArrangedSubview(name)
-        let product = UIImageView(image: photo.map { UIImage(cgImage: $0) })
-        if let photoURL { loadPhoto(photoURL, into: product) }
         product.contentMode = .scaleAspectFit
         product.clipsToBounds = true
         product.backgroundColor = UIColor(red: 0.96, green: 0.95, blue: 0.93, alpha: 1)
@@ -104,8 +107,6 @@ final class CommercePanel: UIView {
         price.font = .systemFont(ofSize: 17 * unit, weight: .semibold)
         price.adjustsFontSizeToFitWidth = true
         price.minimumScaleFactor = 0.65
-        let summary = UIStackView()
-        if photo != nil || photoURL != nil { summary.addArrangedSubview(product) }
         summary.addArrangedSubview(price)
         summary.alignment = .center
         summary.spacing = 10 * unit
@@ -282,7 +283,14 @@ final class CommercePanel: UIView {
         selection = index
         for chip in chips { chip.isSelected = chip.tag == selection }
         checkout.isEnabled = offer.variants[selection].available
-        let value = offer.variants[index].price
+        let variant = offer.variants[index]
+        selectedPhoto.display(variant, in: product)
+        if selectedPhoto.hasPhoto(for: variant) {
+            if product.superview == nil { summary.insertArrangedSubview(product, at: 0) }
+        } else {
+            product.removeFromSuperview()
+        }
+        let value = variant.price
         price.text = money.string(from: NSDecimalNumber(decimal: value)) ?? value.description
         updateLayout()
         #if os(tvOS)
@@ -322,6 +330,7 @@ final class CommercePanel: UIView {
     }
 
     func dispose() {
+        selectedPhoto.cancel()
         for task in mediaTasks { task.cancel() }
         cancel()
         removeFromSuperview()

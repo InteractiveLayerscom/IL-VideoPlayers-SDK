@@ -1,4 +1,4 @@
-import { openTVShop } from './tv-shop.mjs';
+import { accentInk, openTVShop } from './tv-shop.mjs';
 
 export function isHttps(value) {
   if (typeof value !== 'string' || value.trim() !== value) return false;
@@ -44,6 +44,7 @@ export function normalizeCommerce(value) {
       ? variant.selectedOptions.map(({name, value}) => ({name, value})) : [];
     variants.push({ id: variant.id, label: variant.label, price: amount,
       ...(selectedOptions.length ? { selectedOptions } : {}),
+      ...(decimal(variant.previousPrice) ? { previousPrice: decimal(variant.previousPrice) } : {}),
       ...(typeof variant.availableForSale === 'boolean' ? { availableForSale: variant.availableForSale } : {}),
       ...(isHttps(variant.imageUrl) ? { imageUrl: variant.imageUrl } : {}),
     });
@@ -51,6 +52,7 @@ export function normalizeCommerce(value) {
   return {
     title: value.title, currency: value.currency, price, variants,
     locale: commerceLocale(value.locale), handoffUrl: value.handoffUrl,
+    ...(validText(value.vendor, 255) ? { vendor: value.vendor } : {}),
     ...(validText(value.description, 5000) ? { description: value.description } : {}),
     ...(isHttps(value.imageUrl) ? { imageUrl: value.imageUrl } : {}),
     ...(Array.isArray(value.images) ? { images: [...new Set(value.images.filter(isHttps))] } : {}),
@@ -68,13 +70,6 @@ export function normalizeBrand(value) {
   return Object.keys(brand).length ? brand : null;
 }
 
-function accentInk(hex) {
-  const [r, g, b] = [1, 3, 5].map(start => {
-    const value = parseInt(hex.slice(start, start + 2), 16) / 255;
-    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.179 ? '#000' : '#fff';
-}
 
 const copy = {
   en: ['View product', 'Product', 'Variant', 'Buy', 'Scan with your phone', 'Continue to Shopify',
@@ -201,13 +196,9 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     title.textContent = offer.title;
     const summary = doc.createElement('div');
     summary.className = 'il-commerce-summary';
-    const photoUrl = offer.imageUrl || cue.imageUrl;
-    if (photoUrl) {
-      const photo = doc.createElement('img');
-      photo.src = photoUrl;
-      photo.alt = '';
-      summary.appendChild(photo);
-    }
+    const cover = offer.imageUrl || offer.images?.[0] || (cue.format !== 'midroll' ? cue.imageUrl : null);
+    const photo = doc.createElement('img');
+    photo.alt = '';
     const price = doc.createElement('span');
     price.className = 'il-commerce-price';
     summary.appendChild(price);
@@ -253,6 +244,14 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     choices.append(...buttons);
 
     function updateChoice() {
+      const photoUrl = variant.imageUrl || cover;
+      if (photoUrl) {
+        if (photo.getAttribute('src') !== photoUrl) photo.src = photoUrl;
+        if (!photo.parentNode) summary.prepend(photo);
+      } else {
+        photo.remove();
+        photo.removeAttribute('src');
+      }
       price.textContent = money.format(Number(variant.price));
       buttons.forEach((element, index) => {
         element.disabled = offer.variants[index].availableForSale === false;

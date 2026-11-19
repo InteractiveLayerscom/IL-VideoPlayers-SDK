@@ -1,9 +1,35 @@
 // Shared by the player adapters and the creative editor's Smart TV simulator.
 const labels = {
-  es: ['Añadir producto', 'Añadir al carrito', 'Carrito de compras', 'Finalizar compra', 'Total', '1 unidad', 'Ver galería de fotos', 'Salir', 'Anterior', 'Siguiente', 'Escaneá y finalizá la compra', 'Volver', 'Preparando tu carrito…', 'No se pudo preparar el carrito.', 'Reintentar', 'Sin stock', 'Variante', 'Oferta'],
-  en: ['Add product', 'Add to cart', 'Shopping cart', 'Checkout', 'Total', '1 item', 'View photo gallery', 'Exit', 'Previous', 'Next', 'Scan to complete your purchase', 'Back', 'Preparing your cart…', 'Could not prepare the cart.', 'Retry', 'Out of stock', 'Variant', 'Offer'],
-  pt: ['Adicionar produto', 'Adicionar ao carrinho', 'Carrinho de compras', 'Finalizar compra', 'Total', '1 unidade', 'Ver galeria de fotos', 'Sair', 'Anterior', 'Próxima', 'Escaneie e finalize a compra', 'Voltar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho.', 'Tentar novamente', 'Sem estoque', 'Variante', 'Oferta'],
+  es: {
+    from:'Desde', intro:'Producto', detail:'Detalles', photos:'Fotos', cart:'Tu carrito', payment:'Pago con Shopify',
+    options:'Elegir opciones', details:'Ver detalles', add:'Agregar al carrito', checkout:'Continuar con el QR',
+    total:'Total', unit:'1 unidad', gallery:'Ver fotos', prev:'Anterior', next:'Siguiente',
+    scan:'Escaneá para pagar en Shopify', back:'Volver', loading:'Preparando tu carrito…',
+    failed:'No se pudo preparar el carrito.', retry:'Reintentar', soldOut:'Sin stock', variant:'Variante',
+  },
+  en: {
+    from:'From', intro:'Product', detail:'Details', photos:'Photos', cart:'Your cart', payment:'Shopify checkout',
+    options:'Choose options', details:'View details', add:'Add to cart', checkout:'Continue to QR',
+    total:'Total', unit:'1 item', gallery:'View photos', prev:'Previous', next:'Next',
+    scan:'Scan to pay on Shopify', back:'Back', loading:'Preparing your cart…',
+    failed:'Could not prepare the cart.', retry:'Retry', soldOut:'Out of stock', variant:'Variant',
+  },
+  pt: {
+    from:'A partir de', intro:'Produto', detail:'Detalhes', photos:'Fotos', cart:'Seu carrinho', payment:'Pagamento na Shopify',
+    options:'Escolher opções', details:'Ver detalhes', add:'Adicionar ao carrinho', checkout:'Continuar com o QR',
+    total:'Total', unit:'1 unidade', gallery:'Ver fotos', prev:'Anterior', next:'Próxima',
+    scan:'Escaneie para pagar na Shopify', back:'Voltar', loading:'Preparando seu carrinho…',
+    failed:'Não foi possível preparar o carrinho.', retry:'Tentar novamente', soldOut:'Sem estoque', variant:'Variante',
+  },
 };
+
+export function accentInk(hex) {
+  const [r, g, b] = [1, 3, 5].map(start => {
+    const value = parseInt(hex.slice(start, start + 2), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.179 ? '#000' : '#fff';
+}
 
 export function productOptions(variants) {
   const axes = new Map();
@@ -27,14 +53,19 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   const doc = stage.ownerDocument;
   const focusRoot = stage.getRootNode();
   brand = brand ?? {};
-  const [addProduct, addCart, cartTitle, finish, total, unit, galleryTitle, exit, prev, next, scan, backLabel, loading, failed, retry, soldOut, variantLabel, promo] =
-    labels[locale.toLowerCase().split('-')[0]] ?? labels.en;
+  const copy = labels[locale.toLowerCase().split('-')[0]] ?? labels.en;
   const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency || 'USD' });
   const variants = offer.variants;
   let selected = variants.find(v => v.availableForSale !== false) ?? variants[0];
   const axes = productOptions(variants);
   const photos = [...new Set([offer.imageUrl, ...(offer.images ?? []), ...variants.map(v => v.imageUrl)].filter(Boolean))];
-  let index = Math.max(0, photos.indexOf(selected?.imageUrl));
+  const availableVariants = variants.filter(v => v.availableForSale !== false);
+  const amounts = availableVariants.map(variant => Number(variant.price));
+  const lowestPrice = Math.min(...amounts);
+  const hasPriceRange = amounts.length > 1 && Math.max(...amounts) > lowestPrice;
+  const optionSummary = productOptions(availableVariants).filter(axis => axis.values.length > 1);
+  const selectedPhoto = () => selected?.imageUrl || offer.imageUrl || offer.images?.[0];
+  let index = 0, galleryOrigin = 'detail';
   let page = 'intro', qr = '', error = false, pending, disposed = false;
   const previous = focusRoot.activeElement;
   const root = node('div', 'il-tv-shop');
@@ -43,6 +74,7 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   for (const key of ['background', 'foreground', 'accent']) {
     if (/^#[0-9a-f]{6}$/i.test(brand[key])) root.style.setProperty('--shop-' + key, brand[key]);
   }
+  if (/^#[0-9a-f]{6}$/i.test(brand.accent)) root.style.setProperty('--shop-accent-ink', accentInk(brand.accent));
   stage.appendChild(root);
 
   function node(tag, cls, value) {
@@ -87,7 +119,7 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   function back() {
     if (page === 'intro') close();
     else if (page === 'detail') go('intro', 'detail');
-    else if (page === 'gallery') go('detail', 'gallery');
+    else if (page === 'gallery') go(galleryOrigin, 'gallery');
     else if (page === 'cart') go('detail', 'cart');
     else go('cart', 'finish');
   }
@@ -97,18 +129,21 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   }
   function selectVariant(item, key) {
     selected = item;
-    if (item.imageUrl) index = Math.max(0, photos.indexOf(item.imageUrl));
     render(key);
+  }
+  function openGallery() {
+    galleryOrigin = page;
+    index = Math.max(0, photos.indexOf(selectedPhoto()));
+    go('gallery');
   }
   function changePhoto(step) {
     index = (index + step + photos.length) % photos.length;
     render(step < 0 ? 'prev' : 'next');
   }
   function addOptions(body) {
-    const available = variants.filter(v => v.availableForSale !== false);
     if (variants.length === 1 && variants[0].label === 'Default Title') return;
     if (!axes.length) {
-      body.append(node('h4', '', variantLabel));
+      body.append(node('h4', '', copy.variant));
       const group = row();
       variants.forEach((v, i) => {
         const key = 'variant-' + i;
@@ -121,7 +156,7 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       return;
     }
     const valueOf = (v, name) => v?.selectedOptions?.find(pair => pair.name === name)?.value;
-    let prefix = available;
+    let prefix = availableVariants;
     axes.forEach(({ name, values }, axisIndex) => {
       body.append(node('h4', '', name));
       const group = row();
@@ -169,68 +204,112 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
     root.dataset.page = page;
     root.replaceChildren(pane);
     const header = node('header', 'il-tv-header');
-    header.append(button('‹', back, 'back', 'il-tv-back', backLabel));
-    const heading = node('h3', '', page === 'cart' || page === 'qr' ? cartTitle : page === 'detail' ? offer.title : '');
-    if (heading.textContent) header.append(heading);
+    const headings = {intro:copy.intro, detail:copy.detail, gallery:copy.photos, cart:copy.cart, qr:copy.payment};
+    header.append(button('‹', back, 'back', 'il-tv-back', copy.back), node('h3', '', headings[page]));
     if (brand.logoUrl) header.append(photo(brand.logoUrl, 'il-tv-logo'));
     const body = node('div', 'il-tv-body');
     const footer = node('footer', 'il-tv-footer');
     pane.append(header, body, footer);
-    function primary(title, action, id, enabled = true) {
+
+    const available = !!selected && selected.availableForSale !== false;
+    function mainButton(title, action, id, enabled = true) {
       const control = button(title, action, id, 'il-tv-primary');
       control.disabled = !enabled;
-      footer.append(control);
+      return control;
     }
-    function hero() { if (photos[index]) body.append(photo(photos[index], 'il-tv-hero', offer.title)); }
-    const available = !!selected && selected.availableForSale !== false;
+    function showPrice(parent) {
+      const prices = node('div', 'il-tv-prices');
+      if (page === 'intro' && hasPriceRange) {
+        prices.append(node('span', 'il-tv-from', copy.from), node('strong', 'il-tv-price', money.format(lowestPrice)));
+        parent.append(prices);
+        return;
+      }
+      prices.append(node('strong', 'il-tv-price', price()));
+      const baseBefore = selected === availableVariants[0] && Number(offer.price) === Number(selected?.price) ? offer.previousPrice : undefined;
+      const priceBefore = selected?.previousPrice ?? baseBefore;
+      if (Number(priceBefore) > Number(selected?.price ?? offer.price)) {
+        prices.append(node('del', '', money.format(Number(priceBefore))));
+      }
+      parent.append(prices);
+    }
+    function showHero(parent) {
+      const url = selectedPhoto();
+      if (!url) return;
+      const art = node('div', 'il-tv-art');
+      const backdrop = photo(url, 'il-tv-art-backdrop');
+      backdrop.setAttribute('aria-hidden', 'true');
+      art.append(backdrop, photo(url, 'il-tv-hero', offer.title));
+      parent.append(art);
+    }
+    function showItem() {
+      const line = node('div', 'il-tv-line');
+      if (selectedPhoto()) line.append(photo(selectedPhoto(), 'il-tv-thumb'));
+      const detail = node('div');
+      detail.append(node('strong', '', offer.title));
+      if (selected?.label && selected.label !== 'Default Title') detail.append(node('p', '', selected.label));
+      detail.append(node('small', '', copy.unit));
+      line.append(detail);
+      body.append(line);
+    }
     if (page === 'intro') {
-      hero();
+      showHero(body);
       const info = node('div', 'il-tv-intro-info');
-      if (Number(offer.previousPrice) > Number(selected?.price ?? offer.price)) info.append(node('small', '', promo));
+      if (offer.vendor) info.append(node('span', 'il-tv-vendor', offer.vendor));
       info.append(node('h2', '', offer.title));
-      if (Number(offer.previousPrice) > Number(selected?.price ?? offer.price)) info.append(node('del', '', money.format(Number(offer.previousPrice))));
-      info.append(node('strong', 'il-tv-price', price()));
+      showPrice(info);
+      if (offer.description) info.append(node('p', 'il-tv-description', offer.description));
+      if (optionSummary.length) {
+        const facts = node('dl', 'il-tv-facts');
+        for (const {name, values} of optionSummary) {
+          const text = values.slice(0, 3).join(' · ') + (values.length > 3 ? '  +' + (values.length - 3) : '');
+          facts.append(node('dt', '', name), node('dd', '', text));
+        }
+        info.append(facts);
+      }
       body.append(info);
-      primary(available ? addProduct : soldOut, () => go('detail'), 'detail', available);
+      const nextStep = availableVariants.length > 1 ? copy.options : copy.details;
+      const actions = row(mainButton(available ? nextStep : copy.soldOut, () => go('detail'), 'detail', available));
+      actions.classList.add('il-tv-actions');
+      if (photos.length > 1) actions.append(button(copy.gallery, openGallery, 'gallery', 'il-tv-secondary'));
+      footer.append(actions);
     } else if (page === 'detail') {
       if (photos.length > 1) {
-        const view = button('', () => go('gallery'), 'gallery', 'il-tv-gallery-open');
-        view.append(photo(photos[index], 'il-tv-hero', offer.title), node('span', '', galleryTitle));
+        const view = button('', openGallery, 'gallery', 'il-tv-gallery-open', copy.gallery);
+        showHero(view);
+        view.append(node('span', '', copy.gallery));
         body.append(view);
-      } else hero();
-      body.append(node('strong', 'il-tv-price', price()));
-      if (offer.description) body.append(node('p', '', offer.description));
+      } else showHero(body);
+      body.append(node('h2', '', offer.title));
+      showPrice(body);
       addOptions(body);
-      primary(available ? addCart : soldOut, () => go('cart'), 'cart', available);
+      footer.append(mainButton(available ? copy.add : copy.soldOut, () => go('cart'), 'cart', available));
     } else if (page === 'gallery') {
-      header.firstChild.textContent = '‹ ' + exit;
       const slides = node('div', 'il-tv-slides');
-      const slide = offset => photo(photos[(index + offset + photos.length) % photos.length], offset ? 'il-tv-side' : 'il-tv-feature', offset ? '' : offer.title);
-      slides.append(button('‹', () => changePhoto(-1), 'prev', 'il-tv-gallery-arrow', prev), slide(-1), slide(0), slide(1), button('›', () => changePhoto(1), 'next', 'il-tv-gallery-arrow', next));
-      body.append(slides);
-      footer.append(node('small', '', (index + 1) + ' / ' + photos.length), node('h2', '', offer.title), node('strong', '', price()));
-      if (offer.description) footer.append(node('p', '', offer.description));
+      slides.append(photo(photos[index], 'il-tv-feature', offer.title));
+      body.append(slides, node('h2', '', offer.title));
+      const controls = row(button('‹', () => changePhoto(-1), 'prev', 'il-tv-gallery-arrow', copy.prev),
+        node('span', 'il-tv-counter', (index + 1) + ' / ' + photos.length),
+        button('›', () => changePhoto(1), 'next', 'il-tv-gallery-arrow', copy.next));
+      footer.append(controls);
     } else if (page === 'cart') {
-      const line = node('div', 'il-tv-line');
-      if (photos[index]) line.append(photo(photos[index], 'il-tv-thumb'));
-      const detail = node('div');
-      detail.append(node('strong', '', offer.title), node('p', '', selected?.label));
-      line.append(detail, node('small', '', unit)); body.append(line);
-      if (brand.logoUrl) body.append(photo(brand.logoUrl, 'il-tv-cart-logo'));
+      showItem();
       const sum = node('div', 'il-tv-total');
-      sum.append(node('strong', '', total), node('strong', '', price()));
-      footer.append(sum); primary(finish, checkout, 'finish');
+      sum.append(node('strong', '', copy.total), node('strong', '', price()));
+      footer.append(sum, mainButton(copy.checkout, checkout, 'finish'));
     } else {
-      hero(); body.append(node('h2', '', offer.title), node('strong', '', price() + ' · ' + (selected?.label ?? '')));
+      showItem();
+      const sum = node('div', 'il-tv-total');
+      sum.append(node('strong', '', copy.total), node('strong', '', price()));
+      body.append(sum);
       const status = node('div', 'il-tv-status');
       status.setAttribute('aria-live', 'polite');
       if (qr) {
-        const img = photo(qr, 'il-tv-qr', scan);
+        const img = photo(qr, 'il-tv-qr', copy.scan);
         img.addEventListener('error', () => { if (img.isConnected) { qr = ''; error = true; render('retry'); } }, {once: true});
-        status.append(img, node('p', '', scan));
-      } else status.append(node('p', '', error ? failed : loading));
-      footer.append(status);
-      if (error) primary(retry, checkout, 'retry');
+        status.append(img, node('p', '', copy.scan));
+      } else status.append(node('p', '', error ? copy.failed : copy.loading));
+      body.append(status);
+      if (error) footer.append(mainButton(copy.retry, checkout, 'retry'));
     }
     const selection = pane.querySelector('[aria-pressed="true"]:not(:disabled)')?.dataset.shopKey;
     focusKey(key ?? ({intro:'detail', detail:selection ?? 'cart', cart:'finish', gallery:'next', qr:'back'})[page]);

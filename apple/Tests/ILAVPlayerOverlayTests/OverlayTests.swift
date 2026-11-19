@@ -77,6 +77,18 @@ final class OverlayTests: XCTestCase {
         XCTAssertTrue(sizes[1].selected)
     }
 
+    func testPreviousPriceBelongsToTheSelectedSKUOrAnEqualBasePrice() throws {
+        let json = """
+        {"title":"Shoes","price":"10","previousPrice":"15","currency":"USD",
+         "variants":[{"id":"a","label":"Base"},{"id":"b","label":"Other","price":"12"},
+                     {"id":"c","label":"Specific","price":"12","previousPrice":"18"},
+                     {"id":"d","label":"No discount","previousPrice":"9"}],
+         "handoffUrl":"https://shop.example/cart"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        XCTAssertEqual(offer.variants.map { offer.previousPrice(for: $0) }, [15, nil, 18, nil])
+    }
+
     func testLongUnicodeShopifyOptionsPreserveTheProductAndItsThreeAxes() throws {
         let axis = String(repeating: "色", count: 512)
         let values = ["緑", "綿", "藍"].map { String(repeating: $0, count: 512) }

@@ -173,7 +173,7 @@ final class UIKitSurfaceTests: XCTestCase {
         defer { tv.dispose() }
         tv.frame = tv.presentationFrame(in: screen)
         tv.layoutIfNeeded()
-        try XCTUnwrap(descendants(of: tv, type: UIButton.self).first { $0.configuration?.title == "Add product" })
+        try XCTUnwrap(descendants(of: tv, type: UIButton.self).first { $0.configuration?.title == "Choose options" })
             .sendActions(for: .primaryActionTriggered)
         tv.frame = tv.presentationFrame(in: screen)
         tv.layoutIfNeeded()
@@ -237,12 +237,114 @@ final class UIKitSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testMissingVariantImageKeepsTheProductCoverOnTVEvenWithAGallery() async throws {
+        let json = """
+        {"title":"Shoes","price":"10","currency":"USD","images":["https://photos.example/other-color"],
+         "variants":[{"id":"v44","label":"44"}],"handoffUrl":"https://checkout-fixture.invalid/tv"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        let cover = try bitmap(.white), gallery = try bitmap(.red)
+        var requests = 0
+        let panel = TVCommercePanel(offer, photo: cover, imageLoader: { _ in requests += 1; return gallery },
+                                    checkoutURL: nil, closed: {}) {}
+        defer { panel.dispose() }
+        let anotherTurn = expectation(description: "Pending image work has started")
+        Task { @MainActor in anotherTurn.fulfill() }
+        await fulfillment(of: [anotherTurn], timeout: 2)
+        XCTAssertEqual(requests, 0)
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === cover })
+    }
+
+    @MainActor
+    func testSpanishCoverUsesTheCheapestAvailableSKUAndSingleChoiceKeepsItsOwnDiscount() throws {
+        let json = """
+        {"title":"Prenda","locale":"es","price":"90","previousPrice":"110","currency":"USD",
+         "variants":[{"id":"m","label":"M"},{"id":"s","label":"S","price":"40","availableForSale":true},
+                     {"id":"x","label":"XS","price":"5","availableForSale":false}],"handoffUrl":"https://shop.example/cart"}
+        """
+        for multiple in [true, false] {
+            let data = Data((multiple ? json : json.replacingOccurrences(of: "true", with: "false")).utf8)
+            let offer = try JSONDecoder().decode(OverlayCommerce.self, from: data)
+            let panel = TVCommercePanel(offer, photo: nil, checkoutURL: nil, closed: {}) {}
+            let labels = descendants(of: panel, type: UILabel.self).compactMap(\.text)
+            let action = multiple ? "Elegir opciones" : "Ver detalles"
+            XCTAssertTrue(descendants(of: panel, type: UIButton.self).contains { $0.configuration?.title == action })
+            XCTAssertEqual(labels.contains { $0.hasPrefix("Desde ") && $0.contains("40,00") }, multiple)
+            XCTAssertEqual(labels.contains { $0.contains("110,00") }, !multiple)
+            panel.dispose()
+        }
+    }
+
+    @MainActor
+    private func waitForPhoto(_ image: CGImage, in panel: UIView) async {
+        let appears = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                self.descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === image }
+            }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [appears], timeout: 3)
+    }
+
+    @MainActor
+    func testMobileUsesSKUPhotosPreservesSharedSizesAndDropsLateResponses() async throws {
+        let json = """
+        {"title":"Shoes","price":"10","currency":"USD","imageUrl":"https://photos.example/cover",
+         "images":["https://photos.example/gallery"],
+         "variants":[{"id":"r1","label":"Red S","imageUrl":"https://photos.example/red"},
+                     {"id":"r2","label":"Red M","imageUrl":"https://photos.example/red"},
+                     {"id":"b","label":"Blue","imageUrl":"https://photos.example/blue"},
+                     {"id":"w","label":"White"}],"handoffUrl":"https://checkout-fixture.invalid/tv"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        let red = try bitmap(.red), blue = try bitmap(.blue), cover = try bitmap(.white)
+        let blueStarted = expectation(description: "Blue image is loading")
+        let blueFinished = expectation(description: "Late blue response was delivered")
+        var releaseBlue: CheckedContinuation<Void, Never>?
+        var requests: [String] = []
+        let panel = CommercePanel(offer, photo: nil, imageLoader: { url in
+            requests.append(url.lastPathComponent)
+            if url.lastPathComponent == "blue" {
+                await withCheckedContinuation { releaseBlue = $0; blueStarted.fulfill() }
+                blueFinished.fulfill()
+                return blue
+            }
+            return url.lastPathComponent == "red" ? red : cover
+        }, checkoutURL: nil, closed: {}) {}
+        defer { panel.dispose() }
+        func select(_ title: String) throws {
+            try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == title })
+                .sendActions(for: .primaryActionTriggered)
+        }
+        await waitForPhoto(red, in: panel)
+        try select("Red M")
+        XCTAssertEqual(requests, ["red"])
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === red })
+        try select("Blue")
+        await fulfillment(of: [blueStarted], timeout: 3)
+        XCTAssertFalse(descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === red })
+        try select("White")
+        await waitForPhoto(cover, in: panel)
+        releaseBlue?.resume()
+        await fulfillment(of: [blueFinished], timeout: 3)
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === cover })
+        XCTAssertEqual(requests, ["red", "blue", "cover"])
+    }
+
+    @MainActor
+    private func bitmap(_ color: UIColor) throws -> CGImage {
+        try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 6, height: 6)).image { context in
+            color.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 6, height: 6))
+        }.cgImage)
+    }
+
+    @MainActor
     func testTelevisionGalleryOptionsCartAndQRUseTheSelectedSKU() async throws {
         let json = """
-        {"title":"Shoes","price":"45","currency":"USD","description":"Canvas shoes",
+        {"title":"Shoes","vendor":"Maker","previousPrice":"60","price":"45","currency":"USD","description":"Canvas shoes",
          "imageUrl":"https://images.example/first.png","images":["https://images.example/other.png"],
          "variants":[{"id":"42","label":"42","selectedOptions":[{"name":"Size","value":"42"}]},
-                     {"id":"v44","label":"44","price":"52","selectedOptions":[{"name":"Size","value":"44"}]}],
+                     {"id":"v44","label":"44","price":"52","imageUrl":"https://images.example/blue.png","selectedOptions":[{"name":"Size","value":"44"}]}],
          "handoffUrl":"https://checkout-fixture.invalid/tv"}
         """
         let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
@@ -251,40 +353,61 @@ final class UIKitSurfaceTests: XCTestCase {
         config.protocolClasses = [ShopifyFixture.self]
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
-        let bitmap = try XCTUnwrap(UIGraphicsImageRenderer(size: .init(width: 6, height: 6)).image { _ in }.cgImage)
+        let cover = try bitmap(.white), blue = try bitmap(.blue), gallery = try bitmap(.red)
         var opened = 0, closed = 0
-        let panel = TVCommercePanel(offer, photo: nil, imageLoader: { _ in bitmap }, handoff: OverlayCheckout(session: session), checkoutURL: { _ in
+        let panel = TVCommercePanel(offer, photo: nil, imageLoader: { url in
+            switch url.lastPathComponent { case "blue.png": return blue; case "other.png": return gallery; default: return cover }
+        }, handoff: OverlayCheckout(session: session), checkoutURL: { _ in
             XCTFail("TV must show the QR")
         }, closed: { closed += 1 }) { opened += 1 }
         defer { panel.dispose() }
         let screen = CGRect(x: 0, y: 0, width: 1024, height: 576)
+        let sidebar = CGRect(x: screen.width * 0.58, y: 0, width: screen.width * 0.42, height: screen.height)
         func tap(_ name: String) throws {
             panel.frame = panel.presentationFrame(in: screen)
+            XCTAssertEqual(panel.frame.minX, sidebar.minX, accuracy: 0.001)
+            XCTAssertEqual(panel.frame.width, sidebar.width, accuracy: 0.001)
             panel.layoutIfNeeded()
             try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == name }).sendActions(for: .primaryActionTriggered)
         }
-        try tap("Add product")
+        let coverLabels = descendants(of: panel, type: UILabel.self)
+        XCTAssertTrue(coverLabels.contains { $0.text == "Maker" })
+        XCTAssertTrue(coverLabels.contains { $0.text == "Canvas shoes" })
+        XCTAssertTrue(coverLabels.contains { $0.text?.hasPrefix("From ") == true && $0.text?.contains("45.00") == true })
+        XCTAssertFalse(coverLabels.contains { $0.text?.contains("60.00") == true })
+        try tap("Choose options")
+        XCTAssertTrue(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("60.00") == true })
         try tap("View photo gallery")
-        XCTAssertEqual(panel.presentationFrame(in: screen), screen)
+        XCTAssertEqual(panel.presentationFrame(in: screen).width, sidebar.width, accuracy: 0.001)
         XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 1/2" })
         try tap("›")
         XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 2/2" })
-        try tap("Exit")
+        XCTAssertTrue(panel.closeDetails())
         let rail = try XCTUnwrap(descendants(of: panel, type: UICollectionView.self).first)
         rail.delegate?.collectionView?(rail, didSelectItemAt: IndexPath(item: 1, section: 0))
+        await waitForPhoto(blue, in: panel)
+        XCTAssertFalse(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("60.00") == true })
+        try tap("View photo gallery")
+        try tap("›")
+        await waitForPhoto(cover, in: panel)
+        XCTAssertTrue(panel.closeDetails())
+        await waitForPhoto(blue, in: panel)
         try tap("Add to cart")
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === blue })
         XCTAssertTrue(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("52.00") == true })
         XCTAssertEqual(ShopifyFixture.tvCheckoutCount, requestsBefore)
-        try tap("Finish purchase")
+        try tap("Continue to QR")
         let loaded = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated {
                 self.descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Checkout QR code" && $0.image != nil }
             }
         }, evaluatedWith: nil)
         await fulfillment(of: [loaded], timeout: 5)
+        XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.image?.cgImage === blue })
+        XCTAssertTrue(descendants(of: panel, type: UILabel.self).contains { $0.text == "Scan to pay on Shopify" })
         XCTAssertEqual(ShopifyFixture.tvCheckoutCount, requestsBefore + 1)
         XCTAssertTrue(panel.closeDetails())
-        XCTAssertTrue(descendants(of: panel, type: UIButton.self).contains { $0.configuration?.title == "Finish purchase" })
+        XCTAssertTrue(descendants(of: panel, type: UIButton.self).contains { $0.configuration?.title == "Continue to QR" })
         XCTAssertTrue(panel.closeDetails())
         XCTAssertTrue(panel.closeDetails())
         XCTAssertTrue(panel.closeDetails())

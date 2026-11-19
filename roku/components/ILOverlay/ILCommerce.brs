@@ -33,6 +33,7 @@ function normalizeCommerce(item as Dynamic, https as Object) as Dynamic
     if item.variants.count() < 1 or item.variants.count() > 2048 then return invalid
     result = { title: item.title, currency: item.currency, locale: commerceLocale(item.locale),
                handoffUrl: item.handoffUrl, price: price, variants: [] }
+    if commerceText(item.vendor, 512) then result.vendor = item.vendor
     if commerceText(item.description, 5000) then result.description = item.description
     result.previousPrice = commercePrice(item.previousPrice, decimal)
     videoPath = createObject("roRegex", "\.(mp4|m3u8|mov|webm)([?#]|$)", "i")
@@ -57,6 +58,7 @@ function normalizeCommerce(item as Dynamic, https as Object) as Dynamic
         if type(variant.availableForSale) = "roBoolean" or type(variant.availableForSale) = "Boolean"
             row.available = variant.availableForSale
         end if
+        row.previousPrice = commercePrice(variant.previousPrice, decimal)
         if shopImage(variant.imageUrl, https, videoPath) then row.imageUrl = variant.imageUrl
         row.options = []
         if type(variant.selectedOptions) = "roArray"
@@ -86,16 +88,16 @@ end function
 function commerceCopy(locale as String) as Object
     if locale = "es"
         return { trigger: "OK · Ver producto", heading: "Producto", variant: "Variante", buy: "Comprar", close: "Cerrar",
-            addProduct: "Añadir producto", addCart: "Añadir al carrito", cart: "Carrito de compras", finish: "Finalizar compra", gallery: "Ver galería de fotos", back: "Volver", total: "Total", unit: "1 unidad", was: "Antes", unavailable: "Sin stock", retry: "Reintentar",
-            scan: "Escaneá y finalizá la compra", preparing: "Preparando tu carrito…", failed: "No se pudo preparar el carrito. Intentá de nuevo." }
+            options: "Elegir opciones", details: "Ver detalles", addCart: "Agregar al carrito", cart: "Carrito de compras", finish: "Continuar con el QR", gallery: "Ver galería de fotos", back: "Volver", total: "Total", unit: "1 unidad", was: "Antes", unavailable: "Sin stock", retry: "Reintentar",
+            scan: "Escaneá para pagar en Shopify", preparing: "Preparando tu carrito…", failed: "No se pudo preparar el carrito. Intentá de nuevo." }
     else if locale = "pt-BR"
         return { trigger: "OK · Ver produto", heading: "Produto", variant: "Variante", buy: "Comprar", close: "Fechar",
-            addProduct: "Adicionar produto", addCart: "Adicionar ao carrinho", cart: "Carrinho de compras", finish: "Finalizar compra", gallery: "Ver galeria de fotos", back: "Voltar", total: "Total", unit: "1 unidade", was: "Antes", unavailable: "Sem estoque", retry: "Tentar novamente",
-            scan: "Escaneie e finalize a compra", preparing: "Preparando seu carrinho…", failed: "Não foi possível preparar o carrinho. Tente novamente." }
+            options: "Escolher opções", details: "Ver detalhes", addCart: "Adicionar ao carrinho", cart: "Carrinho de compras", finish: "Continuar com o QR", gallery: "Ver galeria de fotos", back: "Voltar", total: "Total", unit: "1 unidade", was: "Antes", unavailable: "Sem estoque", retry: "Tentar novamente",
+            scan: "Escaneie para pagar na Shopify", preparing: "Preparando seu carrinho…", failed: "Não foi possível preparar o carrinho. Tente novamente." }
     end if
     return { trigger: "OK · View product", heading: "Product", variant: "Variant", buy: "Buy", close: "Close",
-        addProduct: "Add product", addCart: "Add to cart", cart: "Shopping cart", finish: "Checkout", gallery: "View photo gallery", back: "Back", total: "Total", unit: "1 item", was: "Was", unavailable: "Out of stock", retry: "Retry",
-        scan: "Scan to complete your purchase", preparing: "Preparing your cart…", failed: "Could not prepare the cart. Try again." }
+        options: "Choose options", details: "View details", addCart: "Add to cart", cart: "Shopping cart", finish: "Continue to QR", gallery: "View photo gallery", back: "Back", total: "Total", unit: "1 item", was: "Was", unavailable: "Out of stock", retry: "Retry",
+        scan: "Scan to pay on Shopify", preparing: "Preparing your cart…", failed: "Could not prepare the cart. Try again." }
 end function
 
 sub initializeCommerce()
@@ -109,6 +111,8 @@ sub initializeCommerce()
     m.panelPrice = m.top.findNode("ilCommercePrice")
     m.panelBuy = m.top.findNode("ilCommerceBuy")
     m.panelBuyBackground = m.top.findNode("ilCommerceBuyBackground")
+    m.buyLeft = m.top.findNode("ilCommerceBuyLeft")
+    m.buyRight = m.top.findNode("ilCommerceBuyRight")
     m.panelClose = m.top.findNode("ilCommerceClose")
     m.panelStatus = m.top.findNode("ilCommerceStatus")
     m.panelQr = m.top.findNode("ilCommerceQr")
@@ -121,17 +125,13 @@ sub initializeCommerce()
     m.panelAmount = m.top.findNode("ilCommerceAmount")
     m.galleryPrev = m.top.findNode("ilCommerceGalleryPrev")
     m.galleryNext = m.top.findNode("ilCommerceGalleryNext")
-    m.galleryFrame = sceneOutline(m.panelDetail, 1200, 664, 2, "0xFFFFFF99")
-    m.galleryFrame.translation = [40, 28]
     m.galleryBackground = m.top.findNode("ilCommerceGalleryBackground")
     m.panelGallery = m.top.findNode("ilCommerceGallery")
     m.panelArrows = m.top.findNode("ilCommerceArrows")
-    m.galleryLeft = m.top.findNode("ilCommerceGalleryLeft")
-    m.galleryRight = m.top.findNode("ilCommerceGalleryRight")
     m.optionGroup = m.top.findNode("ilCommerceChips")
     m.closeFocus = sceneOutline(m.panelClose, 100, 36, 2, "0xFFFFFFFF")
     m.galleryFocus = sceneOutline(m.panelGallery, 282, 36, 2, "0xFFFFFFFF")
-    m.buyFocus = sceneOutline(m.panelDetail, 412, 62, 3, "0xFFFFFFFF")
+    m.buyFocus = sceneOutline(m.panelDetail, 486, 62, 3, "0xFFFFFFFF")
     m.shopWidgets = []
     for axis = 0 to 2
         m.shopWidgets.push(createShopOptionRow(axis))
@@ -183,13 +183,14 @@ end sub
 sub releaseShop()
     cancelCart()
     m.panel.visible = false
-    for each photo in [m.panelPhoto, m.panelLogo, m.galleryLeft, m.galleryRight]
+    for each photo in [m.panelPhoto, m.panelLogo]
         photo.uri = ""
     end for
     m.shopRows = invalid
     m.shopAxes = invalid
     m.shopPhotos = invalid
     m.shopPhotoIds = invalid
+    m.shopCoverPhoto = invalid
     m.scenePanelOffer = invalid
 end sub
 
@@ -241,6 +242,7 @@ sub applyCommerceBrand()
     end for
     m.panelBuyBackground.color = "0xF0F0F0FF"
     m.panelBuy.color = "0x202020FF"
+    focusColor = "0xB4C6FFFF"
     m.chipSelectedColor = "0x515151FF"
     m.chipSelectedText = "0xFFFFFFFF"
     accent = commerceColor(brand.accent, "")
@@ -253,7 +255,21 @@ sub applyCommerceBrand()
         m.chipSelectedColor = accent
         m.panelBuyBackground.color = accent
         m.panelBuy.color = m.chipSelectedText
+        if luminance > 0.18 then focusColor = accent
     end if
+    m.buyLeft.blendColor = m.panelBuyBackground.color
+    m.buyRight.blendColor = m.panelBuyBackground.color
+    outlines = [m.buyFocus, m.closeFocus, m.galleryFocus]
+    for each widget in m.shopWidgets
+        for each chip in widget.chips
+            outlines.push(chip.outline)
+        end for
+    end for
+    for each outline in outlines
+        for each edge in outline.getChildren(-1, 0)
+            edge.color = focusColor
+        end for
+    end for
     logoUrl = ""
     if isText(brand.logoUrl)
         if m.commerceHTTPS.isMatch(brand.logoUrl) then logoUrl = brand.logoUrl
@@ -335,6 +351,11 @@ end function
 
 sub enterShopPage(page as String, focusKey as String)
     cancelCart()
+    if page = "gallery"
+        m.shopPhotoIndex = 0
+        photo = shopProductPhoto(currentOffer().variants[m.commerceChoice])
+        if isText(photo) then m.shopPhotoIndex = m.shopPhotoIds[photo]
+    end if
     m.shopPage = page
     m.shopFocusKey = focusKey
     renderCommerce()
