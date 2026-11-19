@@ -40,10 +40,12 @@ final class OverlayCue {
     final OverlayScene scene;
     final OverlayScene.Brand brand;
     final String layout;
+    final String linearCreativeId;
 
     private OverlayCue(String id, String format, long start, long end, String imageUrl,
                        String mimeType, String impressionUrl, OverlayCommerce commerce,
-                       OverlayScene scene, OverlayScene.Brand brand, String layout) {
+                       OverlayScene scene, OverlayScene.Brand brand, String layout, String linearCreativeId) {
+        this.linearCreativeId = linearCreativeId;
         this.id = id;
         this.format = format;
         this.start = start;
@@ -66,7 +68,7 @@ final class OverlayCue {
                         || ("overlay".equals(format) && (commerce != null || scene != null)))
                 || (scene == null && !validFallback) || (impressionUrl != null && !isHttps(impressionUrl))) return null;
         return new OverlayCue(id, format, start, end, validFallback ? imageUrl : null,
-                validFallback ? mimeType : null, impressionUrl, commerce, scene, brand, layout);
+                validFallback ? mimeType : null, impressionUrl, commerce, scene, brand, layout, null);
     }
 
     static boolean isHttps(String value) {
@@ -164,13 +166,28 @@ final class OverlayCue {
             String format = string(item.opt("format"));
             OverlayScene scene = OverlayScene.parse(item.optJSONObject("scene"), format, item.optJSONArray("products"));
             JSONObject brand = item.optJSONObject("brand");
-            OverlayCue cue = validate(string(item.opt("id")), format,
-                    integer(item.opt("start")), integer(item.opt("end")), image,
-                    string(mime), string(impression), OverlayCommerce.parse(item.optJSONObject("commerce")),
-                    scene, brand == null ? null : new OverlayScene.Brand(brand), string(item.opt("layout")));
+            String id = string(item.opt("id"));
+            long start = integer(item.opt("start")), end = integer(item.opt("end"));
+            OverlayCommerce commerce = OverlayCommerce.parse(item.optJSONObject("commerce"));
+            OverlayScene.Brand colors = brand == null ? null : new OverlayScene.Brand(brand);
+            OverlayCue cue;
+            if ("midroll".equals(format)) {
+                String creativeId = string(item.opt("linearCreativeId"));
+                if (!validIdentity(id) || !validIdentity(creativeId) || commerce == null || start < 0 ||
+                        end <= start || end > MAX_SAFE_INTEGER) continue;
+                // The host owns the linear media and its VAST tracking.
+                cue = new OverlayCue(id, format, start, end, null, null, null, commerce, null, colors, null, creativeId);
+            } else {
+                cue = validate(id, format, start, end, image, string(mime), string(impression), commerce,
+                        scene, colors, string(item.opt("layout")));
+            }
             if (cue != null && ids.add(cue.id)) cues.add(cue);
         }
         return cues;
+    }
+
+    static boolean validIdentity(String id) {
+        return id != null && !id.trim().isEmpty() && id.length() <= 256;
     }
 
     private static String string(Object value) {

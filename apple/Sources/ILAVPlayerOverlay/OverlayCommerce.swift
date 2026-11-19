@@ -2,13 +2,23 @@ import Foundation
 import CoreGraphics
 
 struct OverlayCommerce: Equatable, Decodable {
+    struct Option: Decodable, Equatable, Hashable {
+        let name, value: String
+    }
     struct Variant: Equatable {
         let id: String
         let label: String
         let price: Decimal
+        let options: [Option]
+        let available: Bool
+        let imageURL: URL?
     }
 
     let title: String
+    let description: String?
+    let images: [URL]
+    let imageURL: URL?
+    let optionNames: [String]
     let currency: String
     let locale: String
     let handoffURL: URL
@@ -16,8 +26,8 @@ struct OverlayCommerce: Equatable, Decodable {
     let variants: [Variant]
     let price: Decimal
 
-    enum Field: String, CodingKey { case title, currency, locale, handoffUrl, viewUrl, variants, price }
-    enum VariantField: String, CodingKey { case id, label, price }
+    enum Field: String, CodingKey { case title, description, images, imageUrl, currency, locale, handoffUrl, viewUrl, variants, price }
+    enum VariantField: String, CodingKey { case id, label, price, selectedOptions, availableForSale, imageUrl }
 
     init(from decoder: Decoder) throws {
         let row = try decoder.container(keyedBy: Field.self)
@@ -29,7 +39,7 @@ struct OverlayCommerce: Equatable, Decodable {
               address.count <= 4096, let handoff = OverlayCue.httpsURL(address),
               let price = Self.amount(row, field: .price) else { throw URLError(.cannotParseResponse) }
         var items = try row.nestedUnkeyedContainer(forKey: .variants)
-        guard let count = items.count, (1...100).contains(count) else { throw URLError(.cannotParseResponse) }
+        guard let count = items.count, (1...2048).contains(count) else { throw URLError(.cannotParseResponse) }
         var variants: [Variant] = []
         var seen = Set<String>()
         while !items.isAtEnd {
@@ -38,17 +48,60 @@ struct OverlayCommerce: Equatable, Decodable {
             let label = try item.decode(String.self, forKey: .label)
             let override = item.contains(.price) && (try? item.decodeNil(forKey: .price)) != true
             let amount = override ? Self.amount(item, field: .price) : price
-            guard Self.valid(id, max: 128), Self.valid(label, max: 160), seen.insert(id).inserted,
+            guard Self.valid(id, max: 128), Self.valid(label, max: 2048), seen.insert(id).inserted,
                   let amount else { throw URLError(.cannotParseResponse) }
-            variants.append(.init(id: id, label: label, price: amount))
+            let options = (try? item.decode([Option].self, forKey: .selectedOptions)) ?? []
+            let validOptions = options.allSatisfy { Self.valid($0.name, max: 512) && Self.valid($0.value, max: 512) }
+                && Set(options.map(\.name)).count == options.count
+            variants.append(.init(id: id, label: label, price: amount, options: validOptions ? options : [],
+                                  available: (try? item.decodeIfPresent(Bool.self, forKey: .availableForSale)) ?? true,
+                                  imageURL: OverlayCue.httpsURL(try? item.decode(String.self, forKey: .imageUrl))))
         }
         self.title = title
+        description = (try? row.decode(String.self, forKey: .description)).flatMap { $0.isEmpty ? nil : $0 }
+        let addresses = (try? row.decode([String].self, forKey: .images)) ?? []
+        var unique = Set<URL>()
+        images = addresses.compactMap(OverlayCue.httpsURL).filter { unique.insert($0).inserted }
         self.currency = currency
         locale = Self.language(try? row.decode(String.self, forKey: .locale))
         handoffURL = handoff
         viewURL = OverlayCue.httpsURL(try? row.decode(String.self, forKey: .viewUrl))
+        imageURL = OverlayCue.httpsURL(try? row.decode(String.self, forKey: .imageUrl))
+        let names = variants[0].options.map(\.name)
+        let keys = Set(names)
+        optionNames = !names.isEmpty && variants.allSatisfy { Set($0.options.map(\.name)) == keys }
+            && Set(variants.map { Set($0.options) }).count == variants.count ? names : []
         self.variants = variants
         self.price = price
+    }
+
+    struct Choice {
+        let label: String
+        let index: Int?
+        let selected: Bool
+    }
+
+    // Resolve each displayed value to a real available SKU, preserving earlier options first.
+    func choices(for name: String?, selected: Int) -> [Choice] {
+        guard let name, let dimension = optionNames.firstIndex(of: name) else {
+            return variants.indices.map { Choice(label: variants[$0].label, index: variants[$0].available ? $0 : nil,
+                                                  selected: selected == $0) }
+        }
+        let current = Set(variants[selected].options)
+        let required = current.filter { optionNames.prefix(dimension).contains($0.name) }
+        var values: [String] = [], seen = Set<String>()
+        var best: [String: (index: Int, matches: Int)] = [:]
+        for (index, variant) in variants.enumerated() {
+            guard let value = variant.options.first(where: { $0.name == name })?.value else { continue }
+            if seen.insert(value).inserted { values.append(value) }
+            let options = Set(variant.options)
+            guard variant.available, required.isSubset(of: options) else { continue }
+            let matches = options.intersection(current).count
+            if matches > (best[value]?.matches ?? -1) { best[value] = (index, matches) }
+        }
+        return values.map { value in
+            Choice(label: value, index: best[value]?.index, selected: current.contains(Option(name: name, value: value)))
+        }
     }
 
     static func language(_ locale: String?) -> String {
@@ -73,7 +126,9 @@ struct OverlayCommerce: Equatable, Decodable {
     }
 }
 
-enum OverlayCheckout {
+struct OverlayCheckout {
+    let session: URLSession
+
     struct Handoff: Decodable {
         let continueUrl: String
         let qrImageUrl: String?
@@ -88,17 +143,17 @@ enum OverlayCheckout {
         }
     }
 
-    private static let session: URLSession = {
+    static let shared: Self = {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.urlCache = nil
         config.timeoutIntervalForRequest = 5
         config.timeoutIntervalForResource = 10
-        return URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        return Self(session: URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil))
     }()
 
-    static func prepare(_ offer: OverlayCommerce, variant: String) async throws -> (url: URL, qr: URL?) {
+    func prepare(_ offer: OverlayCommerce, variant: String) async throws -> (url: URL, qr: URL?) {
         var request = URLRequest(url: offer.handoffURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -108,11 +163,11 @@ enum OverlayCheckout {
         return (url, OverlayCue.httpsURL(reply.qrImageUrl))
     }
 
-    static func qr(_ url: URL) async throws -> CGImage {
+    func qr(_ url: URL) async throws -> CGImage {
         try OverlayArtwork.decode(try await read(URLRequest(url: url), limit: 256 * 1024), expectedMIME: "image/png")
     }
 
-    private static func read(_ request: URLRequest, limit: Int) async throws -> Data {
+    private func read(_ request: URLRequest, limit: Int) async throws -> Data {
         let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),

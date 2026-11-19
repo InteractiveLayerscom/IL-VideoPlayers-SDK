@@ -122,6 +122,16 @@ final class FixturePublisher implements Closeable {
                                 .replace(url("/cap.png"), url("/assets/cap.png"))
                                 .replace(url("/logo.png"), url("/assets/logo.png"))
                                 .replace(url("/cap/view"), url("/measure/cap")));
+                org.json.JSONObject cap = cue.getJSONArray("products").getJSONObject(1);
+                cap.put("description", "Gorra ajustable").put("images", new org.json.JSONArray().put(url("/assets/back.png")));
+                org.json.JSONArray skus = cap.getJSONArray("variants");
+                for (int i = 0; i < skus.length(); i++) {
+                    org.json.JSONObject sku = skus.getJSONObject(i);
+                    sku.put("selectedOptions", new org.json.JSONArray()
+                            .put(new org.json.JSONObject().put("name", "Color").put("value", sku.getString("label")))
+                            .put(new org.json.JSONObject().put("name", "Talle").put("value", i == 0 ? "S" : "M")));
+                    if (i == 1) sku.put("imageUrl", url("/assets/green.png"));
+                }
                 cue.put("start", 1795046400000L);
                 cue.put("end", 1795046418000L);
                 cue.put("impressionUrl", url("/measure/scene"));
@@ -130,6 +140,20 @@ final class FixturePublisher implements Closeable {
             } catch (org.json.JSONException e) {
                 return new MockResponse().setResponseCode(500);
             }
+        }
+        if (path.equals("/midroll")) {
+            sidecarRequests.add(request);
+            try {
+                org.json.JSONObject offer = new org.json.JSONObject().put("title", "Spot boots")
+                        .put("currency", "USD").put("locale", "es").put("price", 20).put("imageUrl", url("/assets/boots.png"))
+                        .put("handoffUrl", url("/cart")).put("viewUrl", url("/measure/shop-view"))
+                        .put("variants", new org.json.JSONArray().put(new org.json.JSONObject().put("id", "v").put("label", "M")));
+                org.json.JSONObject cue = new org.json.JSONObject().put("format", "midroll").put("id", "delivery-a")
+                        .put("linearCreativeId", "creative-a").put("start", 1795046400000L).put("end", 1795046418000L)
+                        .put("imageUrl", url("/assets/spot.mp4")).put("mimeType", "video/mp4")
+                        .put("impressionUrl", url("/measure/vast")).put("commerce", offer);
+                return new MockResponse().setBody(new org.json.JSONArray().put(cue).toString());
+            } catch (org.json.JSONException e) { throw new AssertionError(e); }
         }
         if (path.equals("/commerce")) {
             sidecarRequests.add(request);

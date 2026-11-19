@@ -24,7 +24,7 @@ For Teinformas, Eyevinn handles channel playout and Google Ad Manager (GAM) mana
 
 ## Shopify product ads
 
-Publishers can opt in to product offers through the session JSON feed. The SDK displays the product and its variants as a card, an L-shaped ad, or a lower third. On TV, viewers select a variant with the remote and scan a QR code to continue on their phone. Web and mobile viewers open the continuation link directly. iADServer manages the Shopify connection and sales attribution, and Shopify hosts checkout.
+Publishers can opt in to product offers through the session JSON feed. The SDK displays the product and its variants as a card, an L-shaped ad, or a lower third. On TV, viewers use the remote to open the offer, browse product photos, choose available Shopify options, review the cart and scan the checkout QR. A creative can supply shop colors and a logo. A linked VAST midroll can display a shop button over the playing spot. See the [session contract](docs/signals.md#tienda-vinculada-a-un-midroll). Web and mobile viewers open the continuation link directly. iADServer manages the Shopify connection and sales attribution, and Shopify hosts checkout.
 
 [Set up the product offer feed](docs/signals.md#compra-con-shopify).
 

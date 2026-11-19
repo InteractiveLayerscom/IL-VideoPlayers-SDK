@@ -46,6 +46,7 @@ sub detach()
     m.cues = []
     m.anchor = invalid
     m.video = invalid
+    m.linearSpot = invalid
     m.content = invalid
 end sub
 
@@ -108,11 +109,41 @@ sub onCommerceChanged()
     refresh()
 end sub
 
+sub setLinearAd(active as Boolean, identity = invalid as Dynamic)
+    nextSpot = invalid
+    if active and type(identity) = "roAssociativeArray"
+        if commerceText(identity.creativeId, 256) and commerceText(identity.deliveryId, 256)
+            nextSpot = { creativeId: identity.creativeId, deliveryId: identity.deliveryId }
+        end if
+    end if
+    changed = (m.linearSpot = invalid) <> (nextSpot = invalid)
+    if m.linearSpot <> invalid and nextSpot <> invalid
+        changed = m.linearSpot.creativeId <> nextSpot.creativeId or m.linearSpot.deliveryId <> nextSpot.deliveryId
+    end if
+    if changed or active <> m.top.linearBreak
+        keep = []
+        for each cue in m.cues
+            if cue.format <> "midroll" then keep.push(cue)
+        end for
+        m.cues = keep
+        clearCreative()
+    end if
+    m.linearSpot = nextSpot
+    m.top.linearBreak = active
+    refresh()
+end sub
+
+sub onLinearBreakChanged()
+    if not m.top.linearBreak then m.linearSpot = invalid
+    refresh()
+end sub
+
 sub refresh()
     if m.video = invalid then return
     playing = m.video.state = "playing"
     presenting = (playing or m.video.state = "paused") and m.video.visible and m.top.visible and m.video.opacity > 0 and m.top.opacity > 0
-    enabled = presenting and not m.top.linearBreak and not m.top.seeking and m.cues.count() > 0
+    enabled = presenting and not m.top.seeking and m.cues.count() > 0
+    if m.top.linearBreak then enabled = enabled and m.top.commerceEnabled and m.linearSpot <> invalid
     setPolling(enabled)
     if not enabled
         clearCreative()
@@ -120,12 +151,12 @@ sub refresh()
     end if
 
     nowMs = getProgramTimeMs()
-    cue = activeCue(m.cues, nowMs)
+    cue = activeCue(m.cues, nowMs, m.top.linearBreak, m.linearSpot)
     if cue = invalid
         clearCreative()
         return
     end if
-    if cue.scene = invalid and ((cue.commerce <> invalid and not m.top.commerceEnabled) or not playing)
+    if cue.scene = invalid and ((cue.commerce <> invalid and not m.top.commerceEnabled) or (not playing and cue.format <> "midroll"))
         clearCreative()
         return
     end if
@@ -136,6 +167,10 @@ sub refresh()
         if not prepareCreative(cue) then return
     end if
 
+    if cue.format = "midroll"
+        showCommerce()
+        return
+    end if
     if cue.scene <> invalid
         presentScene(nowMs)
         return
@@ -192,6 +227,7 @@ function prepareCreative(cue as Object) as Boolean
     m.active = cue
     m.commerceVideoWidth = width
     m.commerceVideoHeight = height
+    if cue.format = "midroll" then return true
     if cue.scene <> invalid
         prepareScene(width, height)
         return true

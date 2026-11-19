@@ -149,17 +149,19 @@ for (const kind of ['HTML5', 'Video.js', 'AVPlay', 'Shaka']) {
       first.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
       assert.equal(doc.activeElement, second);
       second.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      const panel = stage.querySelector('.il-commerce-panel');
-      assert.equal(panel.querySelector('strong').textContent, 'Gorra');
-      assert.equal(panel.querySelector('.il-commerce-summary img').src, 'https://ads.example/cap.png');
-      assert.equal(panel.querySelector('.il-commerce-logo').src, 'https://ads.example/logo.png');
+      const panel = stage.querySelector('.il-tv-shop');
+      assert.equal(panel.querySelector('h2').textContent, 'Gorra');
+      assert.equal(panel.querySelector('.il-tv-hero').src, 'https://ads.example/cap.png');
+      assert.equal(panel.querySelector('.il-tv-logo').src, 'https://ads.example/logo.png');
       const button = label => [...panel.querySelectorAll('button')].find(button => button.textContent === label);
+      button('Add product').click();
       button('Verde').click();
-      button('Show QR code').click();
+      button('Add to cart').click();
+      button('Checkout').click();
       await settle();
       assert.deepEqual(requests.slice(1).map(([url]) => url.pathname), ['/cap/view', '/cap/cart']);
       assert.deepEqual(JSON.parse(requests.at(-1)[1].body), { variantId: 'green' });
-      button('Close').click();
+      for (let i = 0; i < 4; i++) panel.querySelector('button[aria-label="Back"]').click();
       assert.equal(doc.activeElement, second);
 
       paused = true;

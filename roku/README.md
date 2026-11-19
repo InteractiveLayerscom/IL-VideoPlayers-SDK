@@ -98,3 +98,30 @@ Ejecutá `sh roku/verify.sh` desde la raíz del repositorio. BrighterScript vali
 Habilitá `m.il.commerceEnabled = true`. En el `Task` que consulta el endpoint JSON, incluí `commerce: true`, `locale: "es"` y, si corresponde, `country: "AR"` en `request`. La ficha recibe OK, flechas y Atrás. Si la app controla el foco directamente, configurá `m.il.commerceAutoFocus = false` y reenviá las teclas con `m.il.callFunc("handleCommerceKey", key, press)`. El resultado booleano indica si la ficha usó la tecla.
 
 Observá `productView` y enviá un GET a `viewUrl` con el cliente de medición del host. El `Task` de compra prepara el carrito y la ficha carga el PNG del QR mientras sigue el video. Probá el comportamiento en un equipo Roku del publisher. [Contrato de compra](../docs/signals.md#compra-con-shopify) · [Requisitos de anuncios en Roku](https://developer.roku.com/dev/docs/ad-requirements)
+
+### Ficha, galería y carrito de TV
+
+**Añadir producto** abre los detalles. Las flechas verticales recorren la galería, los grupos de opciones y **Añadir al carrito**. Las horizontales recorren los valores de una opción. OK confirma una combinación disponible del catálogo. La galería ocupa el video completo y permite recorrer fotos con izquierda y derecha. Atrás retorna al paso anterior, incluida la capa de producto que abrió la ficha.
+
+El carrito muestra el artículo, su variante y el total. Solo **Finalizar compra** solicita el QR a Shopify a través del endpoint de iADServer. La petición contiene el ID de la variante confirmada. Atrás cierra el QR y cancela una solicitud pendiente.
+
+La ficha lee `commerce.imageUrl`, `images` (URLs HTTPS), `description` y `previousPrice`. Cada variante puede incluir `selectedOptions: [{ name, value }]`, `imageUrl` y `availableForSale`. Acepta hasta 2048 variantes. Cuando la ficha recibe un catálogo sin opciones estructuradas o con combinaciones ambiguas, muestra las variantes individuales con sus etiquetas originales.
+
+### Compra durante un spot VAST
+
+En el callback de inicio del **spot que se está presentando**, obtené `creativeId` y `deliveryId` de su elemento VAST `Extension[type="iADServerShop"]/Shop`. También podés usar el `Creative@id` reproducido y la ID de entrega de la URL de impresión de ese mismo anuncio (`/events/{deliveryId}/impression`). Pasá ambas claves al componente y al lector del mismo tag y sesión de reproducción.
+
+```brightscript
+spot = { creativeId: creativeID, deliveryId: deliveryID }
+m.il.callFunc("setLinearAd", true, spot)
+m.feedRevision += 1
+m.feed.request = {
+    kind: "json", url: playback.overlayFeedUrl, sessionId: m.ilSession, revision: m.feedRevision,
+    programTimeMs: m.il.callFunc("getProgramTimeMs"), commerce: true, locale: "es", linearSpot: spot
+}
+m.feed.control = "run"
+```
+
+En cada cambio de spot repetí la vinculación con la identidad del nuevo anuncio. Al cargar el resultado comprobá la sesión y la revisión como en el ejemplo de lectura del endpoint. Conservá el reloj de programa de esa sesión mediante `setClockAnchor` cuando corresponda. El lector agrega `scene=1`, `commerce=1`, `shop_midroll=1` y las dos claves. Un cue `midroll` presenta **Comprar** únicamente durante la entrega vinculada y dentro de su intervalo. El reproductor conserva la reproducción del spot y la medición de VAST.
+
+Al finalizar el corte, incrementá la revisión del lector y llamá a `m.il.callFunc("setLinearAd", false, invalid)`. Para un spot sin identidad de compra podés pasar `true, invalid`: el corte conserva la supresión de gráficas de programa.

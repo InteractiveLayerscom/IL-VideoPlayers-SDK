@@ -113,6 +113,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
       isActive = stillActive;
       unmute();
       desired = cue;
+      if (cue.format === 'midroll') { commerce.show(cue, stillActive); return; }
       if (cue.scene) {
         scenes.show(cue, time, stillActive);
         return;
@@ -146,6 +147,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
   };
   const session = createSession({
     ...source, clock, renderer, playing, presenting,
+    presentingSpot: () => !video.seeking && !video.ended && !video.ownerDocument.hidden,
     scenes: sceneSupported(window),
     sceneFeatures: sceneFeatures(window, allowVideo, allowAudio),
   });

@@ -37,7 +37,7 @@ Shaka también interpreta su perfil nativo con `CLASS="com.apple.hls.interstitia
 
 Los reproductores que habilitan la oferta comercial agregan `commerce=1` y `locale` al endpoint JSON por sesión. Pueden enviar `country` con el código ISO 3166-1 alfa-2 del mercado. Los idiomas de los controles son `es`, `en` y `pt-BR`. El servicio provee el contenido del producto en el idioma y la moneda disponibles para ese mercado.
 
-Un cue comercial admite `l`, `super` y `overlay`. La tarjeta `overlay` usa el 30 % del ancho y el 32 % de la altura a partir del 64 % hacia la derecha y el 10 % hacia abajo. El manifiesto HLS puede entregar las gráficas convencionales por su contrato habitual. El catálogo, las variantes y el acceso al carrito se entregan al reproductor en la respuesta de su sesión.
+Un cue comercial puede acompañar una gráfica `l`, `super` u `overlay`, o un spot vinculado con formato `midroll`. La tarjeta `overlay` usa el 30 % del ancho y el 32 % de la altura a partir del 64 % hacia la derecha y el 10 % hacia abajo. El manifiesto HLS puede entregar las gráficas convencionales por su contrato habitual. El catálogo, las variantes y el acceso al carrito se entregan al reproductor en la respuesta de su sesión.
 
 ```json
 {
@@ -52,9 +52,11 @@ Un cue comercial admite `l`, `super` y `overlay`. La tarjeta `overlay` usa el 30
     "price": "89.00",
     "currency": "USD",
     "locale": "es",
+    "description": "Botines de cuero",
+    "images": ["https://media.example/frente.jpg", "https://media.example/perfil.jpg"],
     "variants": [
-      {"id": "42", "label": "Talle 42", "price": "89.00"},
-      {"id": "43", "label": "Talle 43", "price": "89.00"}
+      {"id": "42", "label": "Talle 42", "price": "89.00", "availableForSale": true, "selectedOptions": [{"name":"Talle","value":"42"}]},
+      {"id": "43", "label": "Talle 43", "price": "89.00", "availableForSale": false, "selectedOptions": [{"name":"Talle","value":"43"}]}
     ],
     "handoffUrl": "https://ads.example/commerce/offer/delivery",
     "viewUrl": "https://ads.example/events/delivery/creativeView"
@@ -65,6 +67,14 @@ Un cue comercial admite `l`, `super` y `overlay`. La tarjeta `overlay` usa el 30
 El SDK hace un GET a `viewUrl` una vez por cue al abrir la ficha. En Roku, el host lo envía a partir del campo `productView`. La impresión sigue el evento de presentación de la gráfica. Cuando el espectador pulsa el botón de compra, el SDK hace un POST JSON a `handoffUrl` con `{"variantId":"42"}`. La respuesta incluye `continueUrl` y `qrImageUrl`, ambas HTTPS. Los reproductores TV muestran el PNG del QR. Navegadores y apps móviles abren el enlace de continuación con la variante elegida. El servicio de anuncios administra la duración y vinculación del enlace. Configurá una ventana de exhibición que permita navegar con el control y escanear el QR.
 
 El endpoint web debe permitir los orígenes habilitados mediante CORS, incluido el preflight de POST con `Content-Type: application/json`. Publicá la respuesta de sesión y los enlaces de compra por HTTPS. Las integraciones del SDK solo usan el contrato de anuncios. La sesión de checkout y las credenciales corresponden al backend.
+
+Las imágenes de la galería y `variants[].imageUrl` son opcionales. Cada combinación conserva su ID de Shopify, sus opciones, precio y disponibilidad. Las ofertas anteriores que solo incluyen `label` se muestran como una lista de variantes. La identidad visual de la tienda se entrega en `cue.brand` con `accent`, `background`, `foreground` y `logoUrl`.
+
+### Tienda vinculada a un midroll
+
+Activá la tienda en la escena de video del editor, publicá esa versión y vinculá el producto Shopify de la campaña con formato `midroll`. Para esa entrega el VAST incluye `<Extension type="iADServerShop"><Shop deliveryId="…" creativeId="…"/></Extension>`. El host inicia y termina la interacción según el spot que se está reproduciendo.
+
+El feed JSON de la misma sesión recibe `scene=1`, `commerce=1`, `shop_midroll=1`, `midroll_creative_id` y `midroll_delivery_id` además de los parámetros habituales del tag. El cue de respuesta tiene `format: "midroll"`, `id` igual a la entrega VAST y `linearCreativeId` igual a la creatividad. El SDK verifica ambas identidades y muestra la entrada a la tienda sobre el video del host. La impresión pertenece a VAST. Al terminar o cambiar el spot, el SDK retira su tienda y descarta respuestas pendientes.
 
 ## Escenas de creatividades
 

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="ILOverlayFeedRequest" extends="Group">
+    <interface>
+        <field id="request" type="assocarray" />
+        <field id="control" type="string" onChange="answer" />
+        <field id="result" type="assocarray" alwaysNotify="true" />
+    </interface>
+    <script type="text/brightscript"><![CDATA[
+        sub answer()
+            if m.top.control <> "run" then return
+            request = m.top.request
+            m.top.result = { sessionId: request.sessionId, revision: request.revision, status: 200,
+                body: formatJson({ continueUrl: "https://ads.example/cart",
+                    qrImageUrl: request.url + "/qr/" + request.variantId + ".png" }) }
+        end sub
+    ]]></script>
+</component>

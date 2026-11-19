@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-enum OverlayFormat: String { case `super`, l, overlay }
+enum OverlayFormat: String { case `super`, l, overlay, midroll }
 
 struct OverlayCue: Equatable {
     static let hlsClass = "com.interactivelayers.overlay"
@@ -17,6 +17,7 @@ struct OverlayCue: Equatable {
     let products: [SceneOffer?]
     let brand: SceneBrand?
     let layout: String?
+    let linearCreativeID: String?
 
     func offer(at index: Int?) -> SceneOffer? {
         guard let index, products.indices.contains(index) else { return nil }
@@ -26,13 +27,14 @@ struct OverlayCue: Equatable {
     init?(id: String?, format: String?, start: Date, end: Date?,
           image: String?, mime: String? = nil, impression: String?, commerce: OverlayCommerce? = nil,
           scene: OverlayScene? = nil, products: [SceneOffer?] = [], brand: SceneBrand? = nil,
-          layout: String? = nil) {
+          layout: String? = nil, linearCreativeID: String? = nil) {
         let validMIME = mime == nil || mime == "image/png" || mime == "image/jpeg"
-        let imageURL = validMIME ? Self.httpsURL(image) : nil
+        let imageURL = validMIME && format != "midroll" ? Self.httpsURL(image) : nil
         guard let id, !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let format = format.flatMap(OverlayFormat.init(rawValue:)),
               format != .overlay || commerce != nil || scene != nil,
-              let end, start < end, imageURL != nil || scene != nil
+              format != .midroll || (Self.validIdentifier(linearCreativeID) && commerce != nil),
+              let end, start < end, format == .midroll || imageURL != nil || scene != nil
         else { return nil }
         self.id = id
         self.format = format
@@ -46,6 +48,12 @@ struct OverlayCue: Equatable {
         self.products = products
         self.brand = brand
         self.layout = layout
+        self.linearCreativeID = linearCreativeID
+    }
+
+    static func validIdentifier(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty, value.count <= 512 else { return false }
+        return value == value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func httpsURL(_ raw: String?) -> URL? {
@@ -63,7 +71,7 @@ struct OverlayCue: Equatable {
 
     private struct SidecarRow: Decodable {
         let cue: OverlayCue?
-        enum Field: String, CodingKey { case id, format, start, end, imageUrl, mimeType, impressionUrl, commerce, scene, products, brand, layout }
+        enum Field: String, CodingKey { case id, format, start, end, imageUrl, mimeType, impressionUrl, commerce, scene, products, brand, layout, linearCreativeId }
 
         struct Product: Decodable {
             let value: SceneOffer?
@@ -100,7 +108,8 @@ struct OverlayCue: Equatable {
                                          Array($0.prefix(64).map { $0?.value })
                                      } ?? [],
                                      brand: try? row.decode(SceneBrand.self, forKey: .brand),
-                                     layout: try? row.decode(String.self, forKey: .layout))
+                                     layout: try? row.decode(String.self, forKey: .layout),
+                                     linearCreativeID: try? row.decode(String.self, forKey: .linearCreativeId))
             } catch {
                 cue = nil
             }
@@ -120,13 +129,18 @@ struct OverlayTimeline {
 
     func upcoming(after date: Date) -> OverlayCue? {
         let horizon = date.addingTimeInterval(5)
-        return cues.first { date < $0.start && $0.start <= horizon }
+        return cues.first { $0.format != .midroll && date < $0.start && $0.start <= horizon }
     }
 
     func active(at date: Date?) -> OverlayCue? {
         guard let date else { return nil }
-        return cues.first { $0.start <= date && date < $0.end }
+        return cues.first { $0.format != .midroll && $0.start <= date && date < $0.end }
     }
+    func midroll(at date: Date, creativeID: String, deliveryID: String) -> OverlayCue? {
+        cues.first { $0.format == .midroll && $0.linearCreativeID == creativeID && $0.id == deliveryID
+            && $0.start <= date && date < $0.end }
+    }
+
 }
 
 struct OverlayLayout {
@@ -147,7 +161,7 @@ struct OverlayLayout {
             video = canvas
             artwork = CGRect(x: canvas.minX + canvas.width * 0.64, y: canvas.minY + canvas.height * 0.10,
                              width: canvas.width * 0.30, height: canvas.height * 0.32)
-        case nil:
+        case nil, .midroll:
             video = canvas
             artwork = .zero
         }

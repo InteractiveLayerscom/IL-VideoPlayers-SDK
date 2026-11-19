@@ -44,6 +44,70 @@ final class OverlayTests: XCTestCase {
         XCTAssertEqual(try OverlayCue.decodeSidecar(Data(legacy.utf8)).first?.format, .super)
     }
 
+    func testAvailabilityUpdatesChangeTheProductSnapshot() throws {
+        let product = """
+        {"title":"Shoes","price":"59","currency":"USD","handoffUrl":"https://store.example/cart",
+         "images":["https://store.example/blue.jpg","http://invalid.example/red.jpg"],
+         "description":"Canvas shoes",
+         "variants":[{"id":"blueS","label":"Blue / S","availableForSale":true,"imageUrl":"https://store.example/blue.jpg",
+                      "selectedOptions":[{"name":"Color","value":"Blue"},{"name":"Size","value":"S"}]}]}
+        """
+        let inStock = try JSONDecoder().decode(OverlayCommerce.self, from: Data(product.utf8))
+        let soldOut = try JSONDecoder().decode(OverlayCommerce.self, from: Data(product.replacingOccurrences(of: "true", with: "false").utf8))
+        XCTAssertNotEqual(inStock, soldOut)
+        XCTAssertFalse(soldOut.variants[0].available)
+        XCTAssertEqual(inStock.description, "Canvas shoes")
+        XCTAssertEqual(inStock.images.map(\.absoluteString), ["https://store.example/blue.jpg"])
+        XCTAssertEqual(inStock.variants[0].imageURL, inStock.images.first)
+        XCTAssertEqual(inStock.optionNames, ["Color", "Size"])
+    }
+
+    func testOptionChangesPreserveCompatibleDimensionsAndNeverReturnUnavailableSKUs() throws {
+        let json = """
+        {"title":"Shoes","price":"1","currency":"USD","handoffUrl":"https://shop.example/cart",
+         "variants":[{"id":"rs","label":"Red S","selectedOptions":[{"name":"Color","value":"Red"},{"name":"Size","value":"S"}]},
+                     {"id":"bs","label":"Blue S","availableForSale":false,"selectedOptions":[{"name":"Color","value":"Blue"},{"name":"Size","value":"S"}]},
+                     {"id":"bm","label":"Blue M","selectedOptions":[{"name":"Color","value":"Blue"},{"name":"Size","value":"M"}]}]}
+        """
+        let product = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        let colors = product.choices(for: "Color", selected: 0)
+        XCTAssertEqual(colors.map(\.index), [0, 2])
+        let sizes = product.choices(for: "Size", selected: 2)
+        XCTAssertEqual(sizes.map(\.index), [nil, 2])
+        XCTAssertTrue(sizes[1].selected)
+    }
+
+    func testLongUnicodeShopifyOptionsPreserveTheProductAndItsThreeAxes() throws {
+        let axis = String(repeating: "色", count: 512)
+        let values = ["緑", "綿", "藍"].map { String(repeating: $0, count: 512) }
+        let names = [axis, "Tamaño", "Tejido"]
+        let combined = values.joined(separator: " / ")
+        func decode(label: String, firstName: String = axis, firstValue: String = values[0]) throws -> OverlayCommerce {
+            let options = [["name": firstName, "value": firstValue], ["name": names[1], "value": values[1]],
+                           ["name": names[2], "value": values[2]]]
+            let variant: [String: Any] = ["id": "sku-1", "label": label, "selectedOptions": options]
+            let json: [String: Any] = ["title": "Camisa", "price": "10", "currency": "USD",
+                                       "handoffUrl": "https://shop.example/cart", "variants": [variant]]
+            return try JSONDecoder().decode(OverlayCommerce.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        let product = try decode(label: combined)
+        XCTAssertEqual(product.variants[0].label, combined)
+        XCTAssertEqual(product.optionNames, names)
+        XCTAssertEqual(product.variants[0].options.map(\.value), values)
+        XCTAssertEqual(try decode(label: String(repeating: "界", count: 2048)).variants[0].id, "sku-1")
+        XCTAssertThrowsError(try decode(label: String(repeating: "界", count: 2049)))
+        XCTAssertTrue(try decode(label: combined, firstName: axis + "色").optionNames.isEmpty)
+        XCTAssertTrue(try decode(label: combined, firstValue: values[0] + "緑").optionNames.isEmpty)
+    }
+
+    func testCatalogSupports2048VariantsAtTheHandoffBoundary() throws {
+        let variants = (1...2048).map { ["id": "v\($0)", "label": "Size \($0)"] }
+        let json: [String: Any] = ["title": "Shirt", "currency": "USD", "price": "4", "handoffUrl": "https://shop.example/cart", "variants": variants]
+        let product = try JSONDecoder().decode(OverlayCommerce.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(product.variants.last?.id, "v2048")
+        XCTAssertEqual(product.choices(for: nil, selected: 2047).last?.index, 2047)
+    }
+
     #if os(macOS)
     func testSceneOnlyCuePreservesOfferAndInterpolatesIndependentTracks() throws {
         var root = URL(fileURLWithPath: #filePath)

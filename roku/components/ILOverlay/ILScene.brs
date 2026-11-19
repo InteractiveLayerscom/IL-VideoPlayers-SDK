@@ -28,7 +28,7 @@ function normalizeSceneProducts(value as Dynamic, https as Object) as Object
         offer = normalizeCommerce(row, https)
         if offer <> invalid
             if isText(row.id) and isText(row.imageUrl)
-                if row.id <> "" and https.isMatch(row.imageUrl)
+                if row.id <> "" and offer.imageUrl <> invalid
                     offer.id = row.id
                     offer.imageUrl = row.imageUrl
                 end if
