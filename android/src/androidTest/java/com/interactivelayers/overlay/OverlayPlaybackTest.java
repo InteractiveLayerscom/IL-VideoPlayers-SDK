@@ -209,7 +209,7 @@ public final class OverlayPlaybackTest {
             assertTrue(next.performClick());
             player.pause();
             clickButton("Elegir opciones");
-            clickButton("Ver galería de fotos");
+            clickButton("Ver fotos");
             clickButton("›");
             assertTrue(overlays.closeCommercePanel());
             assertTrue(buttons("Roja").get(0).isSelected());
@@ -313,10 +313,21 @@ public final class OverlayPlaybackTest {
             await(() -> shopImageHasColor(panel[0], Color.MAGENTA));
             activity.onActivity(a -> {
                 clickButton("Choose options");
-                clickButton("View gallery");
+                clickButton("Large");
+                clickButton("View photos");
             });
+            await(() -> panel[0].getWidth() == view.getWidth() && shopImageHasColor(panel[0], Color.MAGENTA));
+            Instrumentation remote = InstrumentationRegistry.getInstrumentation();
+            remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT);
+            await(() -> shopImageHasColor(panel[0], Color.RED));
+            remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_LEFT);
+            await(() -> shopImageHasColor(panel[0], Color.MAGENTA));
+            remote.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
             await(() -> panel[0].getWidth() == Math.round(view.getWidth() * .42f));
-            activity.onActivity(a -> { clickButton("›"); clickButton("←"); });
+            activity.onActivity(a -> {
+                assertEquals(buttons("View photos").get(0), view.findFocus());
+                assertTrue(buttons("Large").get(0).isSelected());
+            });
             await(() -> shopImageHasColor(panel[0], Color.MAGENTA));
             activity.onActivity(a -> clickButton("Large"));
             await(() -> shopImageHasColor(panel[0], Color.MAGENTA));
@@ -332,8 +343,48 @@ public final class OverlayPlaybackTest {
         }
     }
 
+    @Test public void singlePhotoOpensFromCoverAndDetailsAndReturnsFocusToItsLink() throws Exception {
+        String title = "Backpack";
+        OverlayCommerce offer = OverlayCommerce.parse(new JSONObject().put("title", title).put("currency", "USD")
+                .put("price", 10).put("imageUrl", network.url("/assets/poster.png")).put("handoffUrl", network.url("/cart"))
+                .put("variants", new JSONArray().put(new JSONObject().put("id", "one").put("label", "One"))));
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        CommercePanel[] panel = new CommercePanel[1];
+        try {
+            activity.onActivity(a -> panel[0] = new CommercePanel(view, offer, null, null, null, new OverlayNetwork(), worker,
+                    true, () -> {}, () -> {}));
+            Instrumentation remote = InstrumentationRegistry.getInstrumentation();
+            for (String stageAction : new String[]{"View details", "Add to cart"}) {
+                activity.onActivity(a -> {
+                    if (stageAction.equals("Add to cart")) clickButton("View details");
+                    clickButton("View photos");
+                });
+                await(() -> panel[0].getWidth() == view.getWidth() && shopImageHasColor(panel[0], Color.MAGENTA));
+                activity.onActivity(a -> {
+                    assertEquals(view.getHeight(), panel[0].getHeight());
+                    java.util.ArrayList<View> photos = new java.util.ArrayList<>();
+                    view.findViewsWithText(photos, title, View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+                    ImageView photo = (ImageView) photos.get(0);
+                    assertEquals(ImageView.ScaleType.FIT_CENTER, photo.getScaleType());
+                    assertTrue(photo.getWidth() >= view.getWidth() * .90f && photo.getHeight() >= view.getHeight() * .80f);
+                    assertTrue(buttons("‹").isEmpty() && buttons("›").isEmpty());
+                });
+                remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT);
+                remote.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+                await(() -> panel[0].getWidth() == Math.round(view.getWidth() * .42f));
+                activity.onActivity(a -> {
+                    assertEquals(buttons("View photos").get(0), view.findFocus());
+                    assertEquals(1, buttons(stageAction).size());
+                });
+            }
+        } finally {
+            activity.onActivity(a -> panel[0].dispose());
+            worker.shutdownNow();
+        }
+    }
+
     private boolean shopImageHasColor(View root, int color) {
-        if (root instanceof ImageView && root.getContentDescription() == null) {
+        if (root instanceof ImageView) {
             android.graphics.drawable.Drawable image = ((ImageView) root).getDrawable();
             if (image instanceof android.graphics.drawable.BitmapDrawable) {
                 Bitmap bitmap = ((android.graphics.drawable.BitmapDrawable) image).getBitmap();
@@ -356,7 +407,7 @@ public final class OverlayPlaybackTest {
         OverlayCommerce offer = OverlayCommerce.parse(new JSONObject().put("title", "Boots").put("currency", "USD")
                 .put("price", "1").put("variants", variants).put("handoffUrl", network.url("/cart")));
         OverlayScene.Brand brand = new OverlayScene.Brand(new JSONObject()
-                .put("accent", "#ffffff").put("background", "#202020").put("foreground", "#ffffff"));
+                .put("accent", "#ff0000").put("background", "#202020").put("foreground", "#ffffff"));
         ExecutorService worker = Executors.newSingleThreadExecutor();
         CommercePanel[] panel = new CommercePanel[1];
         try {
@@ -375,7 +426,10 @@ public final class OverlayPlaybackTest {
                 assertEquals(focus, view.findFocus());
                 assertEquals(Color.BLACK, ((Button) focus).getCurrentTextColor());
                 Button buy = (Button) buttons("Add to cart").get(0);
-                assertEquals(Color.BLACK, buy.getCurrentTextColor());
+                assertWhiteTvAction(buy);
+                buy.setPressed(true);
+                assertWhiteTvAction(buy);
+                buy.setPressed(false);
                 for (int page = 0; page < 8; page++) clickButton("›");
                 clickButton("Size 100");
                 assertTrue(buttons("Size 100").get(0).isSelected());
@@ -571,6 +625,21 @@ public final class OverlayPlaybackTest {
                 Color.red(pixel) > 240 && Color.green(pixel) < 15 && Color.blue(pixel) < 15);
     }
 
+    private void assertWhiteTvAction(Button button) {
+        android.graphics.drawable.Drawable background = button.getBackground();
+        Rect originalBounds = background.copyBounds();
+        Bitmap sample = Bitmap.createBitmap(100, 48, Bitmap.Config.ARGB_8888);
+        try {
+            background.setBounds(0, 0, 100, 48);
+            background.draw(new Canvas(sample));
+            assertEquals(Color.WHITE, sample.getPixel(50, 24));
+            assertEquals(0xff171717, button.getCurrentTextColor());
+        } finally {
+            background.setBounds(originalBounds);
+            sample.recycle();
+        }
+    }
+
     private void assertCommerceFrame() throws Exception {
         Rect stage = new Rect(), action = new Rect();
         await(() -> view.getGlobalVisibleRect(stage) && buttons("Elegir opciones").get(0).getGlobalVisibleRect(action));
@@ -578,7 +647,7 @@ public final class OverlayPlaybackTest {
         do {
             Bitmap screenshot = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
             int fill = screenshot.getPixel(action.left + action.width() / 5, action.centerY());
-            if (fill == Color.rgb(240, 240, 240)) {
+            if (fill == Color.WHITE) {
                 Bitmap card = Bitmap.createBitmap(screenshot, stage.left, stage.top, stage.width(), stage.height());
                 try (OutputStream out = PlatformTestStorageRegistry.getInstance().openOutputFile("commerce.png")) {
                     assertTrue(card.compress(Bitmap.CompressFormat.PNG, 100, out));

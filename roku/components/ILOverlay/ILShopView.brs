@@ -94,6 +94,17 @@ sub renderCommerce()
     m.panelDetail.visible = m.commerceOpen
     sx = m.commerceVideoWidth / 1280
     sy = m.commerceVideoHeight / 720
+    if m.commerceOpen
+        for each node in m.panelDetail.getChildren(-1, 0)
+            node.visible = false
+        end for
+        if m.shopPage = "gallery"
+            renderShopGallery(sx, sy)
+            return
+        end if
+    end if
+    m.panelBackground.color = m.shopPanelColor
+    m.panelClose.color = m.shopInk
     m.panel.scale = [sx, sy]
     m.shopDecodeScale = sy
     if m.shopDecodeScale > 2 then m.shopDecodeScale = 2
@@ -114,14 +125,10 @@ sub renderCommerce()
     m.panelBackground.opacity = 0.96
     if not m.commerceOpen then return
 
-    for each node in m.panelDetail.getChildren(-1, 0)
-        node.visible = false
-    end for
     if m.shopRows = invalid then setupShop(offer)
     page = m.shopPage
     selected = offer.variants[m.commerceChoice]
     photo = shopProductPhoto(selected)
-    if page = "gallery" and m.shopPhotos.count() > 0 then photo = m.shopPhotos[m.shopPhotoIndex]
     price = shopMoney(offer, selected.price)
     previous = selected.previousPrice
     if previous = invalid and m.shopAvailableCount > 0 and m.commerceChoice = m.shopDefaultChoice and shopPriceKey(selected.price) = shopPriceKey(offer.price)
@@ -135,6 +142,7 @@ sub renderCommerce()
     m.shopControls = ["back"]
     if page = "intro"
         shopPoster(m.panelPhoto, photo, 32, 84, 474, 234)
+        shopGalleryButton(224, 282)
         shopLabel(m.panelHeading, offer.vendor, 32, 327, 474, 34)
         shopLabel(m.panelName, offer.title, 32, 363, 474, 64)
         range = shopPriceKey(m.shopLowPrice) <> shopPriceKey(m.shopHighPrice)
@@ -157,12 +165,7 @@ sub renderCommerce()
     else if page = "detail"
         shopLabel(m.panelName, offer.title, 32, 66, 400, 60)
         shopPoster(m.panelPhoto, photo, 32, 127, 436, 112)
-        if m.shopPhotos.count() > 0
-            shopPlace(m.galleryBackground, 178, 202, 282, 36)
-            shopLabel(m.panelGallery, copy.gallery, 178, 202, 282, 36)
-            m.galleryFocus.visible = m.shopFocusKey = "gallery"
-            m.shopControls.push("gallery")
-        end if
+        shopGalleryButton(178, 202)
         shopLabel(m.panelPrice, price, 32, 240, 236, 38)
         shopLabel(m.panelPrevious, before, 270, 240, 232, 38)
         shopLabel(m.panelDescription, offer.description, 32, 277, 445, 48)
@@ -199,21 +202,69 @@ sub renderCommerce()
                 shopAction(copy.retry)
             end if
         end if
-    else if page = "gallery"
-        n = m.shopPhotos.count()
-        shopPoster(m.panelPhoto, photo, 32, 110, 474, 338)
-        if n > 1
-            shopLabel(m.galleryPrev, "‹", 41, 455, 68, 64)
-            shopLabel(m.galleryNext, "›", 429, 455, 68, 64)
-        end if
-        position = m.shopPhotoIndex + 1
-        shopLabel(m.panelArrows, position.toStr() + " / " + n.toStr(), 109, 460, 320, 54)
-        shopLabel(m.panelName, offer.title, 32, 540, 474, 68)
-        shopLabel(m.panelPrice, price, 32, 613, 474, 53)
     end if
     shopPoster(m.panelLogo, m.shopLogoUrl, 367, 18, 140, 40)
     shopLabel(m.panelClose, "‹ " + copy.back, 27, 20, 100, 36)
     m.closeFocus.visible = m.shopFocusKey = "back"
+end sub
+
+sub shopGalleryButton(x as Integer, y as Integer)
+    if m.shopPhotos.count() = 0 then return
+    shopPlace(m.galleryBackground, x, y, 282, 36)
+    shopLabel(m.panelGallery, m.commerceLabels.gallery, x, y, 282, 36)
+    m.galleryFocus.visible = m.shopFocusKey = "gallery"
+    m.shopControls.push("gallery")
+end sub
+
+sub renderShopGallery(sx as Float, sy as Float)
+    ' Use uniform scaling even when the host Video has a non-16:9 viewport.
+    scale = sy
+    if sx < sy then scale = sx
+    w = m.commerceVideoWidth / scale
+    h = m.commerceVideoHeight / scale
+    m.panel.scale = [scale, scale]
+    m.panel.translation = m.video.translation
+    m.panelBackground.width = w
+    m.panelBackground.height = h
+    m.panelBackground.color = "0x101010FF"
+    m.panelBackground.opacity = 1
+
+    ' Give the expansion its own texture so Roku never enlarges a decoded thumbnail.
+    longest = m.commerceVideoWidth
+    if m.commerceVideoHeight > longest then longest = m.commerceVideoHeight
+    decode = 1.0
+    if longest > 2048 then decode = 2048 / longest
+    m.galleryPhoto.loadWidth = int(m.commerceVideoWidth * decode)
+    m.galleryPhoto.loadHeight = int(m.commerceVideoHeight * decode)
+    url = m.shopPhotos[m.shopPhotoIndex]
+    if m.galleryPhoto.uri <> url then m.galleryPhoto.uri = url
+    shopPlace(m.galleryPhoto, 0, 0, w, h)
+
+    insetX = w * 0.05
+    insetY = h * 0.05
+    m.shopControls = ["back"]
+    shopPlace(m.galleryBackShade, insetX, insetY, 100, 36)
+    shopLabel(m.panelClose, "‹ " + m.commerceLabels.back, insetX, insetY, 100, 36)
+    m.panelClose.color = "0xFFFFFFFF"
+    m.closeFocus.visible = false
+    m.galleryBackFocus.visible = m.shopFocusKey = "back"
+    n = m.shopPhotos.count()
+    if n < 2 then return
+    m.shopControls.push("prev")
+    m.shopControls.push("next")
+    y = (h - 56) / 2
+    shopPlace(m.galleryPrevShade, insetX, y, 56, 56)
+    shopLabel(m.galleryPrev, "‹", insetX, y, 56, 56)
+    shopPlace(m.galleryNextShade, w - insetX - 56, y, 56, 56)
+    shopLabel(m.galleryNext, "›", w - insetX - 56, y, 56, 56)
+    m.galleryPrev.color = "0xFFFFFFFF"
+    m.galleryNext.color = "0xFFFFFFFF"
+    m.galleryPrevFocus.visible = m.shopFocusKey = "prev"
+    m.galleryNextFocus.visible = m.shopFocusKey = "next"
+    position = m.shopPhotoIndex + 1
+    shopPlace(m.galleryCountShade, w - insetX - 156, insetY, 156, 36)
+    shopLabel(m.panelArrows, position.toStr() + " / " + n.toStr(), w - insetX - 156, insetY, 156, 36)
+    m.panelArrows.color = "0xFFFFFFFF"
 end sub
 
 sub renderShopOptions()
@@ -244,8 +295,7 @@ sub renderShopOptions()
                     chip.tile.color = "0x303030FF"
                     chip.label.color = "0xFFFFFFFF"
                     if k = row.selected
-                        chip.tile.color = m.chipSelectedColor
-                        chip.label.color = m.chipSelectedText
+                        chip.tile.color = "0x515151FF"
                     end if
                     chip.label.opacity = 1
                     if row.candidates[k] < 0 then chip.label.opacity = 0.52

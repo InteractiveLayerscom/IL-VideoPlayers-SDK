@@ -20,8 +20,9 @@ final class TvShopView extends LinearLayout {
     private final CommercePanel host;
     private final Map<Integer, Integer> pages = new HashMap<>();
     private static final int PAGE_SIZE = 12;
-    private Stage stage = Stage.COVER;
-    private int photoIndex, focusDimension;
+    private Stage stage = Stage.COVER, galleryOrigin = Stage.COVER;
+    private int focusDimension;
+    private Button photosButton;
     private LinearLayout body;
     private View focus;
     private Bitmap code;
@@ -44,7 +45,9 @@ final class TvShopView extends LinearLayout {
         return android.text.TextUtils.join(" · ", variant.options.values());
     }
 
-    void cover() { photoIndex = 0; focusDimension = host.offer.dimensions.isEmpty() ? -1 : 0; pages.clear(); show(Stage.COVER); }
+    void cover() { focusDimension = host.offer.dimensions.isEmpty() ? -1 : 0; pages.clear(); show(Stage.COVER); }
+
+    boolean galleryOpen() { return stage == Stage.GALLERY; }
 
     private void show(Stage next) {
         stage = next;
@@ -54,7 +57,11 @@ final class TvShopView extends LinearLayout {
     boolean back() {
         switch (stage) {
             case DETAIL: show(Stage.COVER); return true;
-            case GALLERY: case CART: show(Stage.DETAIL); return true;
+            case GALLERY:
+                show(galleryOrigin);
+                if (photosButton != null) photosButton.requestFocus();
+                return true;
+            case CART: show(Stage.DETAIL); return true;
             case HANDOFF:
                 host.cancelCheckout();
                 code = null;
@@ -75,13 +82,16 @@ final class TvShopView extends LinearLayout {
         host.clearPhotos();
         removeAllViews();
         focus = null;
-        int tint = (host.background & 0xffffff) | 0xf5000000;
-        setPadding(dp(14), dp(9), dp(14), dp(10));
-        setBackgroundColor(tint);
-        header();
-        if (stage == Stage.GALLERY) {
-            gallery();
+        photosButton = null;
+        if (galleryOpen()) {
+            setPadding(0, 0, 0, 0);
+            TvPhotoGallery gallery = new TvPhotoGallery(host);
+            addView(gallery, new LayoutParams(-1, -1));
+            focus = gallery.closeButton;
         } else {
+            setPadding(dp(14), dp(9), dp(14), dp(10));
+            setBackgroundColor((host.background & 0xffffff) | 0xf5000000);
+            header();
             ScrollView scroll = new ScrollView(getContext());
             scroll.setFocusable(false);
             scroll.setSmoothScrollingEnabled(false);
@@ -93,7 +103,7 @@ final class TvShopView extends LinearLayout {
             scroll.addView(body);
             switch (stage) {
                 case COVER:
-                    hero(false);
+                    hero(true);
                     if (host.offer.vendor != null) text(body, host.offer.vendor, 13, false);
                     text(body, host.offer.title, 20, true);
                     boolean range = host.offer.minimumPrice.compareTo(host.offer.maximumPrice) != 0;
@@ -180,9 +190,12 @@ final class TvShopView extends LinearLayout {
         art.addView(host.photo(url, 720, true), new FrameLayout.LayoutParams(-1, -1));
         body.addView(art, new LayoutParams(-1, height));
         if (galleryLink) {
-            Button gallery = host.button(l("View gallery", "Ver galería de fotos", "Ver galeria de fotos"), () -> { photoIndex = 0; show(Stage.GALLERY); }, false);
-            gallery.setTextSize(12);
-            art.addView(gallery, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT));
+            photosButton = host.button(l("View photos", "Ver fotos", "Ver fotos"), () -> {
+                galleryOrigin = stage;
+                show(Stage.GALLERY);
+            }, false);
+            photosButton.setTextSize(12);
+            art.addView(photosButton, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT));
         }
     }
 
@@ -279,30 +292,4 @@ final class TvShopView extends LinearLayout {
         if (retry) primary(l("Try again", "Reintentar", "Tentar novamente"), host::buy, true);
     }
 
-    private void gallery() {
-        List<String> photos = host.gallery();
-        String url = photos.isEmpty() ? null : photos.get(photoIndex);
-        addView(host.photo(url, 960, true), new LayoutParams(-1, 0, 1));
-        LinearLayout navigation = host.row();
-        navigation.setGravity(Gravity.CENTER);
-        addView(navigation, host.spaced(6));
-        Button prev = arrow(false, photos.size()), next = arrow(true, photos.size());
-        navigation.addView(prev, new LayoutParams(dp(42), -2));
-        TextView position = host.label((photoIndex + 1) + " / " + Math.max(1, photos.size()), 14, true);
-        position.setGravity(Gravity.CENTER);
-        navigation.addView(position, new LayoutParams(0, -2, 1));
-        navigation.addView(next, new LayoutParams(dp(42), -2));
-        text(this, host.offer.title, 17, true);
-        text(this, price(), 16, false);
-        if (next.isEnabled()) focus = next;
-        else if (prev.isEnabled()) focus = prev;
-    }
-
-    private Button arrow(boolean forward, int n) {
-        Button arrow = host.button(forward ? "›" : "‹", () -> { photoIndex += forward ? 1 : -1; render(); }, false);
-        arrow.setEnabled(forward ? photoIndex + 1 < n : photoIndex > 0);
-        arrow.setContentDescription(forward ? l("Next photo", "Foto siguiente", "Próxima foto")
-                : l("Previous photo", "Foto anterior", "Foto anterior"));
-        return arrow;
-    }
 }

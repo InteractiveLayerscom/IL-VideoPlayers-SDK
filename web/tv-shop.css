@@ -40,7 +40,7 @@
 .il-tv-shop .il-tv-logo { max-width: 23%; max-height: 1.65em; object-fit: contain; }
 .il-tv-shop .il-tv-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: .65em; overflow: auto; padding: 4px; scroll-padding: 5px; }
 .il-tv-shop .il-tv-body > * { flex: none; }
-.il-tv-shop .il-tv-art, .il-tv-shop .il-tv-feature {
+.il-tv-shop .il-tv-art {
   display: block;
   width: 100%;
   height: 9em;
@@ -82,12 +82,13 @@
   overflow-wrap: anywhere;
   cursor: pointer;
 }
-.il-tv-shop .il-tv-primary { color: var(--shop-accent-ink, #161616); background: var(--shop-accent, #f6f6f6); border-color: transparent; min-height: 2.8em; }
+.il-tv-shop .il-tv-primary { color: #141414; background: #fff; border-color: transparent; min-height: 2.8em; }
 .il-tv-shop .il-tv-secondary, .il-tv-shop .il-tv-back, .il-tv-shop .il-tv-gallery-arrow { background: rgb(128 128 128 / .26); border-color: transparent; }
 .il-tv-shop .il-tv-back, .il-tv-shop .il-tv-gallery-arrow { width: 1.7em; min-height: 1.7em; padding: 0; font-size: 1.3em; }
 .il-tv-shop button[aria-pressed=true] { background: var(--shop-foreground, #fafafa); color: var(--shop-background, #202020); }
 .il-tv-shop button:disabled { opacity: .42; cursor: default; }
 .il-tv-shop button:focus { outline: 2px solid var(--shop-foreground, white); outline-offset: 2px; box-shadow: 0 0 0 2px var(--shop-background, #202020); }
+.il-tv-shop .il-tv-primary:focus { outline-color: #fff; box-shadow: 0 0 0 2px #141414; }
 .il-tv-shop .il-tv-row { display: flex; align-items: center; gap: .5em; overflow: auto; scroll-padding: 5px; margin: -5px; padding: 5px; }
 .il-tv-shop .il-tv-row button { flex: none; }
 .il-tv-shop .il-tv-actions { align-items: stretch; }
@@ -102,6 +103,24 @@
 .il-tv-shop .il-tv-total strong:last-child { font-size: 1.2em; }
 .il-tv-shop .il-tv-status { display: grid; align-content: center; justify-items: center; gap: .6em; text-align: center; margin: auto 0; }
 .il-tv-shop .il-tv-qr { width: 58%; width: min(max(154px, 28cqh), 82%); max-height: 36cqh; height: auto; aspect-ratio: 1; object-fit: contain; background: white; image-rendering: pixelated; }
-.il-tv-shop .il-tv-feature { height: 13em; height: 48cqh; }
-.il-tv-shop[data-page=gallery] .il-tv-footer .il-tv-row { justify-content: center; gap: 1em; }
-.il-tv-shop .il-tv-counter { font-variant-numeric: tabular-nums; }
+.il-tv-shop .il-tv-viewer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: .65em;
+  padding: 1.5% 2.5%;
+  box-sizing: border-box;
+  pointer-events: auto;
+  background: #141414;
+  color: #fafafa;
+  font-size: clamp(12px, 1.65cqw, 36px);
+}
+.il-tv-shop .il-tv-viewer-toolbar { display: flex; align-items: center; gap: .8em; min-width: 0; }
+.il-tv-shop .il-tv-viewer-toolbar h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.15em; }
+.il-tv-shop .il-tv-counter { flex: none; padding: .3em .75em; border-radius: 999px; background: #303030; font-variant-numeric: tabular-nums; }
+.il-tv-shop .il-tv-feature { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+.il-tv-shop .il-tv-viewer .il-tv-gallery-arrow { position: absolute; top: 50%; transform: translateY(-50%); width: 2em; min-height: 2em; color: white; background: #262626eb; }
+.il-tv-shop .il-tv-viewer [data-shop-key=prev] { left: 2.5%; }
+.il-tv-shop .il-tv-viewer [data-shop-key=next] { right: 2.5%; }
+.il-tv-shop .il-tv-viewer button:focus { outline-color: white; box-shadow: 0 0 0 2px #141414; }

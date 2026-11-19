@@ -4,7 +4,7 @@ import UIKit
 /// Used by tvOS. Each presentation stage stays in the host's video surface.
 @MainActor
 final class TVCommercePanel: UIView {
-    private enum Stage { case entry, cover, details, gallery, cart, qr }
+    private enum Stage { case entry, cover, details, cart, qr }
     private let offer: OverlayCommerce
     private let brand: SceneBrand?
     private let fallback: UIImage?
@@ -21,7 +21,10 @@ final class TVCommercePanel: UIView {
     private let money = NumberFormatter()
     private var stage: Stage
     private var selection: Int
-    private var galleryIndex = 0
+    private var viewer: TVProductPhotoViewer?
+    private weak var photoButton: UIButton?
+    private weak var sheetPhoto: UIImageView?
+    private var galleryLoad: Task<Void, Never>?
     private var media: [Task<Void, Never>] = []
     private var checkout: Task<Void, Never>?
     private var qr: UIImage?
@@ -85,8 +88,14 @@ final class TVCommercePanel: UIView {
     }
 
     func presentationFrame(in bounds: CGRect) -> CGRect {
+        if viewer != nil { return bounds }
         let unit = max(0.55, min(2.5, bounds.height / 640))
-        if scale != unit { scale = unit; render() }
+        if scale != unit {
+            let refocusPhoto = photoButton != nil && focus === photoButton
+            scale = unit
+            render()
+            if refocusPhoto { focus = photoButton }
+        }
         switch stage {
         case .entry:
             let width = min(bounds.width * 0.85, 155 * unit), height = min(bounds.height, 48 * unit)
@@ -100,6 +109,7 @@ final class TVCommercePanel: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if let viewer { viewer.frame = bounds; return }
         if stage == .entry { focus?.frame = bounds; return }
         let inset = min(bounds.width * 0.07, 30 * scale)
         let top = min(bounds.height * 0.05, 27 * scale)
@@ -117,7 +127,10 @@ final class TVCommercePanel: UIView {
         scroll.contentSize = body.bounds.size
     }
 
-    override var preferredFocusEnvironments: [UIFocusEnvironment] { focus.map { [$0] } ?? super.preferredFocusEnvironments }
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let viewer { return [viewer] }
+        return focus.map { [$0] } ?? super.preferredFocusEnvironments
+    }
 
     #if os(tvOS)
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -128,17 +141,29 @@ final class TVCommercePanel: UIView {
 
     @discardableResult
     func closeDetails() -> Bool {
+        if let viewer {
+            galleryLoad?.cancel()
+            galleryLoad = nil
+            viewer.removeFromSuperview()
+            self.viewer = nil
+            subviews.forEach { $0.isHidden = false }
+            if let sheetPhoto { productPhoto.display(variant, in: sheetPhoto) }
+            focus = photoButton
+            updatePresentation()
+            return true
+        }
         switch stage {
         case .entry: return false
         case .cover: if let onClose { onClose() } else { go(.entry) }
         case .details: go(.cover)
-        case .gallery, .cart: go(.details)
+        case .cart: go(.details)
         case .qr: go(.cart)
         }
         return true
     }
 
     func dispose() {
+        galleryLoad?.cancel()
         productPhoto.cancel()
         checkout?.cancel()
         media.forEach { $0.cancel() }
@@ -152,10 +177,16 @@ final class TVCommercePanel: UIView {
         failed = false
         stage = next
         render()
+        updatePresentation()
+    }
+
+    private func updatePresentation() {
+        setNeedsLayout()
+        setNeedsFocusUpdate()
         superview?.setNeedsLayout()
         superview?.layoutIfNeeded()
-        if let focus, let system = UIFocusSystem.focusSystem(for: self) {
-            system.requestFocusUpdate(to: focus)
+        if let target = preferredFocusEnvironments.first, let system = UIFocusSystem.focusSystem(for: self) {
+            system.requestFocusUpdate(to: target)
             system.updateFocusIfNeeded()
         }
     }
@@ -169,7 +200,7 @@ final class TVCommercePanel: UIView {
         return result
     }
 
-    private func button(_ value: String, fill: UIColor = UIColor(white: 0.23, alpha: 1), outlined: Bool = false, action: @escaping () -> Void) -> UIButton {
+    private func button(_ value: String, fill: UIColor = UIColor(white: 0.23, alpha: 1), outlined: Bool = false, action: (() -> Void)? = nil) -> UIButton {
         let button = UIButton(type: .system)
         var config = UIButton.Configuration.plain()
         config.title = value
@@ -192,26 +223,28 @@ final class TVCommercePanel: UIView {
             control.alpha = control.isEnabled ? 1 : 0.45
             control.configuration = appearance
         }
-        button.addAction(UIAction { _ in action() }, for: .primaryActionTriggered)
+        if let action { button.addAction(UIAction { _ in action() }, for: .primaryActionTriggered) }
         return button
     }
 
-    private func photo(_ url: URL?, fallback: UIImage? = nil) -> UIImageView {
+    private func photo(_ url: URL?) -> UIImageView {
         let view = UIImageView()
         view.contentMode = .scaleAspectFit
         view.clipsToBounds = true
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        view.image = fallback
-        guard let url else { return view }
-        if let existing = cache.object(forKey: url as NSURL) { view.image = existing; return view }
-        media.append(Task { [weak self, weak view, imageLoader] in
+        if let url, let task = loadPhoto(url, in: view) { media.append(task) }
+        return view
+    }
+
+    private func loadPhoto(_ url: URL, in view: UIImageView) -> Task<Void, Never>? {
+        if let existing = cache.object(forKey: url as NSURL) { view.image = existing; return nil }
+        return Task { [weak self, weak view, imageLoader] in
             guard let cg = try? await imageLoader(url), !Task.isCancelled else { return }
             let loaded = UIImage(cgImage: cg)
             self?.cache.setObject(loaded, forKey: url as NSURL, cost: cg.bytesPerRow * cg.height)
             view?.image = loaded
-        })
-        return view
+        }
     }
 
     private func selectedImageView() -> UIImageView {
@@ -223,13 +256,65 @@ final class TVCommercePanel: UIView {
         return image
     }
 
-    private func hero(_ height: CGFloat) {
-        guard selectedPhoto != nil || fallback != nil else { return }
-        let view = selectedImageView()
-        view.backgroundColor = UIColor(white: 0.14, alpha: 1)
-        view.layer.cornerRadius = 10 * scale
-        view.heightAnchor.constraint(equalToConstant: height * scale).isActive = true
-        body.addArrangedSubview(view)
+    private func hero(_ height: CGFloat, opensViewer: Bool = false) {
+        let photos = opensViewer ? gallery : []
+        let title = text("View full size", "Ver en grande", "Ver em tela cheia")
+        guard productPhoto.hasPhoto(for: variant) else {
+            if !photos.isEmpty {
+                let action = button(title) { [weak self] in self?.openViewer(photos) }
+                action.accessibilityLabel = title
+                photoButton = action
+                body.addArrangedSubview(action)
+            }
+            return
+        }
+        let image = selectedImageView()
+        image.backgroundColor = UIColor(white: 0.14, alpha: 1)
+        image.layer.cornerRadius = 10 * scale
+        image.heightAnchor.constraint(equalToConstant: height * scale).isActive = true
+        body.addArrangedSubview(image)
+        guard !photos.isEmpty else { return }
+        sheetPhoto = image
+        let action = button("", fill: .clear) { [weak self] in self?.openViewer(photos) }
+        action.accessibilityLabel = title
+        photoButton = action
+        image.isUserInteractionEnabled = true
+        image.addSubview(action)
+        action.frame = image.bounds
+        action.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        let badge = UIStackView(arrangedSubviews: [label(title, 15, bold: true)])
+        badge.isUserInteractionEnabled = false
+        badge.isLayoutMarginsRelativeArrangement = true
+        badge.directionalLayoutMargins = .init(top: 5 * scale, leading: 12 * scale, bottom: 5 * scale, trailing: 12 * scale)
+        badge.backgroundColor = UIColor(white: 0.12, alpha: 0.94)
+        badge.layer.cornerRadius = 10 * scale
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        action.addSubview(badge)
+        NSLayoutConstraint.activate([
+            badge.trailingAnchor.constraint(equalTo: action.trailingAnchor, constant: -8 * scale),
+            badge.bottomAnchor.constraint(equalTo: action.bottomAnchor, constant: -8 * scale)
+        ])
+    }
+
+    private func openViewer(_ photos: [URL?]) {
+        guard viewer == nil, !photos.isEmpty else { return }
+        subviews.forEach { $0.isHidden = true }
+        let viewer = TVProductPhotoViewer(count: photos.count, initialIndex: photos.firstIndex(of: selectedPhoto) ?? 0,
+                                          title: offer.title, price: price, scale: scale, localize: text,
+                                          makeButton: { self.button($0, fill: UIColor(white: 0.19, alpha: 1)) },
+                                          showImage: { [weak self] index in
+            guard let self else { return UIImageView() }
+            self.galleryLoad?.cancel()
+            let url = photos[index]
+            if url == self.selectedPhoto { return self.selectedImageView() }
+            let image = UIImageView()
+            if let url { self.galleryLoad = self.loadPhoto(url, in: image) }
+            else { image.image = self.fallback }
+            return image
+        }, close: { [weak self] in self?.closeDetails() })
+        self.viewer = viewer
+        addSubview(viewer)
+        updatePresentation()
     }
 
     private func render() {
@@ -242,7 +327,7 @@ final class TVCommercePanel: UIView {
         backgroundColor = stage == .entry ? .clear : background
         if stage == .entry {
             let trigger = button(midroll ? text("Buy", "Comprar", "Comprar") : text("View product", "Ver producto", "Ver produto"),
-                                 fill: UIColor.black.withAlphaComponent(0.8)) { [weak self] in
+                                 fill: .white) { [weak self] in
                 self?.go(.cover)
                 self?.onOpen()
             }
@@ -266,7 +351,6 @@ final class TVCommercePanel: UIView {
         addSubview(footer)
         let heading: String
         switch stage {
-        case .gallery: heading = text("Photos", "Fotos", "Fotos")
         case .cart: heading = text("Shopping cart", "Carrito de compras", "Carrinho de compras")
         case .qr: heading = "Shopify"
         case .details: heading = offer.title
@@ -290,7 +374,7 @@ final class TVCommercePanel: UIView {
         focus = back
         switch stage {
         case .cover:
-            hero(196)
+            hero(196, opensViewer: true)
             if let vendor = offer.vendor, !vendor.isEmpty {
                 let label = label(vendor, 15, bold: true)
                 label.textColor = UIColor(white: 0.73, alpha: 1)
@@ -325,15 +409,7 @@ final class TVCommercePanel: UIView {
                 : text("View details", "Ver detalles", "Ver detalhes")
             primary(titleCTA) { [weak self] in self?.go(.details) }
         case .details:
-            hero(134)
-            if !gallery.isEmpty {
-                let showPhotos = button(text("View photo gallery", "Ver galería de fotos", "Ver galeria de fotos")) { [weak self] in
-                    guard let self else { return }
-                    self.galleryIndex = self.gallery.firstIndex(of: self.selectedPhoto) ?? 0
-                    self.go(.gallery)
-                }
-                body.addArrangedSubview(showPhotos)
-            }
+            hero(134, opensViewer: true)
             addPrice(variant.price, previous: offer.previousPrice(for: variant))
             if let description = offer.description {
                 let caption = label(description, 15)
@@ -358,7 +434,6 @@ final class TVCommercePanel: UIView {
             }
             primary(text("Add to cart", "Agregar al carrito", "Adicionar ao carrinho"), enabled: variant.available) { [weak self] in self?.go(.cart) }
             if let rail = rails.first { focus = rail }
-        case .gallery: renderGallery()
         case .cart:
             let row = UIStackView()
             row.spacing = 10 * scale
@@ -429,57 +504,11 @@ final class TVCommercePanel: UIView {
     }
 
     private func primary(_ title: String, enabled: Bool = true, _ handler: @escaping () -> Void) {
-        let control = button(title, fill: UIColor(white: 0.96, alpha: 1), action: handler)
+        let control = button(title, fill: .white, action: handler)
         control.isEnabled = enabled
         control.heightAnchor.constraint(equalToConstant: 48 * scale).isActive = true
         footer.addArrangedSubview(control)
         if enabled { focus = control }
-    }
-
-    private func renderGallery() {
-        let images = gallery
-        guard images.indices.contains(galleryIndex) else { return }
-        let center = photo(images[galleryIndex], fallback: images[galleryIndex] == nil ? fallback : nil)
-        center.layer.cornerRadius = 10 * scale
-        center.backgroundColor = UIColor(white: 0.14, alpha: 1)
-        center.isAccessibilityElement = true
-        center.accessibilityLabel = text("Photo", "Foto", "Foto") + " \(galleryIndex + 1)/\(images.count)"
-        center.heightAnchor.constraint(equalToConstant: 245 * scale).isActive = true
-        body.addArrangedSubview(center)
-        if images.count > 1 {
-            let controls = UIStackView()
-            controls.alignment = .center
-            controls.spacing = 12 * scale
-            func arrow(_ direction: Int) -> UIButton {
-                let move = button(direction < 0 ? "‹" : "›") { [weak self] in
-                    guard let self else { return }
-                    self.galleryIndex = (self.galleryIndex + direction + images.count) % images.count
-                    self.render()
-                    if let focus = self.focus, let system = UIFocusSystem.focusSystem(for: self) {
-                        system.requestFocusUpdate(to: focus)
-                        system.updateFocusIfNeeded()
-                    }
-                }
-                move.accessibilityLabel = direction < 0 ? text("Previous photo", "Foto anterior", "Foto anterior") : text("Next photo", "Foto siguiente", "Próxima foto")
-                move.widthAnchor.constraint(equalToConstant: 46 * scale).isActive = true
-                return move
-            }
-            controls.addArrangedSubview(arrow(-1))
-            let count = label("\(galleryIndex + 1) / \(images.count)", 15)
-            count.textAlignment = .center
-            controls.addArrangedSubview(count)
-            let next = arrow(1)
-            controls.addArrangedSubview(next)
-            body.addArrangedSubview(controls)
-            focus = next
-        }
-        footer.addArrangedSubview(label(offer.title, 22, bold: true))
-        footer.addArrangedSubview(label(price, 18, bold: true))
-        if let description = offer.description {
-            let caption = label(description, 14)
-            caption.numberOfLines = 2
-            footer.addArrangedSubview(caption)
-        }
     }
 
     private func startCheckout() {

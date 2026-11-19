@@ -3,21 +3,21 @@ const labels = {
   es: {
     from:'Desde', intro:'Producto', detail:'Detalles', photos:'Fotos', cart:'Tu carrito', payment:'Pago con Shopify',
     options:'Elegir opciones', details:'Ver detalles', add:'Agregar al carrito', checkout:'Continuar con el QR',
-    total:'Total', unit:'1 unidad', gallery:'Ver fotos', prev:'Anterior', next:'Siguiente',
+    total:'Total', unit:'1 unidad', gallery:'Ver fotos', enlarge:'Ampliar foto', prev:'Anterior', next:'Siguiente',
     scan:'Escaneá para pagar en Shopify', back:'Volver', loading:'Preparando tu carrito…',
     failed:'No se pudo preparar el carrito.', retry:'Reintentar', soldOut:'Sin stock', variant:'Variante',
   },
   en: {
     from:'From', intro:'Product', detail:'Details', photos:'Photos', cart:'Your cart', payment:'Shopify checkout',
     options:'Choose options', details:'View details', add:'Add to cart', checkout:'Continue to QR',
-    total:'Total', unit:'1 item', gallery:'View photos', prev:'Previous', next:'Next',
+    total:'Total', unit:'1 item', gallery:'View photos', enlarge:'Enlarge photo', prev:'Previous', next:'Next',
     scan:'Scan to pay on Shopify', back:'Back', loading:'Preparing your cart…',
     failed:'Could not prepare the cart.', retry:'Retry', soldOut:'Out of stock', variant:'Variant',
   },
   pt: {
     from:'A partir de', intro:'Produto', detail:'Detalhes', photos:'Fotos', cart:'Seu carrinho', payment:'Pagamento na Shopify',
     options:'Escolher opções', details:'Ver detalhes', add:'Adicionar ao carrinho', checkout:'Continuar com o QR',
-    total:'Total', unit:'1 unidade', gallery:'Ver fotos', prev:'Anterior', next:'Próxima',
+    total:'Total', unit:'1 unidade', gallery:'Ver fotos', enlarge:'Ampliar foto', prev:'Anterior', next:'Próxima',
     scan:'Escaneie para pagar na Shopify', back:'Voltar', loading:'Preparando seu carrinho…',
     failed:'Não foi possível preparar o carrinho.', retry:'Tentar novamente', soldOut:'Sem estoque', variant:'Variante',
   },
@@ -65,16 +65,16 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   const hasPriceRange = amounts.length > 1 && Math.max(...amounts) > lowestPrice;
   const optionSummary = productOptions(availableVariants).filter(axis => axis.values.length > 1);
   const selectedPhoto = () => selected?.imageUrl || offer.imageUrl || offer.images?.[0];
-  let index = 0, galleryOrigin = 'detail';
+  const galleryLabel = photos.length > 1 ? copy.gallery : copy.enlarge;
+  let index = 0, galleryOrigin = 'detail', galleryOpener = 'gallery';
   let page = 'intro', qr = '', error = false, pending, disposed = false;
   const previous = focusRoot.activeElement;
   const root = node('div', 'il-tv-shop');
   root.setAttribute('role', 'group');
   root.setAttribute('aria-label', offer.title);
-  for (const key of ['background', 'foreground', 'accent']) {
+  for (const key of ['background', 'foreground']) {
     if (/^#[0-9a-f]{6}$/i.test(brand[key])) root.style.setProperty('--shop-' + key, brand[key]);
   }
-  if (/^#[0-9a-f]{6}$/i.test(brand.accent)) root.style.setProperty('--shop-accent-ink', accentInk(brand.accent));
   stage.appendChild(root);
 
   function node(tag, cls, value) {
@@ -119,7 +119,7 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   function back() {
     if (page === 'intro') close();
     else if (page === 'detail') go('intro', 'detail');
-    else if (page === 'gallery') go(galleryOrigin, 'gallery');
+    else if (page === 'gallery') go(galleryOrigin, galleryOpener);
     else if (page === 'cart') go('detail', 'cart');
     else go('cart', 'finish');
   }
@@ -131,14 +131,35 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
     selected = item;
     render(key);
   }
-  function openGallery() {
+  function openGallery(event) {
     galleryOrigin = page;
+    galleryOpener = event.currentTarget.dataset.shopKey;
     index = Math.max(0, photos.indexOf(selectedPhoto()));
     go('gallery');
   }
   function changePhoto(step) {
+    if (photos.length < 2) return;
     index = (index + step + photos.length) % photos.length;
-    render(step < 0 ? 'prev' : 'next');
+    root.querySelector('.il-tv-feature').src = photos[index];
+    root.querySelector('.il-tv-counter').textContent = (index + 1) + ' / ' + photos.length;
+    focusKey(step < 0 ? 'prev' : 'next');
+  }
+  function renderViewer(key) {
+    const viewer = node('section', 'il-tv-viewer');
+    viewer.setAttribute('role', 'dialog');
+    viewer.setAttribute('aria-label', copy.photos + ' · ' + offer.title);
+    const toolbar = node('header', 'il-tv-viewer-toolbar');
+    toolbar.append(button('‹', back, 'back', 'il-tv-back', copy.back), node('h2', '', offer.title));
+    viewer.append(toolbar, photo(photos[index], 'il-tv-feature', offer.title));
+    if (photos.length > 1) {
+      const counter = node('span', 'il-tv-counter', (index + 1) + ' / ' + photos.length);
+      counter.setAttribute('aria-live', 'polite');
+      toolbar.append(counter);
+      viewer.append(button('‹', () => changePhoto(-1), 'prev', 'il-tv-gallery-arrow', copy.prev),
+        button('›', () => changePhoto(1), 'next', 'il-tv-gallery-arrow', copy.next));
+    }
+    root.replaceChildren(viewer);
+    focusKey(key ?? (photos.length > 1 ? 'next' : 'back'));
   }
   function addOptions(body) {
     if (variants.length === 1 && variants[0].label === 'Default Title') return;
@@ -200,11 +221,12 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
     render(error ? 'retry' : 'back');
   }
   function render(key) {
-    const pane = node('section', 'il-tv-sheet');
     root.dataset.page = page;
+    if (page === 'gallery') { renderViewer(key); return; }
+    const pane = node('section', 'il-tv-sheet');
     root.replaceChildren(pane);
     const header = node('header', 'il-tv-header');
-    const headings = {intro:copy.intro, detail:copy.detail, gallery:copy.photos, cart:copy.cart, qr:copy.payment};
+    const headings = {intro:copy.intro, detail:copy.detail, cart:copy.cart, qr:copy.payment};
     header.append(button('‹', back, 'back', 'il-tv-back', copy.back), node('h3', '', headings[page]));
     if (brand.logoUrl) header.append(photo(brand.logoUrl, 'il-tv-logo'));
     const body = node('div', 'il-tv-body');
@@ -232,14 +254,16 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       }
       parent.append(prices);
     }
-    function showHero(parent) {
+    function showHero(parent, key, caption) {
       const url = selectedPhoto();
       if (!url) return;
+      const view = button('', openGallery, key, 'il-tv-gallery-open', caption);
       const art = node('div', 'il-tv-art');
       const backdrop = photo(url, 'il-tv-art-backdrop');
       backdrop.setAttribute('aria-hidden', 'true');
       art.append(backdrop, photo(url, 'il-tv-hero', offer.title));
-      parent.append(art);
+      view.append(art, node('span', '', caption));
+      parent.append(view);
     }
     function showItem() {
       const line = node('div', 'il-tv-line');
@@ -252,7 +276,7 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       body.append(line);
     }
     if (page === 'intro') {
-      showHero(body);
+      showHero(body, 'hero', copy.enlarge);
       const info = node('div', 'il-tv-intro-info');
       if (offer.vendor) info.append(node('span', 'il-tv-vendor', offer.vendor));
       info.append(node('h2', '', offer.title));
@@ -270,27 +294,15 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       const nextStep = availableVariants.length > 1 ? copy.options : copy.details;
       const actions = row(mainButton(available ? nextStep : copy.soldOut, () => go('detail'), 'detail', available));
       actions.classList.add('il-tv-actions');
-      if (photos.length > 1) actions.append(button(copy.gallery, openGallery, 'gallery', 'il-tv-secondary'));
+      if (photos.length) actions.append(button(galleryLabel, openGallery, 'gallery', 'il-tv-secondary'));
       footer.append(actions);
     } else if (page === 'detail') {
-      if (photos.length > 1) {
-        const view = button('', openGallery, 'gallery', 'il-tv-gallery-open', copy.gallery);
-        showHero(view);
-        view.append(node('span', '', copy.gallery));
-        body.append(view);
-      } else showHero(body);
+      if (selectedPhoto()) showHero(body, 'gallery', galleryLabel);
+      else if (photos.length) body.append(button(galleryLabel, openGallery, 'gallery', 'il-tv-secondary'));
       body.append(node('h2', '', offer.title));
       showPrice(body);
       addOptions(body);
       footer.append(mainButton(available ? copy.add : copy.soldOut, () => go('cart'), 'cart', available));
-    } else if (page === 'gallery') {
-      const slides = node('div', 'il-tv-slides');
-      slides.append(photo(photos[index], 'il-tv-feature', offer.title));
-      body.append(slides, node('h2', '', offer.title));
-      const controls = row(button('‹', () => changePhoto(-1), 'prev', 'il-tv-gallery-arrow', copy.prev),
-        node('span', 'il-tv-counter', (index + 1) + ' / ' + photos.length),
-        button('›', () => changePhoto(1), 'next', 'il-tv-gallery-arrow', copy.next));
-      footer.append(controls);
     } else if (page === 'cart') {
       showItem();
       const sum = node('div', 'il-tv-total');
@@ -312,10 +324,14 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       if (error) footer.append(mainButton(copy.retry, checkout, 'retry'));
     }
     const selection = pane.querySelector('[aria-pressed="true"]:not(:disabled)')?.dataset.shopKey;
-    focusKey(key ?? ({intro:'detail', detail:selection ?? 'cart', cart:'finish', gallery:'next', qr:'back'})[page]);
+    focusKey(key ?? ({intro:'detail', detail:selection ?? 'cart', cart:'finish', qr:'back'})[page]);
   }
   function move(direction) {
-    if (page === 'gallery' && ['ArrowLeft','ArrowRight'].includes(direction)) { changePhoto(direction === 'ArrowLeft' ? -1 : 1); return; }
+    if (page === 'gallery') {
+      if (direction === 'ArrowLeft' || direction === 'ArrowRight') changePhoto(direction === 'ArrowLeft' ? -1 : 1);
+      else focusKey(direction === 'ArrowDown' && photos.length > 1 ? 'next' : 'back');
+      return;
+    }
     const buttons = [...root.querySelectorAll('button:not(:disabled)')];
     const rows = [];
     for (const btn of buttons) {

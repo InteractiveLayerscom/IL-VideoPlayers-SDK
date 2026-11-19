@@ -144,8 +144,9 @@ final class CommercePanel extends LinearLayout {
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         if (expanded) {
             int available = MeasureSpec.getSize(widthSpec);
-            int width = tv ? Math.round(available * .42f)
-                    : Math.min(dp(390), Math.max(dp(258), Math.round(available * .39f)));
+            int width;
+            if (tv) width = shop.galleryOpen() ? available : Math.round(available * .42f);
+            else width = Math.min(dp(390), Math.max(dp(258), Math.round(available * .39f)));
             widthSpec = MeasureSpec.makeMeasureSpec(Math.min(available, width), MeasureSpec.EXACTLY);
         }
         super.onMeasure(widthSpec, heightSpec);
@@ -396,7 +397,11 @@ final class CommercePanel extends LinearLayout {
         button.setSingleLine(false);
         int base = primary ? (accent != null ? accent : PRIMARY) : NEUTRAL;
         int selected = accent != null ? accent : SELECTED;
-        int ink = primary && accent == null ? 0xff171717 : foreground;
+        if (tv && primary) {
+            base = Color.WHITE;
+            selected = Color.WHITE;
+        }
+        int ink = primary && (tv || accent == null) ? 0xff171717 : foreground;
         int ring = tv ? (accent != null ? accent : 0xffb4c6ff) : Color.WHITE;
         int focus = readable(ring, base);
         int selectedFocus = readable(ring, selected);
