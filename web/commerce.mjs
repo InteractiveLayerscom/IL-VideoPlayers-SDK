@@ -176,7 +176,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       el.addEventListener('click', action);
       return el;
     }
-    const open = button(view, openPanel);
+    const open = button(cue.format === 'midroll' ? buy : view, openPanel);
     const panel = doc.createElement('div');
     panel.className = 'il-commerce-panel';
     panel.hidden = true;
