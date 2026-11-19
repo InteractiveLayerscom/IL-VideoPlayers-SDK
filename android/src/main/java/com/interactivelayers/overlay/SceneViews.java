@@ -194,11 +194,9 @@ final class SceneViews extends FrameLayout {
         float w = getWidth(), h = getHeight();
         if (w <= 0 || h <= 0) return;
         boolean corner = "l".equals(cue.format);
-        boolean floating = "overlay".equals(cue.format);
-        float canvasLeft = corner ? 0 : w * (floating ? .64f : .125f);
-        float canvasTop = corner ? 0 : h * (floating ? .10f : .7f);
-        float sx = w * (corner ? 1 : floating ? .3f : .75f) / cue.scene.width;
-        float sy = h * (corner ? 1 : floating ? .32f : .2f) / cue.scene.height;
+        float[] canvas = canvas(cue.format, w, h);
+        float canvasLeft = canvas[0], canvasTop = canvas[1];
+        float sx = canvas[2] / cue.scene.width, sy = canvas[3] / cue.scene.height;
         clip.reset();
         if (corner) {
             clip.addRect(w * .75f, 0, w, h, Path.Direction.CW);
@@ -313,9 +311,31 @@ final class SceneViews extends FrameLayout {
         }
     }
 
+    /** Left, top, width and height of the scene canvas in a w×h player. The L spans the whole frame. */
+    static float[] canvas(String format, float w, float h) {
+        if ("l".equals(format)) return new float[]{0, 0, w, h};
+        boolean floating = "overlay".equals(format);
+        return new float[]{w * (floating ? .64f : .125f), h * (floating ? .10f : .7f),
+                w * (floating ? .3f : .75f), h * (floating ? .32f : .2f)};
+    }
+
+    /**
+     * Whether a touch at (x, y) in a w×h player belongs to the creative rather than to the program.
+     * Drawing is clipped to this area, but a layer's bounds, and so its touch target, can extend past it.
+     */
+    static boolean takesTouch(String format, float x, float y, float w, float h) {
+        if ("l".equals(format)) return x >= w * .75f || y >= h * .75f;
+        float[] area = canvas(format, w, h);
+        return x >= area[0] && x < area[0] + area[2] && y >= area[1] && y < area[1] + area[3];
+    }
+
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN && "l".equals(cue.format)
-                && event.getX() < getWidth() * .75f && event.getY() < getHeight() * .75f) return false;
+        int action = event.getActionMasked();
+        // Each further finger is delivered to the child under it as a new gesture, so it is checked too.
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            int pointer = event.getActionIndex();
+            if (!takesTouch(cue.format, event.getX(pointer), event.getY(pointer), getWidth(), getHeight())) return false;
+        }
         return super.dispatchTouchEvent(event);
     }
 

@@ -29,7 +29,7 @@ final class OverlayScene {
         float width = number(scene, "width", 0), height = number(scene, "height", 0);
         long duration = scene.optLong("durationMs");
         JSONArray items = scene.optJSONArray("layers");
-        if (width <= 0 || height <= 0 || duration <= 0 || items == null || items.length() > 512) return null;
+        if (width < 1 || height < 1 || duration <= 0 || items == null || items.length() > 512) return null;
         List<Layer> layers = new ArrayList<>();
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.optJSONObject(i);
@@ -59,11 +59,15 @@ final class OverlayScene {
         return !Float.isNaN(value) && !Float.isInfinite(value);
     }
 
+    // View rejects a transform that is not finite. Within this magnitude, and with a canvas of at
+    // least one pixel, no interpolation or scaling of the numbers read here can overflow a float.
+    private static final float LIMIT = 1e9f;
+
     private static float number(JSONObject row, String key, float fallback) {
         Object value = row.opt(key);
         if (!(value instanceof Number)) return fallback;
         float amount = ((Number) value).floatValue();
-        return finite(amount) ? amount : fallback;
+        return Math.abs(amount) <= LIMIT ? amount : fallback;
     }
 
     private static String address(JSONObject row, String field) {

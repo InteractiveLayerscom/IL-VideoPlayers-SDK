@@ -120,6 +120,51 @@ public final class OverlayCueTest {
         assertTrue(OverlayCue.fromSidecar(new org.json.JSONArray().put(row).toString()).isEmpty());
     }
 
+    private static org.json.JSONObject sceneRow() throws Exception {
+        try (java.io.InputStream data = OverlayCueTest.class.getResourceAsStream("/creative-scene.json")) {
+            return new org.json.JSONObject(new String(data.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    private static List<OverlayCue> parse(org.json.JSONObject row) throws Exception {
+        return OverlayCue.fromSidecar(new org.json.JSONArray().put(row).toString());
+    }
+
+    @Test public void dropsASceneLayerWhoseGeometryExceedsTheSupportedRange() throws Exception {
+        org.json.JSONObject row = sceneRow();
+        row.getJSONObject("scene").getJSONArray("layers").getJSONObject(0).put("width", 3e38);
+        List<OverlayScene.Layer> layers = parse(row).get(0).scene.layers;
+        assertEquals(6, layers.size());
+        for (OverlayScene.Layer layer : layers) assertNotEquals("background", layer.id);
+    }
+
+    @Test public void ignoresKeyframeValuesThatWouldOverflowInterpolation() throws Exception {
+        org.json.JSONObject row = sceneRow();
+        row.getJSONObject("scene").getJSONArray("layers").getJSONObject(2).put("keyframes", new org.json.JSONArray(
+                "[{\"timeMs\":1000,\"scale\":-3e38},{\"timeMs\":2000,\"scale\":3e38}]"));
+        OverlayScene.Frame frame = parse(row).get(0).scene.layers.get(2).frame(1500);
+        assertEquals(1f, frame.scale, 0f);
+    }
+
+    @Test public void rejectsASceneWhoseCanvasIsSmallerThanOnePixel() throws Exception {
+        org.json.JSONObject row = sceneRow();
+        row.getJSONObject("scene").put("width", 1e-30);
+        assertTrue(parse(row).isEmpty());
+    }
+
+    @Test public void aSceneOnlyTakesTouchesOnItsOwnArea() {
+        // In a 1000×500 player the super spans x 125–875, y 350–450 and the overlay x 640–940, y 50–210.
+        assertTrue(SceneViews.takesTouch("super", 500, 400, 1000, 500));
+        assertFalse(SceneViews.takesTouch("super", 500, 100, 1000, 500));
+        assertFalse(SceneViews.takesTouch("super", 50, 400, 1000, 500));
+        assertTrue(SceneViews.takesTouch("overlay", 700, 100, 1000, 500));
+        assertFalse(SceneViews.takesTouch("overlay", 300, 300, 1000, 500));
+        // The L keeps the right and bottom bands and leaves the program in the upper-left corner.
+        assertTrue(SceneViews.takesTouch("l", 900, 100, 1000, 500));
+        assertTrue(SceneViews.takesTouch("l", 100, 450, 1000, 500));
+        assertFalse(SceneViews.takesTouch("l", 100, 100, 1000, 500));
+    }
+
     @Test public void selectsUsingTheLivePositionIncludingStartAndExcludingEnd() {
         List<OverlayCue> cues = OverlayCue.fromTags(Arrays.asList("#EXTINF:6,", RANGE, RANGE));
         assertEquals(1, cues.size());

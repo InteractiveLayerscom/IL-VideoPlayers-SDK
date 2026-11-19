@@ -16,9 +16,9 @@ struct OverlayScene: Decodable, Equatable {
         durationMs = try row.decode(Double.self, forKey: .durationMs)
         let items = try row.decode([FailableLayer].self, forKey: .layers)
         layers = items.compactMap(\.value).filter {
-            $0.hidden != true && $0.width >= 0 && $0.height >= 0
+            $0.hidden != true && $0.width >= 0 && $0.height >= 0 && $0.isBounded
         }
-        guard width > 0, height > 0, durationMs > 0, !layers.isEmpty, items.count <= 512 else {
+        guard width >= 1, height >= 1, durationMs > 0, !layers.isEmpty, items.count <= 512 else {
             throw URLError(.cannotParseResponse)
         }
     }
@@ -48,6 +48,17 @@ struct OverlayScene: Decodable, Equatable {
         let keyframes: [Keyframe]?
 
         var mediaURL: URL? { OverlayCue.httpsURL(type == "video" ? poster : src) }
+
+        /// Core Animation raises on NaN geometry. Within this magnitude, and with a canvas of at
+        /// least one pixel, no interpolation or scaling of these numbers can produce one.
+        /// `endMs` is only ever compared, so a layer may use a large value to never end.
+        var isBounded: Bool {
+            let frames = (keyframes ?? []).flatMap { [$0.timeMs, $0.x, $0.y, $0.scale, $0.rotation, $0.opacity] }
+            let values: [Double?] = [x, y, width, height, opacity, rotation, radius, strokeWidth, fontSize,
+                                     startMs, trimStartMs, trimEndMs, lineHeight, letterSpacing,
+                                     gradient?.angle, shadow?.x, shadow?.y, shadow?.blur]
+            return (values + frames).allSatisfy { ($0 ?? 0).magnitude <= 1e9 }
+        }
 
         func mediaFrame(in bounds: CGRect) -> CGRect {
             let zoom = min(4, max(1, mediaCrop?.zoom ?? 1))
