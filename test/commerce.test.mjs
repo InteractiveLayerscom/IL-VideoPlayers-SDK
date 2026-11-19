@@ -328,3 +328,13 @@ test('web product window follows the selected SKU photo, falling back to the pro
   choose('Sand S'); assert.equal(image().src, sand);
   shop.hide(); window.close();
 });
+
+test('the browser shows Comprar over the confirmed linear spot', () => {
+  const {window} = new JSDOM('<main></main>');
+  const stage = window.document.querySelector('main');
+  const surface = commerceSurface(stage, {locale: 'es'});
+  surface.show({...cue, format: 'midroll'}, () => true);
+  assert.equal(stage.querySelector('button').textContent, 'Comprar');
+  surface.hide();
+  window.close();
+});
