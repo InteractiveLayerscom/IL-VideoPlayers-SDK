@@ -200,10 +200,14 @@ final class TVCommercePanel: UIView {
         return result
     }
 
-    private func button(_ value: String, fill: UIColor = UIColor(white: 0.23, alpha: 1), outlined: Bool = false, action: (() -> Void)? = nil) -> UIButton {
+    private func button(_ value: String, fill: UIColor = UIColor(white: 0.23, alpha: 1), outlined: Bool = false, symbol: String? = nil, action: (() -> Void)? = nil) -> UIButton {
         let button = UIButton(type: .system)
         var config = UIButton.Configuration.plain()
         config.title = value
+        if let symbol {
+            config.image = UIImage(systemName: symbol)
+            config.preferredSymbolConfigurationForImage = .init(pointSize: 21 * scale, weight: .semibold)
+        }
         config.baseForegroundColor = CommercePanel.readable(ink, on: fill, backdrop: background)
         config.background.backgroundColor = fill
         config.background.strokeColor = UIColor(white: 0.46, alpha: 1)
@@ -280,8 +284,7 @@ final class TVCommercePanel: UIView {
         photoButton = action
         image.isUserInteractionEnabled = true
         image.addSubview(action)
-        action.frame = image.bounds
-        action.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        action.translatesAutoresizingMaskIntoConstraints = false
         let badge = UIStackView(arrangedSubviews: [label(title, 15, bold: true)])
         badge.isUserInteractionEnabled = false
         badge.isLayoutMarginsRelativeArrangement = true
@@ -290,7 +293,13 @@ final class TVCommercePanel: UIView {
         badge.layer.cornerRadius = 10 * scale
         badge.translatesAutoresizingMaskIntoConstraints = false
         action.addSubview(badge)
+        // Leave the focused button's outer stroke inside the rounded image.
+        let focusInset = 4 * scale
         NSLayoutConstraint.activate([
+            action.leadingAnchor.constraint(equalTo: image.leadingAnchor, constant: focusInset),
+            action.trailingAnchor.constraint(equalTo: image.trailingAnchor, constant: -focusInset),
+            action.topAnchor.constraint(equalTo: image.topAnchor, constant: focusInset),
+            action.bottomAnchor.constraint(equalTo: image.bottomAnchor, constant: -focusInset),
             badge.trailingAnchor.constraint(equalTo: action.trailingAnchor, constant: -8 * scale),
             badge.bottomAnchor.constraint(equalTo: action.bottomAnchor, constant: -8 * scale)
         ])
@@ -301,7 +310,7 @@ final class TVCommercePanel: UIView {
         subviews.forEach { $0.isHidden = true }
         let viewer = TVProductPhotoViewer(count: photos.count, initialIndex: photos.firstIndex(of: selectedPhoto) ?? 0,
                                           title: offer.title, price: price, scale: scale, localize: text,
-                                          makeButton: { self.button($0, fill: UIColor(white: 0.19, alpha: 1)) },
+                                          makeButton: { self.button($0, fill: UIColor(white: 0.19, alpha: 1), symbol: $1) },
                                           showImage: { [weak self] index in
             guard let self else { return UIImageView() }
             self.galleryLoad?.cancel()
