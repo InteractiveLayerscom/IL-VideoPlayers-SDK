@@ -151,6 +151,9 @@ function makeMedia(doc, layer, allowVideo, allowAudio, imageUrl) {
       node.appendChild(image);
       if (video) node.appendChild(video);
     },
+    mute() {
+      if (video) video.defaultMuted = video.muted = true;
+    },
     update(active, moving, time) {
       if (!video) return;
       const start = (layer.trimStartMs ?? 0) / 1000;
@@ -420,6 +423,11 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
 
   return {
     show, hide,
+    applyAudioPermissions(cue) {
+      if (!allowAudio || !current) return;
+      const audible = new Set(cue.scene?.layers.filter(layer => layer.audio === true).map(layer => layer.id));
+      for (const entry of current.entries) if (!audible.has(entry.layer.id)) entry.media?.mute();
+    },
     update(time) { current?.update?.(time); },
     visible() {
       if (!current?.visible || !current.root.isConnected || doc.hidden) return false;

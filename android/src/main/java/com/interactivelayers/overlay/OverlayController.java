@@ -307,6 +307,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
                 && java.util.Objects.equals(active.imageUrl, cue.imageUrl) && active.format.equals(cue.format)
                 && (active.scene == null) == (cue.scene == null)
                 && java.util.Objects.equals(active.mimeType, cue.mimeType)) {
+            if (active != cue && scene != null && secondaryVideoAudio) scene.applyAudioPermissions(cue.scene);
             active = cue;
             updateScene(time);
             return;

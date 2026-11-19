@@ -131,6 +131,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
       desired = null;
     },
     update: scenes.update,
+    applyAudioPermissions: scenes.applyAudioPermissions,
     visible(cue) {
       if (cue.scene) return scenes.visible();
       const visible = ownsCurrent(cue) && imageVisible(matchImage(cue.imageUrl));

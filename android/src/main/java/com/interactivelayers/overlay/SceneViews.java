@@ -22,7 +22,9 @@ import android.widget.ImageView;
 import android.widget.TextView;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
@@ -174,6 +176,16 @@ final class SceneViews extends FrameLayout {
                 + value.substring(2, 3).repeat(2) + value.substring(3).repeat(2);
         try { return Color.parseColor(value); }
         catch (IllegalArgumentException ignored) { return fallback; }
+    }
+
+    void applyAudioPermissions(OverlayScene incoming) {
+        Set<String> audible = new HashSet<>();
+        for (OverlayScene.Layer layer : incoming.layers) {
+            if (layer.audio) audible.add(layer.id);
+        }
+        for (Entry entry : entries) {
+            if (entry.video != null && !audible.contains(entry.layer.id)) entry.video.mute();
+        }
     }
 
     void update(long time, boolean moving) {

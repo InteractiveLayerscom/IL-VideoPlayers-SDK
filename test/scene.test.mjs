@@ -15,6 +15,47 @@ test('normalizes a scene without fallback art and preserves sparse offer indices
   assert.equal(normalizeCue({ ...scene, scene: { ...scene.scene, format: 'super' } }), null);
 });
 
+test('a refreshed cue revokes its secondary audio without replacing the scene or recounting it', async () => {
+  const { window } = new JSDOM('<main><video></video></main>', { pretendToBeVisual: true });
+  const stage = window.document.querySelector('main');
+  const program = stage.querySelector('video');
+  Object.defineProperties(program, { paused: { value: false }, readyState: { value: 4 } });
+  window.HTMLMediaElement.prototype.pause = () => {};
+  window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+  window.HTMLMediaElement.prototype.load = () => {};
+  let allowed = true;
+  const impressions = [];
+  const sdk = attachHtmlVideo({ stage, video: program, programTime: () => 1500, interval: false, refreshMs: 0,
+    eventsUrl: 'https://ads.example/cues', sessionId: 'updated-consent', secondaryVideoAudio: true,
+    onVisible: cue => impressions.push(cue.id), fetchImpl: async () => {
+      const cue = structuredClone(scene);
+      cue.scene.layers.find(layer => layer.id === 'brand-video').audio = allowed;
+      return { ok: true, json: async () => [cue] };
+    },
+  });
+  try {
+    sdk.tick();
+    await settle();
+    const root = stage.querySelector('.il-scene');
+    root.getBoundingClientRect = () => ({ width: 1920, height: 1080 });
+    const video = root.querySelector('video');
+    assert.equal(video.muted, false);
+    allowed = false;
+    sdk.tick();
+    await settle();
+    assert.equal(video.muted, true);
+    assert.equal(root.querySelector('video'), video);
+    assert.deepEqual(impressions, [scene.id]);
+    allowed = true;
+    sdk.tick();
+    await settle();
+    assert.equal(video.muted, true);
+  } finally {
+    sdk.destroy();
+    window.close();
+  }
+});
+
 for (const kind of ['HTML5', 'Video.js', 'AVPlay', 'Shaka']) {
   test(kind + ' negotiates, presents and tears down a declarative scene', async () => {
     const { window } = new JSDOM('<main><div id="shell"><video></video></div><div id="client"></div><div id="server"></div></main>', { pretendToBeVisual: true });

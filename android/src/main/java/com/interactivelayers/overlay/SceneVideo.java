@@ -12,7 +12,7 @@ import java.io.IOException;
 final class SceneVideo extends TextureView implements TextureView.SurfaceTextureListener {
     private final OverlayScene.Layer layer;
     private final ImageView poster;
-    private final boolean allowAudio;
+    private boolean allowAudio;
     private MediaPlayer player;
     private Surface surface;
     private long time;
@@ -81,6 +81,12 @@ final class SceneVideo extends TextureView implements TextureView.SurfaceTexture
             rendered = true;
             poster.setVisibility(INVISIBLE);
         }
+    }
+
+    void mute() {
+        if (!allowAudio) return;
+        allowAudio = false;
+        if (player != null) player.setVolume(0, 0);
     }
 
     void update(long time, boolean active, boolean moving) {

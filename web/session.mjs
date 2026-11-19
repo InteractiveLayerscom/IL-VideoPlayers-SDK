@@ -111,6 +111,9 @@ export function createSession({
             now < active.end
           );
         });
+    } else if (active && current !== active) {
+      renderer.applyAudioPermissions?.(active);
+      current = active;
     }
     if (active) renderer.update?.(time);
     if (active && renderer.visible(active) && !measured.has(active.id)) {

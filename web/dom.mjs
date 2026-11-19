@@ -138,6 +138,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
     show,
     hide,
     update: scenes.update,
+    applyAudioPermissions: scenes.applyAudioPermissions,
     visible: cue => cue.scene ? scenes.visible() :
       layer?.style.visibility === 'visible' && images.length > 0 && images.every(imageVisible),
   };
