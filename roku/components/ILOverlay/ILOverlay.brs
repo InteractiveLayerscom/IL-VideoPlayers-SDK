@@ -102,10 +102,17 @@ sub setPolling(enabled as Boolean)
     end if
 end sub
 
+sub onCommerceChanged()
+    if m.panel = invalid then return
+    clearCreative()
+    refresh()
+end sub
+
 sub refresh()
     if m.video = invalid then return
-    playing = m.video.state = "playing" and m.video.visible and m.top.visible and m.video.opacity > 0 and m.top.opacity > 0
-    enabled = playing and not m.top.linearBreak and not m.top.seeking and m.cues.count() > 0
+    playing = m.video.state = "playing"
+    presenting = (playing or m.video.state = "paused") and m.video.visible and m.top.visible and m.video.opacity > 0 and m.top.opacity > 0
+    enabled = presenting and not m.top.linearBreak and not m.top.seeking and m.cues.count() > 0
     setPolling(enabled)
     if not enabled
         clearCreative()
@@ -118,15 +125,20 @@ sub refresh()
         clearCreative()
         return
     end if
-    if cue.commerce <> invalid and not m.top.commerceEnabled
+    if cue.scene = invalid and ((cue.commerce <> invalid and not m.top.commerceEnabled) or not playing)
         clearCreative()
         return
     end if
     if m.active <> invalid
-        if m.active.id <> cue.id or m.active.format <> cue.format or m.active.imageUrl <> cue.imageUrl then clearCreative()
+        if m.active.id <> cue.id or m.active.format <> cue.format or m.active.imageUrl <> cue.imageUrl or (m.active.scene = invalid) <> (cue.scene = invalid) then clearCreative()
     end if
     if m.active = invalid
         if not prepareCreative(cue) then return
+    end if
+
+    if cue.scene <> invalid
+        presentScene(nowMs)
+        return
     end if
 
     if m.first.loadStatus <> "ready"
@@ -139,11 +151,7 @@ sub refresh()
             return
         end if
     end if
-    m.art.translation = m.video.translation
-    m.art.scale = m.video.scale
-    m.art.scaleRotateCenter = m.video.scaleRotateCenter
-    m.art.rotation = m.video.rotation
-    m.art.opacity = m.video.opacity
+    applyArtworkTransform()
     if not m.art.visible
         if cue.format = "l"
             m.originalSize = [m.video.width, m.video.height]
@@ -158,6 +166,11 @@ sub refresh()
     if m.second <> invalid
         if not rendered(m.second) then return
     end if
+    reportImpression(cue, nowMs)
+end sub
+
+sub reportImpression(cue as Object, nowMs as Double)
+    if m.seen.doesExist(cue.id) then return
     event = { sessionId: m.sessionId, id: cue.id, format: cue.format, programTimeMs: nowMs }
     if cue.impressionUrl <> invalid then event.impressionUrl = cue.impressionUrl
     m.seen[cue.id] = true
@@ -179,6 +192,10 @@ function prepareCreative(cue as Object) as Boolean
     m.active = cue
     m.commerceVideoWidth = width
     m.commerceVideoHeight = height
+    if cue.scene <> invalid
+        prepareScene(width, height)
+        return true
+    end if
     if cue.format = "overlay"
         m.primary.clippingRect = [0, 0, 0, 0]
         m.first = createPoster(m.primary, width * 0.30, height * 0.32, cue.imageUrl)
@@ -198,13 +215,13 @@ function prepareCreative(cue as Object) as Boolean
     return true
 end function
 
-function createPoster(parent as Object, width as Float, height as Float, uri as String) as Object
+function createPoster(parent as Object, width as Float, height as Float, uri as String, fit = "scaleToFill" as String, decodeScale = 1.0 as Float) as Object
     poster = parent.createChild("Poster")
     poster.width = width
     poster.height = height
-    poster.loadWidth = width
-    poster.loadHeight = height
-    poster.loadDisplayMode = "scaleToFill"
+    poster.loadWidth = width * decodeScale
+    poster.loadHeight = height * decodeScale
+    poster.loadDisplayMode = fit
     poster.enableRenderTracking = true
     poster.uri = uri
     return poster
@@ -226,6 +243,7 @@ end sub
 
 sub clearCreative()
     hideArtwork()
+    clearScene()
     if m.first <> invalid then m.primary.removeChild(m.first)
     if m.second <> invalid then m.secondary.removeChild(m.second)
     m.first = invalid

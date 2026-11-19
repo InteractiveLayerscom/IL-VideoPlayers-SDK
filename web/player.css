@@ -7,7 +7,7 @@
   right: 6%;
   bottom: 11%;
   max-width: 88%;
-  color: #fff;
+  color: var(--il-commerce-foreground, #fff);
   font: 600 clamp(14px, 2vw, 26px)/1.35 system-ui, sans-serif;
   pointer-events: auto;
   text-align: left;
@@ -18,17 +18,17 @@
   margin: .18em;
   border: 1px solid #8d98ab;
   border-radius: .35em;
-  color: #fff;
+  color: var(--il-commerce-foreground, #fff);
   background: #202c42;
   font: inherit;
 }
 .il-commerce a { display: inline-block; }
-.il-commerce button[aria-pressed="true"] { background: #314e80; }
+.il-commerce button[aria-pressed="true"] { background: var(--il-commerce-accent, #314e80); }
 .il-commerce button:focus-visible, .il-commerce a:focus-visible { outline: 3px solid #78e4fd; }
 .il-commerce .il-commerce-panel {
   padding: .65em;
   border-radius: .5em;
-  background: #101929;
+  background: var(--il-commerce-background, #101929);
   max-height: 65vh;
   overflow: auto;
 }
@@ -37,3 +37,7 @@
 .il-commerce-variants { max-width: 32em; }
 .il-commerce-result { display: flex; align-items: center; gap: .45em; }
 .il-commerce-result img { width: clamp(90px, 18vw, 200px); object-fit: contain; background: #fff; }
+
+.il-commerce-logo { display: block; max-width: 5em; max-height: 2em; object-fit: contain; margin-bottom: .4em; }
+.il-scene-action { cursor: pointer; }
+.il-scene-action:focus { box-shadow: inset 0 0 0 3px #78e4fd; outline: none; }

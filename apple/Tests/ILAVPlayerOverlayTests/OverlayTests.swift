@@ -44,6 +44,61 @@ final class OverlayTests: XCTestCase {
         XCTAssertEqual(try OverlayCue.decodeSidecar(Data(legacy.utf8)).first?.format, .super)
     }
 
+    #if os(macOS)
+    func testSceneOnlyCuePreservesOfferAndInterpolatesIndependentTracks() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { root.deleteLastPathComponent() }
+        let fixture = try String(contentsOf: root.appendingPathComponent("test/fixtures/creative-scene.json"),
+                                 encoding: .utf8)
+        let cue = try XCTUnwrap(try OverlayCue.decodeSidecar(Data(("[" + fixture + "]").utf8)).first)
+        let scene = try XCTUnwrap(cue.scene)
+        XCTAssertNil(cue.imageURL)
+        XCTAssertEqual(cue.layout, "overlay")
+        XCTAssertEqual(cue.products[1]?.id, "cap")
+        XCTAssertEqual(cue.products[1]?.commerce.variants[1].id, "green")
+        let layer = scene.layers[2]
+        let frame = layer.frame(at: 500)
+        XCTAssertEqual(frame.x, 1520, accuracy: 0.001)
+        XCTAssertEqual(frame.y, 420, accuracy: 0.001)
+        XCTAssertEqual(frame.opacity, 0.875, accuracy: 0.001)
+        XCTAssertFalse(layer.frame(at: 3100).visible)
+        let video = scene.layers[1]
+        XCTAssertEqual(video.mask, "ellipse")
+        XCTAssertEqual(video.audio, true)
+        XCTAssertEqual(video.mediaFrame(in: CGRect(x: 0, y: 0, width: 240, height: 200)),
+                       CGRect(x: 0, y: -150, width: 480, height: 400))
+    }
+    func testInvalidOptionalFallbackPreservesAValidScene() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { root.deleteLastPathComponent() }
+        let fixture = try Data(contentsOf: root.appendingPathComponent("test/fixtures/creative-scene.json"))
+        var row = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        row["imageUrl"] = "https://assets.example/optional-art"
+        for mime: Any in ["video/mp4", "image/gif", 42] {
+            row["mimeType"] = mime
+            let cue = try XCTUnwrap(try OverlayCue.decodeSidecar(JSONSerialization.data(withJSONObject: [row])).first)
+            XCTAssertNotNil(cue.scene)
+            XCTAssertNil(cue.imageURL)
+            XCTAssertNil(cue.imageMIME)
+        }
+        row.removeValue(forKey: "scene")
+        XCTAssertEqual(try OverlayCue.decodeSidecar(JSONSerialization.data(withJSONObject: [row])), [])
+    }
+    #endif
+
+    func testSceneFeedOnlyAnnouncesAudioWithSecondaryVideo() throws {
+        let endpoint = try XCTUnwrap(URL(string: "https://ads.example/feed?scene=0&scene_features=audio&keep=yes"))
+        func query(video: Bool, audio: Bool) throws -> [String: String] {
+            let url = try XCTUnwrap(SceneFeed.url(endpoint, video: video, audio: audio))
+            let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+            return Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+        }
+        XCTAssertEqual(try query(video: false, audio: true), [
+            "keep": "yes", "scene": "1", "scene_features": "media-mask,media-crop",
+        ])
+        XCTAssertEqual(try query(video: true, audio: true)["scene_features"], "media-mask,media-crop,video,audio")
+    }
+
     func testLAndSuperUseStandardCanvasAtTwoSizes() {
         let canvas = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         var layout = OverlayLayout(canvas: canvas, format: .l)

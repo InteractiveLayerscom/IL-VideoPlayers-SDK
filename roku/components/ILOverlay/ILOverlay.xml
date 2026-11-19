@@ -8,8 +8,9 @@
         <function name="setClockAnchor" />
         <function name="getProgramTimeMs" />
         <function name="handleCommerceKey" />
-        <field id="commerceEnabled" type="boolean" onChange="refresh" />
+        <field id="commerceEnabled" type="boolean" onChange="onCommerceChanged" />
         <field id="commerceAutoFocus" type="boolean" value="true" />
+        <field id="sceneLink" type="assocarray" alwaysNotify="true" />
         <field id="productView" type="assocarray" alwaysNotify="true" />
         <field id="linearBreak" type="boolean" onChange="refresh" />
         <field id="seeking" type="boolean" onChange="refresh" />
@@ -19,6 +20,7 @@
     <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILManifest.brs" />
     <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILOverlay.brs" />
     <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILCommerce.brs" />
+    <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILScene.brs" />
     <children>
         <Timer id="ilClock" duration="0.1" repeat="true" />
         <Group id="ilArt" visible="false">
@@ -28,6 +30,7 @@
         <Group id="ilCommerce" visible="false">
             <Rectangle id="ilCommerceBackground" color="#101929" opacity="0.95" />
             <Poster id="ilCommercePhoto" visible="false" loadDisplayMode="scaleToFit" />
+            <Poster id="ilCommerceLogo" visible="false" loadDisplayMode="scaleToFit" />
             <Label id="ilCommerceName" />
             <Label id="ilCommerceVariant" />
             <Label id="ilCommerceBuy" />

@@ -14,36 +14,47 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 final class OverlayNetwork {
-    List<OverlayCue> windows(String endpoint, String session, long timeMs, String locale, String country) throws IOException {
+    List<OverlayCue> windows(String endpoint, String session, long timeMs, String locale, String country,
+                            boolean video, boolean audio) throws IOException {
         Uri uri = Uri.parse(endpoint);
         Uri.Builder builder = uri.buildUpon().clearQuery();
         for (String key : uri.getQueryParameterNames()) {
-            if (key.equals("sid") || key.equals("time") || key.equals("commerce")
+            if (key.equals("sid") || key.equals("time") || key.equals("commerce") || key.equals("scene")
+                    || key.equals("scene_features")
                     || (locale != null && key.equals("locale")) || (country != null && key.equals("country"))) continue;
             for (String value : uri.getQueryParameters(key)) builder.appendQueryParameter(key, value);
         }
         if (locale != null) builder.appendQueryParameter("commerce", "1")
                 .appendQueryParameter("locale", OverlayCommerce.language(locale));
         if (country != null) builder.appendQueryParameter("country", country);
-        String url = builder.appendQueryParameter("time", Long.toString(timeMs))
+        String features = "media-mask,media-crop";
+        if (video) features += audio ? ",video,audio" : ",video";
+        String url = builder.appendQueryParameter("scene", "1").appendQueryParameter("scene_features", features)
+                .appendQueryParameter("time", Long.toString(timeMs))
                 .appendQueryParameter("sid", session).build().toString();
-        return OverlayCue.fromSidecar(new String(read(url, 128 * 1024), StandardCharsets.UTF_8));
+        return OverlayCue.fromSidecar(new String(read(url, 1024 * 1024), StandardCharsets.UTF_8));
     }
 
     Bitmap image(OverlayCue cue) throws IOException {
-        return staticImage(cue.imageUrl, cue.mimeType, 4 * 1024 * 1024);
+        return staticImage(cue.imageUrl, cue.mimeType, 4 * 1024 * 1024, false);
+    }
+
+    Bitmap sceneImage(String url) throws IOException {
+        return staticImage(url, null, 4 * 1024 * 1024, true);
     }
 
     Bitmap qrImage(String url) throws IOException {
-        return staticImage(url, "image/png", 256 * 1024);
+        return staticImage(url, "image/png", 256 * 1024, false);
     }
 
-    private Bitmap staticImage(String url, String mimeType, int limit) throws IOException {
+    private Bitmap staticImage(String url, String mimeType, int limit, boolean allowGIF) throws IOException {
         byte[] bytes = read(url, limit);
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
-        if (!OverlayCue.isStaticImage(bounds.outMimeType)
+        boolean supported = OverlayCue.isStaticImage(bounds.outMimeType)
+                || (allowGIF && "image/gif".equals(bounds.outMimeType));
+        if (!supported
                 || (mimeType != null && !mimeType.equals(bounds.outMimeType))
                 || bounds.outWidth <= 0 || bounds.outHeight <= 0
                 || bounds.outWidth > 4096 || bounds.outHeight > 4096

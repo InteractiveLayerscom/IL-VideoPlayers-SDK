@@ -19,6 +19,8 @@ android {
         targetCompatibility JavaVersion.VERSION_11
     }
     sourceSets.androidTest.assets.srcDir(testMediaDirectory)
+    sourceSets.androidTest.assets.srcDir("../test/fixtures")
+    sourceSets.test.resources.srcDir("../test/fixtures")
     testOptions.targetSdk = 35
 }
 

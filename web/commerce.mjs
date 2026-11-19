@@ -46,6 +46,15 @@ export function normalizeCommerce(value) {
   };
 }
 
+export function normalizeBrand(value) {
+  if (!value || typeof value !== 'object') return null;
+  const brand = {};
+  if (isHttps(value.logoUrl)) brand.logoUrl = value.logoUrl;
+  for (const key of ['accent', 'background', 'foreground'])
+    if (typeof value[key] === 'string' && /^#[0-9a-f]{6}$/i.test(value[key])) brand[key] = value[key];
+  return Object.keys(brand).length ? brand : null;
+}
+
 const copy = {
   en: ['View product', 'Show QR code', 'Buy', 'Scan with your phone', 'Continue to Shopify',
     'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.'],
@@ -67,12 +76,19 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
 
   function show(cue, isActive) {
     if (!options || !cue.commerce || root?.cue === cue) return;
+    mount(cue, cue.commerce, isActive);
+  }
+
+  function openOffer(cue, offer, trigger, isActive) {
+    if (options && isActive()) mount(cue, offer, isActive, trigger);
+  }
+
+  function mount(cue, offer, isActive, trigger) {
     hide();
-    const offer = cue.commerce;
     const locale = commerceLocale(options.locale ?? offer.locale);
     const [view, showQR, buy, scan, continueText, closeText, loading, errorText] = copy[locale];
     const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency });
-    const previousFocus = doc.activeElement;
+    const previousFocus = trigger ?? doc.activeElement;
     const shell = doc.createElement('div');
     shell.className = 'il-commerce il-commerce--' + cue.format;
     let request;
@@ -93,7 +109,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     const summary = doc.createElement('div');
     summary.className = 'il-commerce-summary';
     const photo = doc.createElement('img');
-    photo.src = cue.imageUrl;
+    photo.src = offer.imageUrl || cue.imageUrl;
     photo.alt = '';
     const title = doc.createElement('strong');
     title.textContent = offer.title;
@@ -106,8 +122,22 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     result.className = 'il-commerce-result';
     result.setAttribute('aria-live', 'polite');
     const close = button(closeText, closePanel);
+    if (cue.brand) {
+      const { logoUrl, accent, background, foreground } = cue.brand;
+      if (accent) shell.style.setProperty('--il-commerce-accent', accent);
+      if (background) shell.style.setProperty('--il-commerce-background', background);
+      if (foreground) shell.style.setProperty('--il-commerce-foreground', foreground);
+      if (logoUrl) {
+        const logo = doc.createElement('img');
+        logo.className = 'il-commerce-logo';
+        logo.src = logoUrl;
+        logo.alt = '';
+        panel.appendChild(logo);
+      }
+    }
     panel.append(summary, choices, checkout, close, result);
-    shell.append(open, panel);
+    if (!trigger) shell.appendChild(open);
+    shell.appendChild(panel);
     const buttons = offer.variants.map(choice => button(choice.label, () => {
       request?.abort();
       request = null;
@@ -130,8 +160,9 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       panel.hidden = false;
       open.hidden = true;
       buttons[0].focus();
-      if (offer.viewUrl && !viewed.has(cue.id)) {
-        viewed.add(cue.id);
+      const key = JSON.stringify([cue.id, offer.id ?? null]);
+      if (offer.viewUrl && !viewed.has(key)) {
+        viewed.add(key);
         void fetchImpl(offer.viewUrl, {
           mode: 'no-cors', credentials: 'omit', keepalive: true, redirect: 'error',
         }).catch(() => {});
@@ -139,6 +170,11 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     }
 
     function closePanel() {
+      if (trigger) {
+        hide();
+        if (isActive() && trigger.isConnected) trigger.focus();
+        return;
+      }
       request?.abort();
       request = null;
       result.replaceChildren();
@@ -225,7 +261,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     } };
     updateChoice();
     stage.appendChild(shell);
-    if (options.tv) open.focus();
+    if (trigger) openPanel();
+    else if (options.tv) open.focus();
   }
-  return { show, hide };
+  return { show, hide, open: openOffer, enabled: Boolean(options) };
 }

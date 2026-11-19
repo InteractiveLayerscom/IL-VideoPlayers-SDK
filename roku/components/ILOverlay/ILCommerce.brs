@@ -31,7 +31,7 @@ function normalizeCommerce(item as Dynamic, https as Object) as Dynamic
     if price = invalid or type(item.variants) <> "roArray" then return invalid
     if item.variants.count() < 1 or item.variants.count() > 100 then return invalid
     result = { title: item.title, currency: item.currency, locale: commerceLocale(item.locale),
-               handoffUrl: item.handoffUrl, variants: [] }
+               handoffUrl: item.handoffUrl, price: price, variants: [] }
     ids = {}
     ids.setModeCaseSensitive()
     for each variant in item.variants
@@ -71,6 +71,7 @@ sub initializeCommerce()
     m.panelVariant = m.top.findNode("ilCommerceVariant")
     m.panelStatus = m.top.findNode("ilCommerceStatus")
     m.panelQr = m.top.findNode("ilCommerceQr")
+    m.panelLogo = m.top.findNode("ilCommerceLogo")
     m.panelPhoto = m.top.findNode("ilCommercePhoto")
     m.panelQr.observeFieldScoped("loadStatus", "onQrLoad")
     m.commerceHTTPS = createObject("roRegex", "^https://([a-z0-9]([a-z0-9.-]*[a-z0-9])?|\[[a-f0-9:.]+\])(:[0-9]+)?([/?#][^\s]*)?$", "i")
@@ -90,26 +91,37 @@ function previousFocusedNode() as Dynamic
     return node
 end function
 
+function currentOffer() as Dynamic
+    if m.active = invalid then return invalid
+    if m.active.scene <> invalid then return m.scenePanelOffer
+    return m.active.commerce
+end function
+
 sub showCommerce()
-    if m.active.commerce = invalid or m.panel.visible then return
+    offer = currentOffer()
+    if offer = invalid or m.panel.visible then return
     m.commerceOpen = false
     m.commerceChoice = 0
     m.commerceRow = 0
-    m.commerceLabels = commerceCopy(m.active.commerce.locale)
+    m.commerceLabels = commerceCopy(offer.locale)
     m.commerceMessage = ""
     m.panel.visible = true
     renderCommerce()
-    if m.top.commerceAutoFocus
+    if m.top.commerceAutoFocus and not m.top.hasFocus()
         m.previousCommerceFocus = previousFocusedNode()
         m.top.setFocus(true)
     end if
 end sub
 
 sub hideCommerce()
-    if not m.panel.visible then return
-    cancelCart()
-    m.panel.visible = false
-    m.panelPhoto.uri = ""
+    if m.panel.visible
+        cancelCart()
+        m.panel.visible = false
+        m.panelPhoto.uri = ""
+        m.panelLogo.uri = ""
+        m.panelLogo.visible = false
+    end if
+    m.scenePanelOffer = invalid
     if m.top.commerceAutoFocus and m.top.hasFocus()
         if m.previousCommerceFocus <> invalid
             m.previousCommerceFocus.setFocus(true)
@@ -133,8 +145,8 @@ sub cancelCart()
 end sub
 
 sub renderCommerce()
-    if m.active = invalid or m.active.commerce = invalid or not m.panel.visible then return
-    offer = m.active.commerce
+    offer = currentOffer()
+    if offer = invalid or not m.panel.visible then return
     width = m.commerceVideoWidth * 0.48
     row = m.commerceVideoHeight * 0.071
     margin = m.commerceVideoWidth * 0.016
@@ -150,10 +162,28 @@ sub renderCommerce()
     m.panel.translation = [m.video.translation[0] + x, m.video.translation[1] + y]
     m.panelBackground.width = width
     m.panelBackground.height = panelHeight
+    foreground = "#ffffff"
+    accent = "#7de4ff"
+    background = "#101929"
+    logoUrl = ""
+    if m.active.brand <> invalid
+        foreground = sceneColor(m.active.brand.foreground, foreground)
+        accent = sceneColor(m.active.brand.accent, accent)
+        background = sceneColor(m.active.brand.background, background)
+        if isText(m.active.brand.logoUrl)
+            if m.commerceHTTPS.isMatch(m.active.brand.logoUrl) then logoUrl = m.active.brand.logoUrl
+        end if
+    end if
+    m.panelBackground.color = background
+    m.panelLogo.width = row * 1.3
+    m.panelLogo.height = row
+    m.panelLogo.translation = [width - margin - m.panelLogo.width, row * 0.1]
+    if m.panelLogo.uri <> logoUrl then m.panelLogo.uri = logoUrl
+    m.panelLogo.visible = m.commerceOpen and logoUrl <> ""
     m.panelName.translation = [margin, row * 0.1]
     m.panelName.width = width - margin * 2
     m.panelName.text = m.commerceLabels[0]
-    m.panelName.color = "#ffffff"
+    m.panelName.color = foreground
     m.panelBuy.visible = m.commerceOpen
     m.panelVariant.visible = m.commerceOpen
     m.panelClose.visible = m.commerceOpen
@@ -164,9 +194,12 @@ sub renderCommerce()
     m.panelPhoto.width = row
     m.panelPhoto.height = row
     m.panelPhoto.translation = [margin, row * 0.1]
-    if m.panelPhoto.uri <> m.active.imageUrl then m.panelPhoto.uri = m.active.imageUrl
+    url = m.active.imageUrl
+    if offer.imageUrl <> invalid then url = offer.imageUrl
+    if m.panelPhoto.uri <> url then m.panelPhoto.uri = url
     m.panelName.translation = [margin + row * 1.2, row * 0.1]
     m.panelName.width = width - margin * 2 - row * 1.2
+    if m.panelLogo.visible then m.panelName.width -= m.panelLogo.width + margin
     m.panelName.text = offer.title
     variant = offer.variants[m.commerceChoice]
     indicator = ""
@@ -177,13 +210,14 @@ sub renderCommerce()
     m.panelBuy.text = m.commerceLabels[1]
     m.panelClose.text = m.commerceLabels[2]
     m.panelStatus.text = m.commerceMessage
+    m.panelStatus.color = foreground
     m.panelStatus.width = width - margin * 2
     controls = [m.panelVariant, m.panelBuy, m.panelClose]
     for i = 0 to controls.count() - 1
         controls[i].translation = [margin, offset + row * i]
         controls[i].width = width - margin * 2
-        controls[i].color = "#ffffff"
-        if i = m.commerceRow then controls[i].color = "#7de4ff"
+        controls[i].color = foreground
+        if i = m.commerceRow then controls[i].color = accent
     end for
     m.panelStatus.translation = [margin, offset + row * 3]
     m.panelQr.translation = [margin, offset + row * 3.8]
@@ -196,8 +230,13 @@ function onKeyEvent(key as String, press as Boolean) as Boolean
 end function
 
 function handleCommerceKey(key as String, press as Boolean) as Boolean
-    if not press or not m.panel.visible then return false
+    if not press then return false
     key = lcase(key)
+    if not m.panel.visible
+        if m.active = invalid or not m.art.visible then return false
+        if m.active.scene <> invalid then return handleSceneKey(key)
+        return false
+    end if
     if not m.commerceOpen
         if key <> "ok" then return false
         m.commerceOpen = true
@@ -209,12 +248,20 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
     if key = "back" or (key = "ok" and m.commerceRow = 2)
         cancelCart()
         m.commerceOpen = false
+        if m.scenePanelOffer <> invalid
+            m.scenePanelOffer = invalid
+            m.panel.visible = false
+            m.panelPhoto.uri = ""
+            m.panelLogo.uri = ""
+            updateSceneFocus()
+            return true
+        end if
     else if key = "up" or key = "down"
         increment = 1
         if key = "up" then increment = 2
         m.commerceRow = (m.commerceRow + increment) mod 3
     else if (key = "left" or key = "right" or key = "ok") and m.commerceRow = 0
-        total = m.active.commerce.variants.count()
+        total = currentOffer().variants.count()
         increment = 1
         if key = "left" then increment = total - 1
         m.commerceChoice = (m.commerceChoice + increment) mod total
@@ -230,9 +277,12 @@ end function
 
 sub trackProductView()
     cue = m.active
-    url = cue.commerce.viewUrl
-    if url = invalid or m.commerceViewed.doesExist(cue.id) then return
-    m.commerceViewed[cue.id] = true
+    offer = currentOffer()
+    url = offer.viewUrl
+    key = cue.id
+    if offer.id <> invalid then key += chr(0) + offer.id
+    if url = invalid or m.commerceViewed.doesExist(key) then return
+    m.commerceViewed[key] = true
     ' The host posts this beacon alongside its existing impression handler.
     m.top.productView = { id: cue.id, sessionId: m.sessionId, viewUrl: url }
 end sub
@@ -240,7 +290,7 @@ end sub
 sub prepareCart()
     if m.cartTask <> invalid then return
     cancelCart()
-    variant = m.active.commerce.variants[m.commerceChoice]
+    variant = currentOffer().variants[m.commerceChoice]
     task = createObject("roSGNode", "ILOverlayFeedRequest")
     if task = invalid
         m.commerceMessage = m.commerceLabels[5]
@@ -250,7 +300,7 @@ sub prepareCart()
     m.cartTask = task
     task.observeFieldScoped("result", "receiveCart")
     task.request = { sessionId: m.sessionId, revision: m.cartRevision, kind: "commerce",
-                     url: m.active.commerce.handoffUrl, variantId: variant.id }
+                     url: currentOffer().handoffUrl, variantId: variant.id }
     task.control = "run"
 end sub
 

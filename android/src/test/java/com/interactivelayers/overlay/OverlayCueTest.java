@@ -83,6 +83,43 @@ public final class OverlayCueTest {
         assertNull(OverlayCue.fromTag(RANGE.replace("super", "overlay")));
     }
 
+    @Test public void parsesSceneOnlyCueAndResolvesTheSelectedProduct() throws Exception {
+        String source;
+        try (java.io.InputStream data = getClass().getResourceAsStream("/creative-scene.json")) {
+            source = new String(data.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        OverlayCue cue = OverlayCue.fromSidecar("[" + source + "]").get(0);
+        assertEquals("runtime-creative", cue.id);
+        assertNull(cue.imageUrl);
+        assertEquals("overlay", cue.layout);
+        assertEquals("cap", cue.scene.offerAt(1).id);
+        assertEquals("green", cue.scene.offerAt(1).commerce.variants.get(1).id);
+        OverlayScene.Layer headline = cue.scene.layers.get(2);
+        OverlayScene.Frame frame = headline.frame(500);
+        assertEquals(1520f, frame.x, 0.001f);
+        assertEquals(420f, frame.y, 0.001f);
+        assertEquals(.875f, frame.opacity, 0.001f);
+        assertFalse(headline.frame(3100).visible);
+    }
+
+    @Test public void invalidFallbackDoesNotDiscardAnOtherwiseValidScene() throws Exception {
+        org.json.JSONObject row;
+        try (java.io.InputStream data = getClass().getResourceAsStream("/creative-scene.json")) {
+            row = new org.json.JSONObject(new String(data.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        row.put("imageUrl", "https://assets.example/optional-art");
+        for (Object mime : Arrays.asList("video/mp4", "image/gif", 42)) {
+            row.put("mimeType", mime);
+            List<OverlayCue> cues = OverlayCue.fromSidecar(new org.json.JSONArray().put(row).toString());
+            assertEquals(1, cues.size());
+            assertNotNull(cues.get(0).scene);
+            assertNull(cues.get(0).imageUrl);
+            assertNull(cues.get(0).mimeType);
+        }
+        row.remove("scene");
+        assertTrue(OverlayCue.fromSidecar(new org.json.JSONArray().put(row).toString()).isEmpty());
+    }
+
     @Test public void selectsUsingTheLivePositionIncludingStartAndExcludingEnd() {
         List<OverlayCue> cues = OverlayCue.fromTags(Arrays.asList("#EXTINF:6,", RANGE, RANGE));
         assertEquals(1, cues.size());

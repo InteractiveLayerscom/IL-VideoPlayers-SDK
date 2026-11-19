@@ -172,6 +172,61 @@ public final class OverlayPlaybackTest {
         assertEquals(java.util.Collections.singletonList("/measure/sidecar"), network.impressions);
     }
 
+    @Test public void sceneClipsTheLAndHandsOffTheSecondProduct() throws Exception {
+        activity.onActivity(a -> {
+            overlays = OverlayController.attachCommerce(view, network.url("/scene?scene=0"), "scene-session",
+                    "es", "AR", true);
+            overlays.setSceneSecondaryVideoEnabled(true);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> network.impressions.contains("/measure/scene") && network.images.contains("/assets/poster.png"));
+        assertEquals(java.util.Collections.singletonList("1"), network.sidecarRequests.get(0).queryParameterValues("scene"));
+        assertEquals("media-mask,media-crop,video", network.sidecarRequests.get(0).queryParameter("scene_features"));
+        assertVisibleFrame("scene");
+        activity.onActivity(a -> {
+            assertSame(original, content.getLayoutParams());
+            assertArtworkPixel(.1f, .1f, false);
+            View first = view.findFocus();
+            assertNotNull(first);
+            assertEquals("Botines", first.getContentDescription());
+            assertTrue(first.dispatchKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT)));
+            View next = view.findFocus();
+            assertNotNull(next);
+            assertEquals("Gorra", next.getContentDescription());
+            assertTrue(next.performClick());
+            player.pause();
+            clickButton("Roja");
+            clickButton("Mostrar código QR");
+        });
+        await(() -> network.checkoutSelections.size() == 1 && network.impressions.contains("/measure/cap"));
+        assertEquals(java.util.Collections.singletonList("/cap/cart"), network.checkoutDestinations);
+        assertEquals(java.util.Collections.singletonList("{\"variantId\":\"green\"}"), network.checkoutSelections);
+        activity.onActivity(a -> {
+            assertTrue(overlays.closeCommercePanel());
+            assertEquals("Gorra", view.findFocus().getContentDescription());
+            overlays.setLinearAdActive(true);
+            assertSame(original, content.getLayoutParams());
+            java.util.ArrayList<View> targets = new java.util.ArrayList<>();
+            view.findViewsWithText(targets, "Gorra", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+            assertTrue(targets.isEmpty());
+        });
+        assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/scene"));
+    }
+
+    @Test public void sceneArtworkDecodesTheFirstGifFrame() throws Exception {
+        String url = network.url("/animated.gif");
+        OverlayNetwork loader = new OverlayNetwork();
+        Bitmap artwork = loader.sceneImage(url);
+        assertNotNull(artwork);
+        assertEquals(Color.RED, artwork.getPixel(0, 0));
+        artwork.recycle();
+
+        String row = "[{\"id\":\"legacy\",\"format\":\"super\",\"start\":1,\"end\":2,\"imageUrl\":\"" + url + "\"}]";
+        assertNull(loader.image(OverlayCue.fromSidecar(row).get(0)));
+    }
+
     @Test public void commerceSelectsATvVariantAndShowsTheQrDuringPlayback() throws Exception {
         activity.onActivity(a -> {
             overlays = OverlayController.attachCommerce(view, network.url("/commerce"), "tv-session",
@@ -313,11 +368,16 @@ public final class OverlayPlaybackTest {
             int video = frame.getPixel(size[0] / 4, size[1] / 4);
             int art = frame.getPixel(size[0] / 2, size[1] * 4 / 5);
             int right = frame.getPixel(size[0] * 7 / 8, size[1] / 4);
-            boolean correctFormat = "l".equals(format)
-                    ? Color.red(right) > 240 && Color.green(right) < 15
-                    : Color.green(right) > 75 && Color.red(right) < 35;
-            boolean visible = Color.green(video) > 75 && Color.red(video) < 35 && Color.blue(video) < 35
-                    && Color.red(art) > 240 && Color.green(art) < 15 && correctFormat;
+            boolean visible = Color.green(video) > 75 && Color.red(video) < 35 && Color.blue(video) < 35;
+            if ("scene".equals(format)) {
+                int corner = frame.getPixel(size[0] * 77 / 100, size[1] / 100);
+                visible = visible && right == Color.MAGENTA && corner == 0xff103050;
+            } else {
+                boolean correctFormat = "l".equals(format)
+                        ? Color.red(right) > 240 && Color.green(right) < 15
+                        : Color.green(right) > 75 && Color.red(right) < 35;
+                visible = visible && Color.red(art) > 240 && Color.green(art) < 15 && correctFormat;
+            }
             if (visible) {
                 try (OutputStream out = PlatformTestStorageRegistry.getInstance().openOutputFile(format + ".png")) {
                     assertTrue(frame.compress(Bitmap.CompressFormat.PNG, 100, out));

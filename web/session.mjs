@@ -4,6 +4,9 @@ import { normalizeCue, readDateRanges } from './cues.mjs';
 export function createSession({
   clock,
   playing,
+  presenting = playing,
+  scenes = false,
+  sceneFeatures = [],
   renderer,
   eventsUrl,
   playlistUrl,
@@ -48,6 +51,11 @@ export function createSession({
       if (eventsUrl) {
         url.searchParams.set('time', String(time));
         url.searchParams.set('sid', sessionId);
+        url.searchParams.delete('scene_features');
+        if (scenes) {
+          url.searchParams.set('scene', '1');
+          if (sceneFeatures.length) url.searchParams.set('scene_features', sceneFeatures.join(','));
+        } else url.searchParams.delete('scene');
         if (commerce) {
           url.searchParams.set('commerce', '1');
           url.searchParams.set('locale', commerceLocale(commerce.locale));
@@ -64,7 +72,9 @@ export function createSession({
       if (disposed) return;
       if (eventsUrl) {
         cues.clear();
-        if (Array.isArray(data)) merge(data.map(normalizeCue).filter(cue => commerce || !cue?.commerce));
+        if (Array.isArray(data)) merge(data.map(row =>
+          normalizeCue(scenes ? row : { ...row, scene: undefined }),
+        ).filter(cue => cue && (commerce || !cue.commerce || cue.scene)));
       } else manifest(data);
     } catch {
       if (eventsUrl && !disposed) cues.clear();
@@ -77,11 +87,13 @@ export function createSession({
   }
 
   function render(time) {
-    const canShow = Number.isSafeInteger(time) && !inBreak && playing();
+    function canShow(cue) {
+      return Number.isSafeInteger(time) && !inBreak && (cue.scene ? presenting() : playing());
+    }
     let active = null;
     for (const [id, cue] of cues) {
       if (Number.isFinite(time) && cue.end < time - 120000) cues.delete(id);
-      else if (!active && canShow && cue.start <= time && time < cue.end) active = cue;
+      else if (!active && canShow(cue) && cue.start <= time && time < cue.end) active = cue;
     }
     if (active?.id !== current?.id) {
       if (current) renderer.hide();
@@ -93,13 +105,14 @@ export function createSession({
             !disposed &&
             !inBreak &&
             current?.id === active.id &&
-            playing() &&
+            (active.scene ? presenting() : playing()) &&
             Number.isSafeInteger(now) &&
             active.start <= now &&
             now < active.end
           );
         });
     }
+    if (active) renderer.update?.(time);
     if (active && renderer.visible(active) && !measured.has(active.id)) {
       measured.add(active.id);
       if (onVisible) onVisible(active);

@@ -42,14 +42,26 @@ final class CommercePanel extends LinearLayout {
     private int generation;
     private int selection;
     private boolean disposed;
+    private Future<?> photoRequest, logoRequest;
+    private final Runnable onClose;
+    private final int foreground;
+    private final Integer accent;
 
     CommercePanel(FrameLayout parent, OverlayCue cue, Bitmap photo, OverlayNetwork network,
                   ExecutorService workers, Boolean television, Runnable onOpen) {
+        this(parent, cue.commerce, photo, null, cue.brand, network, workers, television, onOpen, null);
+    }
+
+    CommercePanel(FrameLayout parent, OverlayCommerce offer, Bitmap photo, String photoUrl, OverlayScene.Brand brand,
+                  OverlayNetwork network, ExecutorService workers, Boolean television, Runnable onOpen, Runnable onClose) {
         super(parent.getContext());
+        this.onClose = onClose;
+        this.foreground = SceneViews.color(brand == null ? null : brand.foreground, -1);
+        this.accent = brand != null && brand.accent != null ? SceneViews.color(brand.accent, 0xff202c42) : null;
         setOrientation(VERTICAL);
         setPadding(dp(8), dp(4), dp(8), dp(4));
-        setBackgroundColor(0xee101929);
-        offer = cue.commerce;
+        setBackgroundColor(SceneViews.color(brand == null ? null : brand.background, 0xee101929));
+        this.offer = offer;
         previousFocus = parent.findFocus();
         Context context = getContext();
         UiModeManager ui = (UiModeManager) context.getSystemService(Context.UI_MODE_SERVICE);
@@ -74,14 +86,20 @@ final class CommercePanel extends LinearLayout {
             onOpen.run();
             openDetails();
         });
-        addView(open);
+        if (onClose == null) addView(open);
         addView(details);
 
+        if (brand != null && brand.logoUrl != null) {
+            ImageView logo = new ImageView(context);
+            details.addView(logo, new LinearLayout.LayoutParams(dp(92), dp(35)));
+            logoRequest = loadPhoto(logo, brand.logoUrl);
+        }
         TextView name = label();
         name.setText(offer.title);
         details.addView(name);
         ImageView product = new ImageView(context);
         product.setImageBitmap(photo);
+        if (photoUrl != null) photoRequest = loadPhoto(product, photoUrl);
         product.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         details.addView(product, new LinearLayout.LayoutParams(dp(60), dp(60)));
 
@@ -109,7 +127,19 @@ final class CommercePanel extends LinearLayout {
         params.rightMargin = dp(20);
         parent.addView(this, params);
         select(0);
-        if (tv) open.requestFocus();
+        if (onClose != null) {
+            onOpen.run();
+            openDetails();
+        } else if (tv) open.requestFocus();
+    }
+
+    private Future<?> loadPhoto(ImageView view, String url) {
+        return workers.submit(() -> {
+            try {
+                Bitmap image = network.sceneImage(url);
+                post(() -> { if (!disposed && image != null) view.setImageBitmap(image); });
+            } catch (IOException ignored) {}
+        });
     }
 
     private void openDetails() {
@@ -121,6 +151,10 @@ final class CommercePanel extends LinearLayout {
 
     boolean closeDetails() {
         if (details.getVisibility() != VISIBLE) return false;
+        if (onClose != null) {
+            onClose.run();
+            return true;
+        }
         cancel();
         resetResult();
         details.setVisibility(GONE);
@@ -131,6 +165,8 @@ final class CommercePanel extends LinearLayout {
 
     void dispose() {
         disposed = true;
+        if (photoRequest != null) photoRequest.cancel(true);
+        if (logoRequest != null) logoRequest.cancel(true);
         cancel();
         boolean hadFocus = hasFocus();
         ((ViewGroup) getParent()).removeView(this);
@@ -212,7 +248,7 @@ final class CommercePanel extends LinearLayout {
 
     private TextView label() {
         TextView text = new TextView(getContext());
-        text.setTextColor(0xffffffff);
+        text.setTextColor(foreground);
         text.setMaxWidth(dp(260));
         return text;
     }
@@ -221,6 +257,10 @@ final class CommercePanel extends LinearLayout {
         Button button = new Button(getContext());
         button.setText(label);
         button.setAllCaps(false);
+        if (accent != null) {
+            button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(accent));
+            button.setTextColor(foreground);
+        }
         button.setMaxWidth(dp(260));
         button.setOnClickListener(view -> action.run());
         button.setOnKeyListener((view, key, event) ->

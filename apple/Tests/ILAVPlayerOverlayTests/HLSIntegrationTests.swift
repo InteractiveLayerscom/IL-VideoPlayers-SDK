@@ -36,7 +36,7 @@ final class HLSIntegrationTests: XCTestCase {
             XCTAssertEqual(ordered.map(\.format), [.super, .l])
             XCTAssertEqual(ordered[0].end.timeIntervalSince(ordered[0].start), 3.25, accuracy: 0.001)
             XCTAssertEqual(ordered[1].end.timeIntervalSince(ordered[1].start), 2, accuracy: 0.001)
-            XCTAssertEqual(ordered[0].imageURL.absoluteString, "https://media.example/s.png")
+            XCTAssertEqual(ordered[0].imageURL?.absoluteString, "https://media.example/s.png")
             XCTAssertEqual(ordered[0].imageMIME, "image/png")
             XCTAssertEqual(ordered[0].impressionURL?.absoluteString, "https://measure.example/i")
             timeline = OverlayTimeline(cues)

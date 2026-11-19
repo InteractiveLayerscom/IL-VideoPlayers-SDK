@@ -17,10 +17,10 @@ sub readFeed()
     if request.kind = "json"
         if request.programTimeMs = invalid then return
         mediaTime& = request.programTimeMs
-        url = url.split("#")[0]
+        url = withoutSessionParameters(url)
         separator = "?"
         if instr(1, url, "?") > 0 then separator = "&"
-        url = url + separator + "time=" + mediaTime&.toStr() + "&sid=" + transfer.escape(request.sessionId)
+        url = url + separator + "time=" + mediaTime&.toStr() + "&sid=" + transfer.escape(request.sessionId) + "&scene=1&scene_features=media-crop"
         if request.commerce = true
             locale = "en"
             if type(request.locale) = "String" or type(request.locale) = "roString"
@@ -58,3 +58,19 @@ sub readFeed()
     end if
     m.top.result = response
 end sub
+
+function withoutSessionParameters(url as String) as String
+    url = url.split("#")[0]
+    marker = instr(1, url, "?")
+    if marker = 0 then return url
+    parameters = []
+    for each pair in mid(url, marker + 1).split("&")
+        key = pair.split("=")[0]
+        if pair <> "" and key <> "scene" and key <> "scene_features" and key <> "time" and key <> "sid"
+            parameters.push(pair)
+        end if
+    end for
+    url = left(url, marker - 1)
+    if parameters.count() > 0 then url = url + "?" + parameters.join("&")
+    return url
+end function

@@ -19,14 +19,22 @@ final class CommercePanel: UIView {
     private var selection = 0
     private var task: Task<Void, Never>?
     private var expanded = false
+    private let onClose: (() -> Void)?
+    private let foreground: UIColor
+    private let accent: UIColor
+    private var mediaTasks: [Task<Void, Never>] = []
 
-    init(_ offer: OverlayCommerce, photo: CGImage, checkoutURL: ((URL) -> Void)?, opened: @escaping () -> Void) {
+    init(_ offer: OverlayCommerce, photo: CGImage?, photoURL: URL? = nil, brand: SceneBrand? = nil,
+         checkoutURL: ((URL) -> Void)?, closed: (() -> Void)? = nil, opened: @escaping () -> Void) {
         self.offer = offer
+        onClose = closed
+        foreground = UIColor.sceneColor(brand?.foreground) ?? .white
+        accent = UIColor.sceneColor(brand?.accent) ?? UIColor(red: 0.125, green: 0.173, blue: 0.259, alpha: 1)
         labels = Self.copy(offer.locale)
         didOpen = opened
         onCheckoutURL = checkoutURL
         super.init(frame: .zero)
-        backgroundColor = UIColor(red: 0.063, green: 0.098, blue: 0.161, alpha: 0.95)
+        backgroundColor = UIColor.sceneColor(brand?.background) ?? UIColor(red: 0.063, green: 0.098, blue: 0.161, alpha: 0.95)
         layer.cornerRadius = 10
         layer.zPosition = 2
         money.numberStyle = .currency
@@ -44,18 +52,27 @@ final class CommercePanel: UIView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
         ])
         configure(open, text: labels[0]) { [weak self] in self?.openDetails() }
-        stack.addArrangedSubview(open)
+        if closed == nil { stack.addArrangedSubview(open) }
 
         details.axis = .vertical
         details.alignment = .trailing
         details.spacing = 3
         details.isHidden = true
         stack.addArrangedSubview(details)
+        if let url = brand?.logoURL {
+            let logo = UIImageView()
+            logo.contentMode = .scaleAspectFit
+            logo.widthAnchor.constraint(equalToConstant: 120).isActive = true
+            logo.heightAnchor.constraint(equalToConstant: 44).isActive = true
+            details.addArrangedSubview(logo)
+            loadPhoto(url, into: logo)
+        }
         let name = UILabel()
         name.text = offer.title
-        name.textColor = .white
+        name.textColor = foreground
         name.numberOfLines = 2
-        let product = UIImageView(image: UIImage(cgImage: photo))
+        let product = UIImageView(image: photo.map { UIImage(cgImage: $0) })
+        if let photoURL { loadPhoto(photoURL, into: product) }
         product.contentMode = .scaleAspectFit
         product.widthAnchor.constraint(equalToConstant: 65).isActive = true
         product.heightAnchor.constraint(equalToConstant: 65).isActive = true
@@ -64,7 +81,7 @@ final class CommercePanel: UIView {
         summary.spacing = 8
         details.addArrangedSubview(summary)
         details.addArrangedSubview(price)
-        price.textColor = .white
+        price.textColor = foreground
 
         configure(change, text: "") { [weak self] in
             guard let self else { return }
@@ -83,7 +100,7 @@ final class CommercePanel: UIView {
         configure(close, text: labels[4]) { [weak self] in _ = self?.closeDetails() }
         details.addArrangedSubview(close)
         status.numberOfLines = 2
-        status.textColor = .white
+        status.textColor = foreground
         status.isHidden = true
         details.addArrangedSubview(status)
         qr.widthAnchor.constraint(equalToConstant: 135).isActive = true
@@ -97,6 +114,14 @@ final class CommercePanel: UIView {
         qr.isHidden = true
         details.addArrangedSubview(qr)
         select(0)
+        if closed != nil { openDetails() }
+    }
+
+    private func loadPhoto(_ url: URL, into image: UIImageView) {
+        mediaTasks.append(Task { [weak image] in
+            guard let photo = try? await OverlayArtwork.loadSceneImage(url), !Task.isCancelled else { return }
+            image?.image = UIImage(cgImage: photo)
+        })
     }
 
     @available(*, unavailable)
@@ -116,8 +141,8 @@ final class CommercePanel: UIView {
     private func configure(_ button: UIButton, text: String, action: @escaping () -> Void) {
         var config = UIButton.Configuration.filled()
         config.title = text
-        config.baseBackgroundColor = UIColor(red: 0.125, green: 0.173, blue: 0.259, alpha: 1)
-        config.baseForegroundColor = .white
+        config.baseBackgroundColor = accent
+        config.baseForegroundColor = foreground
         button.configuration = config
         button.addAction(UIAction { _ in action() }, for: .primaryActionTriggered)
     }
@@ -145,6 +170,10 @@ final class CommercePanel: UIView {
     @discardableResult
     func closeDetails() -> Bool {
         guard expanded else { return false }
+        if let onClose {
+            onClose()
+            return true
+        }
         cancel()
         expanded = false
         details.isHidden = true
@@ -155,6 +184,7 @@ final class CommercePanel: UIView {
     }
 
     func dispose() {
+        for task in mediaTasks { task.cancel() }
         cancel()
         removeFromSuperview()
     }

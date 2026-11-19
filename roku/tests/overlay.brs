@@ -159,6 +159,7 @@ sub main()
     overlay.callFunc("setManifest", "hls", header + endOnly + ",DURATION=1" + media)
     check(rail.getChildCount() = 0, "conflicting END-DATE and DURATION are discarded")
     check(not overlay.callFunc("setManifest", "hls", header + "#EXT-X-STREAM-INF:BANDWIDTH=200000" + chr(10) + "video.m3u8"), "a master cannot substitute for the selected variant")
+    testScene(overlay, video, rail, foot)
     if m.failures = 0 then print "ROKU_OK"; m.checks
 end sub
 
@@ -189,4 +190,53 @@ sub check(ok as Boolean, label as String)
         m.failures = m.failures + 1
         print "FAIL "; label
     end if
+end sub
+
+sub testScene(overlay, video, rail, foot)
+    cue = parseJson(readAsciiFile("pkg:/tests/creative-scene.json"))
+    check(cue <> invalid, "the shared scene fixture loads")
+    if cue = invalid then return
+    overlay.commerceEnabled = true
+    video.positionInfo = { epoch: 1, video: 1.5#, clip_id: 17 }
+    pulse(overlay, cue, "hls")
+    background = rail.findNode("background")
+    poster = rail.findNode("brand-video")
+    text = rail.findNode("headline")
+    check(background <> invalid and poster <> invalid and text <> invalid, "the L mounts normalized scene graphics")
+    if text = invalid or poster = invalid then return
+    check(overlay.impression.id <> cue.id, "a scene needs compositor evidence before measurement")
+    background.getChild(0).renderTracking = "partial"
+    pulse(overlay, cue, "hls")
+    check(overlay.impression.id = cue.id, "measure the visible scene after compositor confirmation")
+    check(video.width = 960 and video.height = 540, "an L overlay leaves program geometry untouched")
+    check(rail.clippingRect[0] = 720 and foot.clippingRect[1] = 405, "scene clips to the approved bands")
+    check(text.translation[0] = 760 and text.translation[1] = 210, "animates position independently at the current content time")
+    check(abs(text.opacity - .875) < .0001, "interpolates opacity independently of position")
+    clip = poster.getChild(0)
+    check(clip.clippingRect <> invalid and clip.clippingRect[2] = 240, "poster crop is clipped to the authored width")
+    image = clip.getChild(0)
+    check(image <> invalid and image.uri = "https://ads.example/poster.png", "single decoder mode uses the declared poster")
+    if image <> invalid then check(image.width = 480 and image.translation[0] = 0 and image.translation[1] = -150, "poster uses the authored pan and zoom")
+    video.state = "paused"
+    pulse(overlay, cue, "hls")
+    check(overlay.findNode("ilArt").visible, "the scene holds its position while paused")
+    video.state = "playing"
+    check(overlay.callFunc("handleCommerceKey", "right", true), "the remote moves between authored product cards")
+    check(overlay.callFunc("handleCommerceKey", "ok", true), "the remote opens the selected offer")
+    check(overlay.findNode("ilCommerceName").text = "Gorra", "the second product retains its title")
+    check(overlay.findNode("ilCommercePhoto").uri = "https://ads.example/cap.png", "the second product retains its true photo")
+    check(overlay.productView.viewUrl = "https://ads.example/cap/view", "the view beacon keeps its offer identity")
+    check(overlay.callFunc("handleCommerceKey", "back", true), "back returns to the product scene")
+    overlay.linearBreak = true
+    check(rail.getChildCount() = 0 and foot.getChildCount() = 0 and video.width = 960, "linear ads remove graphics and restore the program")
+    overlay.linearBreak = false
+    cue.imageUrl = "https://ads.example/optional-art"
+    for each mime in ["video/mp4", "image/gif", 42]
+        cue.mimeType = mime
+        pulse(overlay, cue, "hls")
+        check(rail.findNode("background") <> invalid, "an invalid fallback MIME does not discard the scene")
+    end for
+    cue.scene = invalid
+    pulse(overlay, cue, "hls")
+    check(rail.getChildCount() = 0, "an invalid image-only cue is still rejected")
 end sub

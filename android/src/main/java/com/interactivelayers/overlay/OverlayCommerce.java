@@ -17,6 +17,7 @@ final class OverlayCommerce {
     final String handoffUrl;
     final String viewUrl;
     final List<Variant> variants;
+    final BigDecimal price;
 
     static final class Variant {
         final String id;
@@ -31,12 +32,13 @@ final class OverlayCommerce {
     }
 
     private OverlayCommerce(String title, String currency, String locale, String handoffUrl,
-                            String viewUrl, List<Variant> variants) {
+                            String viewUrl, BigDecimal price, List<Variant> variants) {
         this.title = title;
         this.currency = currency;
         this.locale = locale;
         this.handoffUrl = handoffUrl;
         this.viewUrl = viewUrl;
+        this.price = price;
         this.variants = Collections.unmodifiableList(variants);
     }
 
@@ -82,6 +84,6 @@ final class OverlayCommerce {
             variants.add(new Variant(id, label, price));
         }
         return new OverlayCommerce(title, currency, language(text(row, "locale", 35)), handoff,
-                OverlayCue.isHttps(view) ? view : null, variants);
+                OverlayCue.isHttps(view) ? view : null, basePrice, variants);
     }
 }

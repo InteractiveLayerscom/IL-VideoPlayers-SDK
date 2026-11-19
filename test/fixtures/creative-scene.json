@@ -1,0 +1,40 @@
+{
+  "id": "runtime-creative",
+  "format": "l",
+  "start": 1000,
+  "end": 5000,
+  "layout": "overlay",
+  "scene": {
+    "format": "l",
+    "width": 1920,
+    "height": 1080,
+    "durationMs": 4000,
+    "layers": [
+      { "id": "background", "type": "rect", "x": 0, "y": 0, "width": 1920, "height": 1080, "fill": "#103050" },
+      { "id": "brand-video", "type": "video", "x": 1440, "y": 0, "width": 480, "height": 400,
+        "src": "https://ads.example/brand.mp4", "poster": "https://ads.example/poster.png",
+        "mask": "ellipse", "mediaCrop": {"x": 1, "y": -0.5, "zoom": 2}, "audio": true },
+      { "id": "headline", "type": "text", "x": 1500, "y": 410, "width": 390, "height": 75,
+        "text": "Colección", "fill": "#ffffff", "fontSize": 40, "fontWeight": 700, "fontStyle": "italic", "lineHeight": 1.1, "maxLines": 2,
+        "keyframes": [{ "timeMs": 1000, "x": 1540 }, { "timeMs": 2000, "y": 450, "opacity": 0.5 }],
+        "endMs": 3000 },
+      { "id": "first", "type": "product", "x": 0, "y": 820, "width": 400, "height": 220,
+        "action": "product", "productIndex": 0 },
+      { "id": "second", "type": "product", "x": 450, "y": 820, "width": 400, "height": 220,
+        "action": "product", "productIndex": 1 },
+      { "id": "second-image", "type": "image", "x": 460, "y": 830, "width": 150, "height": 180,
+        "binding": "image", "productIndex": 1 },
+      { "id": "second-price", "type": "text", "x": 640, "y": 830, "width": 160, "height": 70,
+        "binding": "price", "productIndex": 1 }
+    ]
+  },
+  "brand": { "logoUrl": "https://ads.example/logo.png", "accent": "#006633", "background": "#101010", "foreground": "#ffffff" },
+  "products": [
+    { "id": "boots", "title": "Botines", "imageUrl": "https://ads.example/boots.png", "price": "45.50",
+      "currency": "USD", "locale": "es", "variants": [{ "id": "42", "label": "Talle 42" }],
+      "handoffUrl": "https://ads.example/boots/cart", "viewUrl": "https://ads.example/boots/view" },
+    { "id": "cap", "title": "Gorra", "imageUrl": "https://ads.example/cap.png", "price": "16",
+      "currency": "USD", "locale": "es", "variants": [{ "id": "red", "label": "Roja" }, { "id": "green", "label": "Verde", "price": "18" }],
+      "handoffUrl": "https://ads.example/cap/cart", "viewUrl": "https://ads.example/cap/view" }
+  ]
+}

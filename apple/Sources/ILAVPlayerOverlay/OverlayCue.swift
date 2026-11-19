@@ -9,26 +9,43 @@ struct OverlayCue: Equatable {
     let format: OverlayFormat
     let start: Date
     let end: Date
-    let imageURL: URL
+    let imageURL: URL?
     let imageMIME: String?
     let impressionURL: URL?
     let commerce: OverlayCommerce?
+    let scene: OverlayScene?
+    let products: [SceneOffer?]
+    let brand: SceneBrand?
+    let layout: String?
+
+    func offer(at index: Int?) -> SceneOffer? {
+        guard let index, products.indices.contains(index) else { return nil }
+        return products[index]
+    }
 
     init?(id: String?, format: String?, start: Date, end: Date?,
-          image: String?, mime: String? = nil, impression: String?, commerce: OverlayCommerce? = nil) {
+          image: String?, mime: String? = nil, impression: String?, commerce: OverlayCommerce? = nil,
+          scene: OverlayScene? = nil, products: [SceneOffer?] = [], brand: SceneBrand? = nil,
+          layout: String? = nil) {
+        let validMIME = mime == nil || mime == "image/png" || mime == "image/jpeg"
+        let imageURL = validMIME ? Self.httpsURL(image) : nil
         guard let id, !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let format = format.flatMap(OverlayFormat.init(rawValue:)), format != .overlay || commerce != nil,
-              let end, start < end, let imageURL = Self.httpsURL(image),
-              mime == nil || mime == "image/png" || mime == "image/jpeg"
+              let format = format.flatMap(OverlayFormat.init(rawValue:)),
+              format != .overlay || commerce != nil || scene != nil,
+              let end, start < end, imageURL != nil || scene != nil
         else { return nil }
         self.id = id
         self.format = format
         self.start = start
         self.end = end
         self.imageURL = imageURL
-        self.imageMIME = mime
+        self.imageMIME = imageURL == nil ? nil : mime
         self.impressionURL = Self.httpsURL(impression)
         self.commerce = commerce
+        self.scene = scene
+        self.products = products
+        self.brand = brand
+        self.layout = layout
     }
 
     static func httpsURL(_ raw: String?) -> URL? {
@@ -46,21 +63,44 @@ struct OverlayCue: Equatable {
 
     private struct SidecarRow: Decodable {
         let cue: OverlayCue?
-        enum Field: String, CodingKey { case id, format, start, end, imageUrl, mimeType, impressionUrl, commerce }
+        enum Field: String, CodingKey { case id, format, start, end, imageUrl, mimeType, impressionUrl, commerce, scene, products, brand, layout }
+
+        struct Product: Decodable {
+            let value: SceneOffer?
+            init(from decoder: Decoder) throws { value = try? SceneOffer(from: decoder) }
+        }
 
         init(from decoder: Decoder) {
             do {
                 let row = try decoder.container(keyedBy: Field.self)
                 let start = try row.decode(Int64.self, forKey: .start)
                 let end = try row.decode(Int64.self, forKey: .end)
+                let format = try row.decode(String.self, forKey: .format)
+                let inputScene = try? row.decode(OverlayScene.self, forKey: .scene)
+                let scene = inputScene?.format == format ? inputScene : nil
+                let image: String?
+                let mime: String?
+                do {
+                    let fallback = (try row.decodeIfPresent(String.self, forKey: .imageUrl),
+                                    try row.decodeIfPresent(String.self, forKey: .mimeType))
+                    (image, mime) = fallback
+                } catch {
+                    guard scene != nil else { throw error }
+                    (image, mime) = (nil, nil)
+                }
                 cue = try OverlayCue(id: row.decode(String.self, forKey: .id),
-                                     format: row.decode(String.self, forKey: .format),
+                                     format: format,
                                      start: Date(timeIntervalSince1970: Double(start) / 1000),
                                      end: Date(timeIntervalSince1970: Double(end) / 1000),
-                                     image: row.decode(String.self, forKey: .imageUrl),
-                                     mime: row.decodeIfPresent(String.self, forKey: .mimeType),
+                                     image: image, mime: mime,
                                      impression: row.decodeIfPresent(String.self, forKey: .impressionUrl),
-                                     commerce: try? row.decode(OverlayCommerce.self, forKey: .commerce))
+                                     commerce: try? row.decode(OverlayCommerce.self, forKey: .commerce),
+                                     scene: scene,
+                                     products: (try? row.decode([Product?].self, forKey: .products)).map {
+                                         Array($0.prefix(64).map { $0?.value })
+                                     } ?? [],
+                                     brand: try? row.decode(SceneBrand.self, forKey: .brand),
+                                     layout: try? row.decode(String.self, forKey: .layout))
             } catch {
                 cue = nil
             }

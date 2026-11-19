@@ -14,6 +14,7 @@ struct OverlayCommerce: Equatable, Decodable {
     let handoffURL: URL
     let viewURL: URL?
     let variants: [Variant]
+    let price: Decimal
 
     enum Field: String, CodingKey { case title, currency, locale, handoffUrl, viewUrl, variants, price }
     enum VariantField: String, CodingKey { case id, label, price }
@@ -47,6 +48,7 @@ struct OverlayCommerce: Equatable, Decodable {
         handoffURL = handoff
         viewURL = OverlayCue.httpsURL(try? row.decode(String.self, forKey: .viewUrl))
         self.variants = variants
+        self.price = price
     }
 
     static func language(_ locale: String?) -> String {
