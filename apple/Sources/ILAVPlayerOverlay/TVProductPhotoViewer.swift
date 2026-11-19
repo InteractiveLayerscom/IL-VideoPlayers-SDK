@@ -15,15 +15,15 @@ final class TVProductPhotoViewer: UIView {
     private let position = UILabel()
 
     init(count: Int, initialIndex: Int, title: String, price: String, scale: CGFloat,
-         localize: (String, String, String) -> String, makeButton: (String) -> UIButton,
+         localize: (String, String, String) -> String, makeButton: (String, String?) -> UIButton,
          showImage: @escaping (Int) -> UIImageView, close: @escaping () -> Void) {
         self.count = count
         index = initialIndex
         photoLabel = localize("Photo", "Foto", "Foto")
         self.showImage = showImage
-        back = makeButton(localize("Back", "Atrás", "Voltar"))
-        previousButton = makeButton("‹")
-        nextButton = makeButton("›")
+        back = makeButton(localize("Back", "Atrás", "Voltar"), nil)
+        previousButton = makeButton("", "chevron.left")
+        nextButton = makeButton("", "chevron.right")
         super.init(frame: .zero)
         backgroundColor = UIColor(white: 0.045, alpha: 1)
         accessibilityViewIsModal = true
