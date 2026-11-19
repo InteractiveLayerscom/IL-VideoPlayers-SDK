@@ -14,6 +14,8 @@ InteractiveLayers Console manages the project's ad server connection. The backen
 | Video.js on the web or LG webOS | Adapter for the existing Video.js player and its HTML5 playback tech. [Video.js guide](web/README.md#videojs) |
 | HTML5 TV apps | Adapter for the video element and its container. [HTML5 guide](web/README.md#html5) |
 
+[Compare ad formats by player and integration](docs/formats.md) for linear spots, lower thirds, L-shaped ads and session targeting.
+
 ## Ad cues and playback
 
 The backend can deliver a cue through an HLS `EXT-X-DATERANGE` tag or a JSON endpoint for the viewer's session. Both carry the same cue ID, display window, and creative URL. Use the session endpoint for personalized ads when the playout system serves a shared manifest. The SDK compares the display window with the program time at the viewer's playhead. The program stays at full size if the cue has expired, the ad server returns no creative, or the player cannot determine the program time. [Cue specification](docs/signals.md)
