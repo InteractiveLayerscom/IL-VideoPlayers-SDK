@@ -1,3 +1,4 @@
+import { commerceLocale } from './commerce.mjs';
 import { normalizeCue, readDateRanges } from './cues.mjs';
 
 export function createSession({
@@ -7,6 +8,7 @@ export function createSession({
   eventsUrl,
   playlistUrl,
   sessionId,
+  commerce,
   fetchImpl = globalThis.fetch,
   interval = 200,
   onVisible,
@@ -46,6 +48,11 @@ export function createSession({
       if (eventsUrl) {
         url.searchParams.set('time', String(time));
         url.searchParams.set('sid', sessionId);
+        if (commerce) {
+          url.searchParams.set('commerce', '1');
+          url.searchParams.set('locale', commerceLocale(commerce.locale));
+          if (/^[A-Z]{2}$/.test(commerce.country)) url.searchParams.set('country', commerce.country);
+        }
       }
       const res = await fetchImpl(url, {
         signal: controller.signal,
@@ -57,7 +64,7 @@ export function createSession({
       if (disposed) return;
       if (eventsUrl) {
         cues.clear();
-        if (Array.isArray(data)) merge(data.map(normalizeCue));
+        if (Array.isArray(data)) merge(data.map(normalizeCue).filter(cue => commerce || !cue?.commerce));
       } else manifest(data);
     } catch {
       if (eventsUrl && !disposed) cues.clear();
@@ -93,7 +100,7 @@ export function createSession({
           );
         });
     }
-    if (active && !measured.has(active.id) && renderer.visible(active)) {
+    if (active && renderer.visible(active) && !measured.has(active.id)) {
       measured.add(active.id);
       if (onVisible) onVisible(active);
       else if (active.impressionUrl) {

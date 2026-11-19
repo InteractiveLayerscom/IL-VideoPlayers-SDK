@@ -1,3 +1,4 @@
+import { commerceSurface } from './commerce.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
 
@@ -14,7 +15,8 @@ export function asInterstitial(cue, programTime, mediaSeconds) {
     endTime: mediaSeconds + (cue.end - programTime) / 1000,
     uri: cue.imageUrl,
     mimeType: cue.mimeType,
-    overlay: l ? rect(0, 0, 1920, 1080) : rect(240, 756, 1440, 216),
+    overlay: l ? rect(0, 0, 1920, 1080) : cue.format === 'overlay'
+      ? rect(1229, 108, 576, 346) : rect(240, 756, 1440, 216),
     currentVideo: l ? rect(0, 0, 1440, 810) : null,
     displayOnBackground: l,
     timelineRange: true,
@@ -71,9 +73,11 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     video.removeAttribute('data-il-unsqueeze');
     muted = null;
   }
-  let last;
+  const commerce = commerceSurface(clientContainer.parentElement ?? clientContainer, source.commerce, source.fetchImpl);
+  let last, isActive;
   const renderer = {
-    show(cue, time) {
+    show(cue, time, stillActive) {
+      isActive = stillActive;
       unmute();
       desired = last = cue;
       const ad = asInterstitial(cue, time, video.currentTime);
@@ -83,13 +87,17 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
       }
     },
     hide() {
+      commerce.hide();
       desired = null;
       mute(last);
     },
     visible(cue) {
-      return ownsCurrent(cue) && imageVisible(matchImage(cue.imageUrl));
+      const visible = ownsCurrent(cue) && imageVisible(matchImage(cue.imageUrl));
+      if (visible) commerce.show(cue, isActive);
+      return visible;
     },
     destroy() {
+      commerce.hide();
       unmute();
     },
   };

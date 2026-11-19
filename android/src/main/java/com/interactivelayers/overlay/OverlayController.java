@@ -35,6 +35,9 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private final Player player;
     private final String sidecar;
     private final String sessionId;
+    private final String commerceLocale;
+    private final String commerceCountry;
+    private final Boolean television;
     private final OverlayNetwork network = new OverlayNetwork();
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -44,6 +47,8 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private final Map<String, OverlayCue> cues = new LinkedHashMap<>();
     private final Set<String> measured = new HashSet<>();
     private final OverlayLayer layer;
+    private final Set<String> viewed = new HashSet<>();
+    private CommercePanel commercePanel;
     private OverlayCue active;
     private Object lastManifest;
     private Future<?> polling;
@@ -58,15 +63,24 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
 
     /** Reads overlay DATERANGEs from the HLS media playlist already loaded by the player. */
     public static OverlayController attach(PlayerView view) {
-        return new OverlayController(view, null, null);
+        return new OverlayController(view, null, null, null, null, null);
     }
 
     /** Uses the session JSON endpoint as the source of graphics. A null ID generates a session UUID. */
     public static OverlayController attach(PlayerView view, String sidecarUrl, String sessionId) {
-        return new OverlayController(view, sidecarUrl, sessionId);
+        return new OverlayController(view, sidecarUrl, sessionId, null, null, null);
     }
 
-    private OverlayController(PlayerView view, String sidecarUrl, String sessionId) {
+    /** Enables Shopify product offers on the session feed. Null television uses device detection. */
+    public static OverlayController attachCommerce(PlayerView view, String sidecarUrl, String sessionId,
+                                                   String locale, String country, Boolean television) {
+        if (!OverlayCue.isHttps(sidecarUrl)) throw new IllegalArgumentException("Expected an HTTPS sidecar URL");
+        return new OverlayController(view, sidecarUrl, sessionId, locale == null ? "en" : locale,
+                country, television);
+    }
+
+    private OverlayController(PlayerView view, String sidecarUrl, String sessionId, String commerceLocale,
+                              String commerceCountry, Boolean television) {
         checkMainThread();
         this.view = view;
         this.player = view.getPlayer();
@@ -80,6 +94,10 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             throw new IllegalStateException("Close the previous overlay controller before attaching again");
         }
         this.sidecar = sidecarUrl;
+        this.commerceLocale = commerceLocale;
+        this.commerceCountry = commerceCountry != null && commerceCountry.matches("[A-Z]{2}") ?
+                commerceCountry : null;
+        this.television = television;
         this.sessionId = sessionId == null ? UUID.randomUUID().toString() : sessionId;
         layer = new OverlayLayer(view, this::measure);
         view.setTag(R.id.il_overlay_controller, this);
@@ -116,6 +134,12 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         update();
     }
 
+    /** Gives the product panel first refusal of Back while retaining the host's fallback. */
+    public boolean closeCommercePanel() {
+        checkMainThread();
+        return commercePanel != null && commercePanel.closeDetails();
+    }
+
     @Override public void close() {
         checkMainThread();
         if (closed) return;
@@ -127,6 +151,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         layer.remove();
         cues.clear();
         measured.clear();
+        viewed.clear();
         lastManifest = null;
         adDetector = null;
         workers.shutdownNow();
@@ -210,7 +235,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         polling = workers.submit(() -> {
             List<OverlayCue> result;
             try {
-                result = network.windows(sidecar, sessionId, timeMs);
+                result = network.windows(sidecar, sessionId, timeMs, commerceLocale, commerceCountry);
             } catch (IOException e) {
                 result = Collections.emptyList();
             }
@@ -220,7 +245,9 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
                 polling = null;
                 nextPoll = SystemClock.elapsedRealtime() + 750;
                 cues.clear();
-                for (OverlayCue cue : response) cues.put(cue.id, cue);
+                for (OverlayCue cue : response) {
+                    if (commerceLocale != null || cue.commerce == null) cues.put(cue.id, cue);
+                }
                 update();
             });
         });
@@ -263,7 +290,14 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             main.post(() -> {
                 if (request != imageGeneration || closed) return;
                 imageRequest = null;
-                if (loaded != null && currentCueIsActive()) layer.show(active, loaded);
+                if (loaded != null && currentCueIsActive()) {
+                    layer.show(active, loaded);
+                    if (active.commerce != null) {
+                        OverlayCue offer = active;
+                        commercePanel = new CommercePanel(layer.container(), offer, loaded, network,
+                                workers, television, () -> markOpened(offer));
+                    }
+                }
             });
         });
     }
@@ -274,6 +308,8 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         if (imageRequest != null) imageRequest.cancel(true);
         imageRequest = null;
         active = null;
+        if (commercePanel != null) commercePanel.dispose();
+        commercePanel = null;
         layer.clear();
     }
 
@@ -282,6 +318,14 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         long time = programTime();
         OverlayCue selected = time == C.TIME_UNSET ? null : OverlayCue.at(cues.values(), time);
         return selected != null && active.id.equals(selected.id);
+    }
+
+    private void markOpened(OverlayCue cue) {
+        String url = cue.commerce.viewUrl;
+        if (url == null || !viewed.add(cue.id)) return;
+        workers.execute(() -> {
+            try { network.impression(url); } catch (IOException ignored) {}
+        });
     }
 
     private void measure() {

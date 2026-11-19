@@ -28,6 +28,22 @@ final class OverlayTests: XCTestCase {
         XCTAssertThrowsError(try OverlayCue.decodeSidecar(Data("{}".utf8)))
     }
 
+    func testCommerceSidecarAndLegacyFallback() throws {
+        let source = """
+        [{"id":"offer","format":"overlay","start":1000,"end":8000,"imageUrl":"https://store.example/photo.jpg",
+          "commerce":{"title":"Chimpunes","locale":"es","price":"45.50","currency":"USD",
+                      "variants":[{"id":"sku-42","label":"42"}],"handoffUrl":"https://store.example/cart"}}]
+        """
+        let offer = try XCTUnwrap(try OverlayCue.decodeSidecar(Data(source.utf8)).first?.commerce)
+        XCTAssertEqual(offer.variants.first?.id, "sku-42")
+        XCTAssertEqual(offer.locale, "es")
+        XCTAssertEqual(offer.variants.first?.price, Decimal(string: "45.50"))
+        let unsafe = source.replacingOccurrences(of: "https://store.example/cart", with: "https://other@store.example/cart")
+        XCTAssertEqual(try OverlayCue.decodeSidecar(Data(unsafe.utf8)), [])
+        let legacy = unsafe.replacingOccurrences(of: "overlay", with: "super")
+        XCTAssertEqual(try OverlayCue.decodeSidecar(Data(legacy.utf8)).first?.format, .super)
+    }
+
     func testLAndSuperUseStandardCanvasAtTwoSizes() {
         let canvas = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         var layout = OverlayLayout(canvas: canvas, format: .l)

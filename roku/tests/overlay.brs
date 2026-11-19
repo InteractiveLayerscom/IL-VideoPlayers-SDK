@@ -18,8 +18,30 @@ sub main()
     check(overlay <> invalid, "the app can construct ILOverlay")
     if overlay = invalid then return
 
+    offer = { id: "commerce", format: "overlay", start: 1700000000000#, imageUrl: "https://cdn.example/shoe.jpg" }
+    offer["end"] = 1700000040000#
+    offer.commerce = { title: "Botines", price: "50", currency: "USD", locale: "es",
+        handoffUrl: "https://ads.example/handoff", variants: [{ id: "42", label: "Talle 42" }] }
     check(overlay.callFunc("attach", video, "session-a"), "attach to the existing video")
     check(overlay.callFunc("getProgramTimeMs") = 1700000000250#, "query the sidecar using the last rendered frame even before cues arrive")
+    overlay.commerceAutoFocus = false
+    overlay.commerceEnabled = true
+    check(overlay.callFunc("setTimeline", "session-a", [offer]), "accept commerce snapshot")
+    card = overlay.findNode("ilPrimary").getChild(0)
+    check(card <> invalid, "normalize a product card from the session")
+    if card <> invalid
+        card.loadStatus = "ready"
+        pulse(overlay, offer)
+        check(overlay.findNode("ilCommerce").visible, "the interactive control appears with the artwork")
+        check(overlay.callFunc("handleCommerceKey", "OK", true), "the remote opens the product")
+        check(overlay.findNode("ilCommerceName").text = "Botines", "the product description is shown")
+        check(overlay.callFunc("handleCommerceKey", "back", true), "the remote closes the product panel")
+    end if
+    offer.commerce.handoffUrl = "http://ads.example/handoff"
+    check(overlay.callFunc("setTimeline", "session-a", [offer]), "accept subsequent snapshot")
+    check(overlay.findNode("ilPrimary").getChild(0) = invalid, "reject non-HTTPS checkout")
+    overlay.commerceEnabled = false
+
     cue = { id: "A", format: "l", start: 1700000000000#, imageUrl: "https://cdn.example/ad.jpg" }
     cue["end"] = 1700000001000#
     cue.impressionUrl = "https://events.example/i?a=1"

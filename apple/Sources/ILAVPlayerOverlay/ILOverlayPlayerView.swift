@@ -25,6 +25,45 @@ public final class ILOverlayPlayerView: UIView {
     private var loading: Task<Void, Never>?
     private var displayed: OverlayCue?
     private var stopped = false
+    private var commercePanel: CommercePanel?
+    private var viewed = Set<String>()
+
+    /// Enable when the app requests the individualized commerce feed.
+    public var commerceEnabled = false {
+        didSet { if oldValue != commerceEnabled { clearArtwork() } }
+    }
+
+    /// Optional route for apps that present Shopify checkout from their own browser flow.
+    public var openCheckoutURL: ((URL) -> Void)?
+
+    /// Adds the session capability to the existing sidecar request.
+    public static func commerceFeed(_ endpoint: URL, locale: String, country: String? = nil) -> URL? {
+        guard OverlayCue.httpsURL(endpoint.absoluteString) != nil,
+              var url = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
+        var query = (url.queryItems ?? []).filter { !["commerce", "locale", "country"].contains($0.name) }
+        query += [URLQueryItem(name: "commerce", value: "1"),
+                  URLQueryItem(name: "locale", value: OverlayCommerce.language(locale))]
+        if let country, country.range(of: "^[A-Z]{2}$", options: .regularExpression) != nil {
+            query.append(URLQueryItem(name: "country", value: country))
+        }
+        url.queryItems = query
+        return url.url
+    }
+
+    /// Call before the host handles Back when the product panel is open.
+    public func closeCommercePanel() -> Bool { commercePanel?.closeDetails() ?? false }
+
+    public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if let panel = commercePanel {
+            return panel.hitTest(panel.convert(point, from: self), with: event)
+        }
+        return nil
+    }
+
+    public override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let commercePanel { return [commercePanel] }
+        return super.preferredFocusEnvironments
+    }
 
     /// Set from the host's SSAI/ad SDK callbacks for stitched linear breaks.
     public var isInLinearAdBreak = false {
@@ -110,6 +149,13 @@ public final class ILOverlayPlayerView: UIView {
     public override func layoutSubviews() {
         super.layoutSubviews()
         layoutLayers()
+        if let panel = commercePanel {
+            let size = panel.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            let bottom = bounds.height * 0.89
+            let width = min(size.width, bounds.width * 0.85)
+            panel.frame = CGRect(x: bounds.width * 0.94 - width, y: max(0, bottom - size.height),
+                                 width: width, height: min(size.height, bottom))
+        }
     }
 
     private func bindCurrentItem() {
@@ -117,6 +163,7 @@ public final class ILOverlayPlayerView: UIView {
         unbind()
         clearArtwork()
         impressions = VisibleImpressions()
+        viewed.removeAll()
         timeline = OverlayTimeline()
         guard let next = player.currentItem else { return }
         item = next
@@ -145,7 +192,7 @@ public final class ILOverlayPlayerView: UIView {
     }
 
     private func replaceSchedule(_ cues: [OverlayCue]) {
-        timeline = OverlayTimeline(cues)
+        timeline = OverlayTimeline(commerceEnabled ? cues : cues.filter { $0.commerce == nil })
         // A revised or withdrawn cue immediately releases the L geometry.
         if let displayed, timeline.active(at: item?.currentDate()) != displayed { clearArtwork() }
     }
@@ -182,6 +229,18 @@ public final class ILOverlayPlayerView: UIView {
         displayed = cue
         artwork.contents = image
         artwork.isHidden = false
+        removeCommercePanel()
+        if let offer = cue.commerce, commerceEnabled {
+            let panel = CommercePanel(offer, photo: image, checkoutURL: openCheckoutURL) { [weak self] in
+                guard let self, let url = offer.viewURL, self.viewed.insert(cue.id).inserted else { return }
+                Task { await OverlayArtwork.sendImpression(to: url) }
+            }
+            commercePanel = panel
+            isUserInteractionEnabled = true
+            addSubview(panel)
+            setNeedsLayout()
+            setNeedsFocusUpdate()
+        }
         layoutLayers()
     }
 
@@ -220,9 +279,18 @@ public final class ILOverlayPlayerView: UIView {
         impressions.hidden()
         guard displayed != nil else { return }
         displayed = nil
+        removeCommercePanel()
         artwork.contents = nil
         artwork.isHidden = true
         layoutLayers()
+    }
+
+    private func removeCommercePanel() {
+        guard let commercePanel else { return }
+        commercePanel.dispose()
+        self.commercePanel = nil
+        isUserInteractionEnabled = false
+        setNeedsFocusUpdate()
     }
 
     private func layoutLayers() {
@@ -232,8 +300,8 @@ public final class ILOverlayPlayerView: UIView {
         playerLayer.frame = layout.video
         artwork.frame = layout.artwork
         artwork.contentsGravity = displayed?.format == .l ? .resize : .resizeAspect
-        playerLayer.zPosition = displayed?.format == .super ? 0 : 1
-        artwork.zPosition = displayed?.format == .super ? 1 : 0
+        playerLayer.zPosition = displayed?.format == .l ? 1 : 0
+        artwork.zPosition = displayed?.format == .l ? 0 : 1
         CATransaction.commit()
     }
 

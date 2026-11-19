@@ -36,9 +36,10 @@ final class OverlayCue {
     final String imageUrl;
     final String mimeType;
     final String impressionUrl;
+    final OverlayCommerce commerce;
 
     private OverlayCue(String id, String format, long start, long end, String imageUrl,
-                       String mimeType, String impressionUrl) {
+                       String mimeType, String impressionUrl, OverlayCommerce commerce) {
         this.id = id;
         this.format = format;
         this.start = start;
@@ -46,15 +47,17 @@ final class OverlayCue {
         this.imageUrl = imageUrl;
         this.mimeType = mimeType;
         this.impressionUrl = impressionUrl;
+        this.commerce = commerce;
     }
 
     private static OverlayCue validate(String id, String format, long start, long end,
-                                       String imageUrl, String mimeType, String impressionUrl) {
+                                       String imageUrl, String mimeType, String impressionUrl, OverlayCommerce commerce) {
         if (id == null || id.trim().isEmpty() || id.length() > 256 || start < 0 || end <= start
-                || end > MAX_SAFE_INTEGER || !("super".equals(format) || "l".equals(format))
+                || end > MAX_SAFE_INTEGER || !("super".equals(format) || "l".equals(format)
+                        || ("overlay".equals(format) && commerce != null))
                 || !isHttps(imageUrl) || (impressionUrl != null && !isHttps(impressionUrl))
                 || (mimeType != null && !isStaticImage(mimeType))) return null;
-        return new OverlayCue(id, format, start, end, imageUrl, mimeType, impressionUrl);
+        return new OverlayCue(id, format, start, end, imageUrl, mimeType, impressionUrl, commerce);
     }
 
     static boolean isHttps(String value) {
@@ -114,7 +117,7 @@ final class OverlayCue {
             }
             return validate(fields.get("ID"), fields.get("X-IL-FORMAT"), start, end,
                     fields.get("X-ASSET-URI"), fields.get("X-ASSET-MIMETYPE"),
-                    fields.get("X-IL-IMPRESSION-URI"));
+                    fields.get("X-IL-IMPRESSION-URI"), null);
         } catch (ParseException | ArithmeticException e) {
             return null;
         }
@@ -150,7 +153,7 @@ final class OverlayCue {
                     || (!item.isNull("impressionUrl") && !(impression instanceof String))) continue;
             OverlayCue cue = validate(string(item.opt("id")), string(item.opt("format")),
                     integer(item.opt("start")), integer(item.opt("end")), string(item.opt("imageUrl")),
-                    string(mime), string(impression));
+                    string(mime), string(impression), OverlayCommerce.parse(item.optJSONObject("commerce")));
             if (cue != null && ids.add(cue.id)) cues.add(cue);
         }
         return cues;

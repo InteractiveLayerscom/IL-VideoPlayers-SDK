@@ -6,6 +6,7 @@ sub init()
     m.clock.observeFieldScoped("fire", "refresh")
     m.top.observeFieldScoped("visible", "refresh")
     m.top.observeFieldScoped("opacity", "refresh")
+    initializeCommerce()
     m.polling = false
     m.cues = []
 end sub
@@ -22,6 +23,7 @@ function attach(video as Dynamic, sessionId as String) as Boolean
         m.sessionId = sessionId
         m.seen = {}
         m.seen.setModeCaseSensitive()
+        m.commerceViewed.clear()
     end if
     m.video = video
     m.content = video.content
@@ -116,6 +118,10 @@ sub refresh()
         clearCreative()
         return
     end if
+    if cue.commerce <> invalid and not m.top.commerceEnabled
+        clearCreative()
+        return
+    end if
     if m.active <> invalid
         if m.active.id <> cue.id or m.active.format <> cue.format or m.active.imageUrl <> cue.imageUrl then clearCreative()
     end if
@@ -145,6 +151,7 @@ sub refresh()
             m.video.height = m.first.height * 0.75
         end if
         m.art.visible = true
+        showCommerce()
         return
     end if
     if m.seen.doesExist(cue.id) or not rendered(m.first) then return
@@ -170,7 +177,13 @@ function prepareCreative(cue as Object) as Boolean
     end if
     if width <= 0 or height <= 0 then return false
     m.active = cue
-    if cue.format = "super"
+    m.commerceVideoWidth = width
+    m.commerceVideoHeight = height
+    if cue.format = "overlay"
+        m.primary.clippingRect = [0, 0, 0, 0]
+        m.first = createPoster(m.primary, width * 0.30, height * 0.32, cue.imageUrl)
+        m.first.translation = [width * 0.64, height * 0.10]
+    else if cue.format = "super"
         m.primary.clippingRect = [0, 0, 0, 0]
         m.first = createPoster(m.primary, width * 0.75, height * 0.2, cue.imageUrl)
         m.first.translation = [width * 0.125, height * 0.7]
@@ -202,6 +215,7 @@ function rendered(poster as Object) as Boolean
 end function
 
 sub hideArtwork()
+    hideCommerce()
     m.art.visible = false
     if m.originalSize <> invalid
         m.video.width = m.originalSize[0]

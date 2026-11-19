@@ -92,3 +92,9 @@ Así, un fotograma a 4,5 segundos del inicio del segmento corresponde a `1700000
 ## Verificación
 
 Ejecutá `sh roku/verify.sh` desde la raíz del repositorio. BrighterScript valida el XML y BrightScript. El intérprete de escritorio ejecuta el componente con nodos SceneGraph y valores controlados para el decodificador y el compositor. La prueba cubre reloj UTC/relativo, parsing HLS, Super/L, carga parcial, visibilidad, impresión única, pausa, corte, seek, cambio de contenido y detach. El intérprete carece del `Task` y del plano de video físico de Roku. La reproducción HLS, la descarga HTTPS y la composición final quedan pendientes de una prueba en dispositivo.
+
+## Compra con Shopify
+
+Habilitá `m.il.commerceEnabled = true`. En el `Task` que consulta el endpoint JSON, incluí `commerce: true`, `locale: "es"` y, si corresponde, `country: "AR"` en `request`. La ficha recibe OK, flechas y Atrás. Si la app controla el foco directamente, configurá `m.il.commerceAutoFocus = false` y reenviá las teclas con `m.il.callFunc("handleCommerceKey", key, press)`. El resultado booleano indica si la ficha usó la tecla.
+
+Observá `productView` y enviá un GET a `viewUrl` con el cliente de medición del host. El `Task` de compra prepara el carrito y la ficha carga el PNG del QR mientras sigue el video. Probá el comportamiento en un equipo Roku del publisher. [Contrato de compra](../docs/signals.md#compra-con-shopify) · [Requisitos de anuncios en Roku](https://developer.roku.com/dev/docs/ad-requirements)

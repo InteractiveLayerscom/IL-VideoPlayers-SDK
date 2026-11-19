@@ -22,6 +22,12 @@ The backend can deliver a cue through an HLS `EXT-X-DATERANGE` tag or a JSON end
 
 For Teinformas, Eyevinn handles channel playout and Google Ad Manager (GAM) manages the campaigns. The FAST pilot uses MediaTailor as the insertion point for pre-roll and mid-roll spots. The player adapters render lower-third and L-shaped ads on the viewer's device. [How Teinformas connects to GAM](docs/teinformas.md)
 
+## Shopify product ads
+
+Publishers can opt in to product offers through the session JSON feed. The SDK displays the product and its variants as a card, an L-shaped ad, or a lower third. On TV, viewers select a variant with the remote and scan a QR code to continue on their phone. Web and mobile viewers open the continuation link directly. iADServer manages the Shopify connection and sales attribution, and Shopify hosts checkout.
+
+[Set up the product offer feed](docs/signals.md#compra-con-shopify).
+
 ## Test the integration
 
 The included generator creates an 18-second HLS test stream and both ad creatives. Use it to check that each graphic appears during its scheduled window, audio continues, the video returns to its original size, and each impression is counted once. [Run the playback test](examples/README.md)

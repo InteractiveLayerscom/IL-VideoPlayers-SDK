@@ -69,6 +69,20 @@ public final class OverlayCueTest {
         assertTrue(OverlayCue.fromSidecar("{oops").isEmpty());
     }
 
+    @Test public void decodesOffersWithoutPassingUnsafeCheckoutUrls() {
+        String offer = "[{\"id\":\"shop\",\"format\":\"overlay\",\"start\":1,\"end\":10001,"
+                + "\"imageUrl\":\"https://merchant.example/boot.jpg\",\"commerce\":{"
+                + "\"title\":\"Botas\",\"currency\":\"BRL\",\"locale\":\"pt-BR\",\"price\":\"27.00\","
+                + "\"handoffUrl\":\"https://ads.example/cart\","
+                + "\"variants\":[{\"id\":\"var-2\",\"label\":\"Tam. 40\"}]}}]";
+        OverlayCue cue = OverlayCue.fromSidecar(offer).get(0);
+        assertEquals("Tam. 40", cue.commerce.variants.get(0).label);
+        assertEquals("27.00", cue.commerce.variants.get(0).price.toPlainString());
+        assertEquals("pt-BR", cue.commerce.locale);
+        assertTrue(OverlayCue.fromSidecar(offer.replace("https://ads.example", "http://ads.example")).isEmpty());
+        assertNull(OverlayCue.fromTag(RANGE.replace("super", "overlay")));
+    }
+
     @Test public void selectsUsingTheLivePositionIncludingStartAndExcludingEnd() {
         List<OverlayCue> cues = OverlayCue.fromTags(Arrays.asList("#EXTINF:6,", RANGE, RANGE));
         assertEquals(1, cues.size());
