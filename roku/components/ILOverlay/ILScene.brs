@@ -1,12 +1,14 @@
 function normalizeScene(value as Dynamic, format as String) as Dynamic
     if type(value) <> "roAssociativeArray" then return invalid
-    if value.format <> format or type(value.layers) <> "roArray" then return invalid
+    if not isText(value.format) or type(value.layers) <> "roArray" then return invalid
+    if value.format <> format then return invalid
     if not isNumber(value.width) or not isNumber(value.height) or not isNumber(value.durationMs) then return invalid
     if value.width <= 0 or value.height <= 0 or value.durationMs <= 0 then return invalid
     if value.layers.count() < 1 or value.layers.count() > 512 then return invalid
     layers = []
     for each layer in value.layers
         if type(layer) = "roAssociativeArray"
+            dropMistypedFields(layer)
             if isText(layer.id) and isText(layer.type) and layer.hidden <> true
                 if isNumber(layer.x) and isNumber(layer.y) and isNumber(layer.width) and isNumber(layer.height)
                     if layer.width >= 0 and layer.height >= 0
@@ -20,6 +22,23 @@ function normalizeScene(value as Dynamic, format as String) as Dynamic
     if layers.count() = 0 then return invalid
     return { width: value.width, height: value.height, durationMs: value.durationMs, layers: layers }
 end function
+
+' A device raises Type Mismatch when a comparison mixes types. Fields the renderer compares
+' with text or a boolean are removed unless they have that type, and then read as invalid.
+sub dropMistypedFields(layer as Object)
+    for each field in ["action", "binding", "fit", "textAlign"]
+        if not isText(layer[field]) then layer.delete(field)
+    end for
+    for each field in ["hidden", "arrow"]
+        if type(layer[field]) <> "Boolean" and type(layer[field]) <> "roBoolean" then layer.delete(field)
+    end for
+    if type(layer.keyframes) <> "roArray" then return
+    for each point in layer.keyframes
+        if type(point) = "roAssociativeArray"
+            if not isText(point.easing) then point.delete("easing")
+        end if
+    end for
+end sub
 
 function normalizeSceneProducts(value as Dynamic, https as Object) as Object
     products = []

@@ -160,6 +160,53 @@ final class OverlayTests: XCTestCase {
         row.removeValue(forKey: "scene")
         XCTAssertEqual(try OverlayCue.decodeSidecar(JSONSerialization.data(withJSONObject: [row])), [])
     }
+
+    private func sceneRow() throws -> [String: Any] {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<4 { root.deleteLastPathComponent() }
+        let fixture = try Data(contentsOf: root.appendingPathComponent("test/fixtures/creative-scene.json"))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+    }
+
+    func testSceneDropsALayerWhoseNumbersExceedTheSupportedRange() throws {
+        let extremes: [(layer: Int, field: String, value: Any)] = [
+            (0, "width", 1e300),
+            (2, "keyframes", [["timeMs": 1000, "scale": -1e300], ["timeMs": 2000, "scale": 1e300]]),
+        ]
+        for extreme in extremes {
+            var row = try sceneRow()
+            var scene = try XCTUnwrap(row["scene"] as? [String: Any])
+            var layers = try XCTUnwrap(scene["layers"] as? [[String: Any]])
+            let id = try XCTUnwrap(layers[extreme.layer]["id"] as? String)
+            layers[extreme.layer][extreme.field] = extreme.value
+            scene["layers"] = layers
+            row["scene"] = scene
+            let cue = try XCTUnwrap(try OverlayCue.decodeSidecar(JSONSerialization.data(withJSONObject: [row])).first)
+            let ids = try XCTUnwrap(cue.scene).layers.map(\.id)
+            XCTAssertEqual(ids.count, 6, extreme.field)
+            XCTAssertFalse(ids.contains(id), extreme.field)
+        }
+    }
+
+    func testSceneKeepsALayerWhoseEndIsFarBeyondTheScene() throws {
+        var row = try sceneRow()
+        var scene = try XCTUnwrap(row["scene"] as? [String: Any])
+        var layers = try XCTUnwrap(scene["layers"] as? [[String: Any]])
+        layers[0]["endMs"] = 9_007_199_254_740_991
+        scene["layers"] = layers
+        row["scene"] = scene
+        let cue = try XCTUnwrap(try OverlayCue.decodeSidecar(JSONSerialization.data(withJSONObject: [row])).first)
+        let background = try XCTUnwrap(try XCTUnwrap(cue.scene).layers.first { $0.id == "background" })
+        XCTAssertTrue(background.frame(at: 4000).visible)
+    }
+
+    func testSceneWhoseCanvasIsSmallerThanOnePixelIsRejected() throws {
+        var row = try sceneRow()
+        var scene = try XCTUnwrap(row["scene"] as? [String: Any])
+        scene["width"] = 1e-30
+        row["scene"] = scene
+        XCTAssertEqual(try OverlayCue.decodeSidecar(JSONSerialization.data(withJSONObject: [row])), [])
+    }
     #endif
 
     func testSceneFeedOnlyAnnouncesAudioWithSecondaryVideo() throws {

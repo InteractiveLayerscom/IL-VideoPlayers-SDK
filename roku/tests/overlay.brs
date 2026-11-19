@@ -164,6 +164,7 @@ sub main()
     check(rail.getChildCount() = 0, "conflicting END-DATE and DURATION are discarded")
     check(not overlay.callFunc("setManifest", "hls", header + "#EXT-X-STREAM-INF:BANDWIDTH=200000" + chr(10) + "video.m3u8"), "a master cannot substitute for the selected variant")
     testScene(overlay, video, rail, foot)
+    testUntypedScene(overlay, rail)
     testMidroll(overlay, video)
     if m.failures = 0 then print "ROKU_OK"; m.checks
 end sub
@@ -468,4 +469,27 @@ sub testMidroll(overlay, video)
     overlay.callFunc("setTimeline", "game", [cue])
     check(not overlay.findNode("ilCommerce").visible, "the midpoint shop expires with its exclusive cue end")
     overlay.callFunc("setLinearAd", false, invalid)
+end sub
+
+sub testUntypedScene(overlay, rail)
+    cue = parseJson(readAsciiFile("pkg:/tests/creative-scene.json"))
+    if cue = invalid then return
+    ' JSON carries no schema. A field of the wrong type is ignored like any other unusable value.
+    ' A device raises Type Mismatch on a mixed comparison and this interpreter does not, so these
+    ' checks cover the rendered result and cannot show that failure.
+    cue.layout = 3
+    background = cue.scene.layers[0]
+    background.action = 7
+    background.binding = 7
+    background.fit = false
+    background.arrow = "yes"
+    background.hidden = "no"
+    headline = cue.scene.layers[2]
+    headline["textAlign"] = 4
+    headline.keyframes[0].easing = 9
+    pulse(overlay, cue, "hls")
+    check(rail.findNode("background") <> invalid and rail.findNode("headline") <> invalid, "fields of the wrong type do not discard the scene")
+    cue.scene.format = 5
+    pulse(overlay, cue, "hls")
+    check(rail.getChildCount() = 0, "a scene whose format is not text is rejected")
 end sub

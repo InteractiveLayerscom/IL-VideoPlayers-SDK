@@ -51,7 +51,7 @@ function normalizeCue(item as Dynamic, https as Object) as Dynamic
     if commerce <> invalid then cue.commerce = commerce
     if scene <> invalid
         cue.scene = scene
-        cue.layout = item.layout
+        if isText(item.layout) then cue.layout = item.layout
         cue.products = normalizeSceneProducts(item.products, https)
         if type(item.brand) = "roAssociativeArray" then cue.brand = item.brand
     end if
