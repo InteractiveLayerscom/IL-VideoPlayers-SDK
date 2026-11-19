@@ -101,7 +101,9 @@ Observá `productView` y enviá un GET a `viewUrl` con el cliente de medición d
 
 ### Ficha, galería y carrito de TV
 
-**Elegir opciones** abre los detalles. Con una sola opción disponible aparece **Ver detalles**. Las flechas verticales recorren la galería, los grupos de opciones y **Agregar al carrito**. Las horizontales recorren los valores de una opción. OK confirma una combinación disponible del catálogo. La galería comparte el panel lateral de la ficha y permite recorrer fotos con izquierda y derecha. Al salir vuelve la foto del SKU o la portada del producto. Atrás retorna al paso anterior, incluida la capa de producto que abrió la ficha.
+Desde la portada y los detalles, **Ver galería de fotos** abre la imagen de la variante elegida o la portada del producto. También podés ampliar una única foto. El visor ocupa toda el área de video, con fondo oscuro y la imagen completa en su proporción original. Cuando hay varias fotos, las flechas izquierda y derecha permiten recorrerlas. **Atrás** devuelve el foco al botón que abrió el visor y conserva la variante elegida.
+
+**Elegir opciones** abre los detalles. Con una sola opción disponible aparece **Ver detalles**. Las flechas verticales recorren los controles y las horizontales recorren los valores de una opción. OK confirma una combinación disponible del catálogo. Los botones principales, como **Agregar al carrito**, tienen fondo blanco y texto oscuro, también cuando la campaña especifica un color de marca.
 
 El carrito muestra el artículo, su variante y el total. Solo **Continuar con el QR** solicita el QR a Shopify a través del endpoint de iADServer. La petición contiene el ID de la variante confirmada. Atrás cierra el QR y cancela una solicitud pendiente.
 

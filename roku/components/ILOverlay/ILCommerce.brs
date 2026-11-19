@@ -123,15 +123,25 @@ sub initializeCommerce()
     m.panelSummary = m.top.findNode("ilCommerceSummary")
     m.panelTotal = m.top.findNode("ilCommerceTotal")
     m.panelAmount = m.top.findNode("ilCommerceAmount")
+    m.galleryPhoto = m.top.findNode("ilCommerceGalleryPhoto")
+    m.galleryBackShade = m.top.findNode("ilCommerceGalleryBackShade")
+    m.galleryPrevShade = m.top.findNode("ilCommerceGalleryPrevShade")
+    m.galleryNextShade = m.top.findNode("ilCommerceGalleryNextShade")
+    m.galleryCountShade = m.top.findNode("ilCommerceGalleryCountShade")
     m.galleryPrev = m.top.findNode("ilCommerceGalleryPrev")
     m.galleryNext = m.top.findNode("ilCommerceGalleryNext")
     m.galleryBackground = m.top.findNode("ilCommerceGalleryBackground")
     m.panelGallery = m.top.findNode("ilCommerceGallery")
     m.panelArrows = m.top.findNode("ilCommerceArrows")
     m.optionGroup = m.top.findNode("ilCommerceChips")
+    m.galleryBackFocus = sceneOutline(m.galleryBackShade, 100, 36, 3, "0xFFFFFFFF")
+    m.galleryPrevFocus = sceneOutline(m.galleryPrevShade, 56, 56, 3, "0xFFFFFFFF")
+    m.galleryNextFocus = sceneOutline(m.galleryNextShade, 56, 56, 3, "0xFFFFFFFF")
     m.closeFocus = sceneOutline(m.panelClose, 100, 36, 2, "0xFFFFFFFF")
     m.galleryFocus = sceneOutline(m.panelGallery, 282, 36, 2, "0xFFFFFFFF")
     m.buyFocus = sceneOutline(m.panelDetail, 486, 62, 3, "0xFFFFFFFF")
+    innerFocus = sceneOutline(m.buyFocus, 480, 56, 2, "0x202020FF")
+    innerFocus.translation = [3, 3]
     m.shopWidgets = []
     for axis = 0 to 2
         m.shopWidgets.push(createShopOptionRow(axis))
@@ -183,7 +193,7 @@ end sub
 sub releaseShop()
     cancelCart()
     m.panel.visible = false
-    for each photo in [m.panelPhoto, m.panelLogo]
+    for each photo in [m.panelPhoto, m.panelLogo, m.galleryPhoto]
         photo.uri = ""
     end for
     m.shopRows = invalid
@@ -226,50 +236,18 @@ function commerceColor(value as Dynamic, fallback as String) as String
     return "0x" + hex
 end function
 
-function linearCommerceChannel(hex as String) as Float
-    value = val(hex, 16) / 255.0
-    if value <= 0.04045 then return value / 12.92
-    return ((value + 0.055) / 1.055) ^ 2.4
-end function
-
 sub applyCommerceBrand()
     brand = m.active.brand
     if brand = invalid then brand = {}
-    m.panelBackground.color = commerceColor(brand.background, "#202020")
+    m.shopPanelColor = commerceColor(brand.background, "#202020")
     foreground = commerceColor(brand.foreground, "#FFFFFF")
     for each label in [m.panelTrigger, m.panelHeading, m.panelClose, m.panelName, m.panelPrice, m.panelPrevious, m.panelDescription, m.panelSummary, m.panelTotal, m.panelAmount, m.panelGallery, m.panelArrows, m.galleryPrev, m.galleryNext, m.panelStatus]
         label.color = foreground
     end for
-    m.panelBuyBackground.color = "0xF0F0F0FF"
+    m.panelBuyBackground.color = "0xFFFFFFFF"
     m.panelBuy.color = "0x202020FF"
-    focusColor = "0xB4C6FFFF"
-    m.chipSelectedColor = "0x515151FF"
-    m.chipSelectedText = "0xFFFFFFFF"
-    accent = commerceColor(brand.accent, "")
-    if accent <> ""
-        red = linearCommerceChannel(mid(accent, 3, 2))
-        green = linearCommerceChannel(mid(accent, 5, 2))
-        blue = linearCommerceChannel(mid(accent, 7, 2))
-        luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
-        if luminance > 0.179 then m.chipSelectedText = "0x000000FF"
-        m.chipSelectedColor = accent
-        m.panelBuyBackground.color = accent
-        m.panelBuy.color = m.chipSelectedText
-        if luminance > 0.18 then focusColor = accent
-    end if
     m.buyLeft.blendColor = m.panelBuyBackground.color
     m.buyRight.blendColor = m.panelBuyBackground.color
-    outlines = [m.buyFocus, m.closeFocus, m.galleryFocus]
-    for each widget in m.shopWidgets
-        for each chip in widget.chips
-            outlines.push(chip.outline)
-        end for
-    end for
-    for each outline in outlines
-        for each edge in outline.getChildren(-1, 0)
-            edge.color = focusColor
-        end for
-    end for
     logoUrl = ""
     if isText(brand.logoUrl)
         if m.commerceHTTPS.isMatch(brand.logoUrl) then logoUrl = brand.logoUrl
@@ -317,8 +295,7 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
         stepBy = 1
         if key = "left" then stepBy = -1
         if m.shopPage = "gallery"
-            n = m.shopPhotos.count()
-            if n > 0 then m.shopPhotoIndex = (m.shopPhotoIndex + n + stepBy) mod n
+            moveShopPhoto(stepBy)
         else if left(m.shopFocusKey, 3) = "row"
             row = m.shopRows[val(mid(m.shopFocusKey, 4))]
             n = row.values.count()
@@ -328,6 +305,10 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
         if m.shopFocusKey = "back"
             shopBack()
             return true
+        else if m.shopFocusKey = "prev" or m.shopFocusKey = "next"
+            stepBy = 1
+            if m.shopFocusKey = "prev" then stepBy = -1
+            moveShopPhoto(stepBy)
         else if m.shopFocusKey = "gallery"
             enterShopPage("gallery", "back")
         else if left(m.shopFocusKey, 3) = "row"
@@ -349,9 +330,18 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
     return true
 end function
 
+sub moveShopPhoto(stepBy as Integer)
+    n = m.shopPhotos.count()
+    if n < 2 then return
+    m.shopPhotoIndex = (m.shopPhotoIndex + n + stepBy) mod n
+    m.shopFocusKey = "next"
+    if stepBy < 0 then m.shopFocusKey = "prev"
+end sub
+
 sub enterShopPage(page as String, focusKey as String)
     cancelCart()
     if page = "gallery"
+        m.galleryOrigin = m.shopPage
         m.shopPhotoIndex = 0
         photo = shopProductPhoto(currentOffer().variants[m.commerceChoice])
         if isText(photo) then m.shopPhotoIndex = m.shopPhotoIds[photo]
@@ -365,7 +355,8 @@ sub shopBack()
     if m.shopPage = "qr"
         enterShopPage("cart", "action")
     else if m.shopPage = "gallery"
-        enterShopPage("detail", "gallery")
+        m.galleryPhoto.uri = ""
+        enterShopPage(m.galleryOrigin, "gallery")
     else if m.shopPage = "cart"
         enterShopPage("detail", "action")
     else if m.shopPage = "detail"

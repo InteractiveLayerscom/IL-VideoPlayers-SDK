@@ -339,6 +339,65 @@ final class UIKitSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testRedBrandKeepsTVShoppingPrimariesWhiteWithDarkText() throws {
+        let data = Data("""
+        {"title":"Bag","price":"80","currency":"USD","variants":[{"id":"one","label":"One size"}],
+         "handoffUrl":"https://checkout-fixture.invalid/tv"}
+        """.utf8)
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: data)
+        let brand = SceneBrand(logoUrl: nil, accent: "#e00020", foreground: "#ffffff", background: "#ff0000")
+        let panel = TVCommercePanel(offer, photo: nil, brand: brand, midroll: true, checkoutURL: nil) {}
+        defer { panel.dispose() }
+        for stage in ["Buy", "View details", "Add to cart", "Continue to QR"] {
+            let action = try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == stage })
+            var white: CGFloat = 0, alpha: CGFloat = 0
+            XCTAssertTrue(action.configuration?.background.backgroundColor?.getWhite(&white, alpha: &alpha) == true)
+            XCTAssertEqual(white, 1, accuracy: 0.001)
+            XCTAssertEqual(alpha, 1, accuracy: 0.001)
+            XCTAssertTrue(action.configuration?.baseForegroundColor?.getWhite(&white, alpha: &alpha) == true)
+            XCTAssertLessThan(white, 0.2)
+            if stage != "Continue to QR" { action.sendActions(for: .primaryActionTriggered) }
+        }
+    }
+
+    @MainActor
+    func testSinglePhotoOpensAcrossTheTVViewportAndBackRestoresTheOpeningControl() throws {
+        let json = """
+        {"title":"Bag","price":"80","currency":"USD","variants":[{"id":"one","label":"One size"}],
+         "handoffUrl":"https://checkout-fixture.invalid/tv"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        let bitmap = try bitmap(.blue)
+        let panel = TVCommercePanel(offer, photo: bitmap, checkoutURL: nil, closed: { XCTFail("Closed the shop") }) {}
+        defer { panel.dispose() }
+        let viewport = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        panel.frame = panel.presentationFrame(in: viewport)
+        let sheet = panel.frame
+        XCTAssertEqual(sheet.width, 806.4, accuracy: 0.01)
+
+        for stage in ["cover", "details"] {
+            if stage == "details" {
+                try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == "View details" })
+                    .sendActions(for: .primaryActionTriggered)
+            }
+            let opener = try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.accessibilityLabel == "View full size" })
+            opener.sendActions(for: .primaryActionTriggered)
+            panel.frame = panel.presentationFrame(in: viewport)
+            XCTAssertEqual(panel.frame, viewport)
+            panel.layoutIfNeeded()
+            let photo = try XCTUnwrap(descendants(of: panel, type: UIImageView.self).first { $0.accessibilityLabel == "Photo 1/1" })
+            XCTAssertTrue(photo.image?.cgImage === bitmap)
+            XCTAssertEqual(photo.contentMode, .scaleAspectFit)
+            XCTAssertGreaterThan(photo.bounds.width, viewport.width * 0.85)
+            XCTAssertGreaterThan(photo.bounds.height, viewport.height * 0.85)
+            XCTAssertFalse(descendants(of: panel, type: UIButton.self).contains { $0.accessibilityLabel == "Next photo" })
+            XCTAssertTrue(panel.closeDetails())
+            XCTAssertEqual(panel.presentationFrame(in: viewport), sheet)
+            XCTAssertTrue(panel.preferredFocusEnvironments.first === opener)
+        }
+    }
+
+    @MainActor
     func testTelevisionGalleryOptionsCartAndQRUseTheSelectedSKU() async throws {
         let json = """
         {"title":"Shoes","vendor":"Maker","previousPrice":"60","price":"45","currency":"USD","description":"Canvas shoes",
@@ -363,12 +422,13 @@ final class UIKitSurfaceTests: XCTestCase {
         defer { panel.dispose() }
         let screen = CGRect(x: 0, y: 0, width: 1024, height: 576)
         let sidebar = CGRect(x: screen.width * 0.58, y: 0, width: screen.width * 0.42, height: screen.height)
-        func tap(_ name: String) throws {
+        func tap(_ name: String, inGallery: Bool = false) throws {
             panel.frame = panel.presentationFrame(in: screen)
-            XCTAssertEqual(panel.frame.minX, sidebar.minX, accuracy: 0.001)
-            XCTAssertEqual(panel.frame.width, sidebar.width, accuracy: 0.001)
+            let expected = inGallery ? screen : sidebar
+            XCTAssertEqual(panel.frame.minX, expected.minX, accuracy: 0.001)
+            XCTAssertEqual(panel.frame.width, expected.width, accuracy: 0.001)
             panel.layoutIfNeeded()
-            try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == name }).sendActions(for: .primaryActionTriggered)
+            try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == name || $0.accessibilityLabel == name }).sendActions(for: .primaryActionTriggered)
         }
         let coverLabels = descendants(of: panel, type: UILabel.self)
         XCTAssertTrue(coverLabels.contains { $0.text == "Maker" })
@@ -377,18 +437,23 @@ final class UIKitSurfaceTests: XCTestCase {
         XCTAssertFalse(coverLabels.contains { $0.text?.contains("60.00") == true })
         try tap("Choose options")
         XCTAssertTrue(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("60.00") == true })
-        try tap("View photo gallery")
-        XCTAssertEqual(panel.presentationFrame(in: screen).width, sidebar.width, accuracy: 0.001)
+        try tap("View full size")
+        XCTAssertEqual(panel.presentationFrame(in: screen), screen)
         XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 1/2" })
-        try tap("›")
+        try tap("Next photo", inGallery: true)
         XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 2/2" })
         XCTAssertTrue(panel.closeDetails())
         let rail = try XCTUnwrap(descendants(of: panel, type: UICollectionView.self).first)
         rail.delegate?.collectionView?(rail, didSelectItemAt: IndexPath(item: 1, section: 0))
         await waitForPhoto(blue, in: panel)
         XCTAssertFalse(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("60.00") == true })
-        try tap("View photo gallery")
-        try tap("›")
+        try tap("View full size")
+        let selected = try XCTUnwrap(descendants(of: panel, type: UIImageView.self).first { $0.accessibilityLabel == "Photo 3/3" })
+        XCTAssertTrue(selected.image?.cgImage === blue)
+        try tap("Previous photo", inGallery: true)
+        await waitForPhoto(gallery, in: panel)
+        try tap("Next photo", inGallery: true)
+        try tap("Next photo", inGallery: true)
         await waitForPhoto(cover, in: panel)
         XCTAssertTrue(panel.closeDetails())
         await waitForPhoto(blue, in: panel)

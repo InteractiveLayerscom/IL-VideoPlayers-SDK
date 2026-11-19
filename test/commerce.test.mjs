@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { commerceSurface } from '../web/commerce.mjs';
 import { productOptions } from '../web/tv-shop.mjs';
@@ -214,7 +215,11 @@ test('TV shows only valid Shopify combinations, photo gallery and the selected S
   assert.equal(stage.querySelector('.il-tv-vendor').textContent, 'Andén');
   assert.equal(stage.querySelector('.il-tv-description').textContent, 'Canvas');
   assert.match(stage.querySelector('.il-tv-facts').textContent, /ColorBlue · Tan/);
-  btn('View photos').click(); btn('Back').click();
+  btn('View photos').click();
+  assert.equal(stage.querySelector('[role="dialog"] .il-tv-feature').src, cue.imageUrl);
+  assert.equal(stage.querySelector('.il-tv-sheet'), null);
+  btn('Back').click();
+  assert.equal(doc.activeElement.textContent, 'View photos');
   assert.equal(stage.querySelector('.il-tv-shop').dataset.page, 'intro');
   btn('Choose options').click(); btn('View photos').click(); btn('Next').click();
   assert.equal(stage.querySelector('.il-tv-feature').src, product.images[0]);
@@ -238,6 +243,47 @@ test('TV shows only valid Shopify combinations, photo gallery and the selected S
   assert.equal(stage.querySelector('.il-tv-thumb').src, tanPhoto);
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(posted,[{variantId:'t-m'}]);
+  shop.hide(); window.close();
+});
+
+test('even a single TV product photo can be enlarged and Back returns focus to its opener', () => {
+  const {window} = new JSDOM('<main><button>Shop</button></main>', {pretendToBeVisual:true});
+  const doc = window.document, stage = doc.querySelector('main');
+  const shop = commerceSurface(stage, {tv:true,locale:'en'});
+  shop.open(cue, {...cue.commerce, imageUrl:cue.imageUrl, viewUrl:undefined}, stage.querySelector('button'), () => true);
+  const get = key => stage.querySelector('[data-shop-key="' + key + '"]');
+  for (const opener of ['hero', 'gallery']) {
+    get(opener).click();
+    assert.equal(stage.querySelector('[role="dialog"] img').src, cue.imageUrl);
+    assert.equal(get('next'), null);
+    assert.equal(get('prev'), null);
+    assert.equal(doc.activeElement, get('back'));
+    doc.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}));
+    doc.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', {key:'Escape', bubbles:true}));
+    assert.equal(doc.activeElement, get(opener));
+  }
+  get('detail').click();
+  get('gallery').click(); get('back').click();
+  assert.equal(doc.activeElement, get('gallery'));
+  shop.hide(); window.close();
+});
+
+test('TV shopping actions stay white with dark text for a red brand, including focus', () => {
+  const {window} = new JSDOM('<main><button>Shop</button></main>', {pretendToBeVisual:true});
+  const doc = window.document, stage = doc.querySelector('main');
+  const style = doc.createElement('style');
+  style.textContent = readFileSync(new URL('../web/tv-shop.css', import.meta.url), 'utf8');
+  doc.head.append(style);
+  const shop = commerceSurface(stage, {tv:true,locale:'en'});
+  shop.open({...cue, brand:{accent:'#ff0022'}}, {...cue.commerce, viewUrl:undefined}, stage.querySelector('button'), () => true);
+  for (const key of ['detail', 'cart', 'finish']) {
+    const action = stage.querySelector('[data-shop-key="' + key + '"]');
+    action.focus();
+    const appearance = window.getComputedStyle(action);
+    assert.equal(appearance.backgroundColor, 'rgb(255, 255, 255)');
+    assert.equal(appearance.color, 'rgb(20, 20, 20)');
+    if (key !== 'finish') action.click();
+  }
   shop.hide(); window.close();
 });
 
