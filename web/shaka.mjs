@@ -1,4 +1,5 @@
 import { commerceSurface } from './commerce.mjs';
+import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
 
@@ -37,7 +38,7 @@ export function asInterstitial(cue, programTime, mediaSeconds) {
 }
 
 // Install after player.attach(video) and before player.load(). Unload the asset before teardown.
-export function attachShaka({ player, clientContainer, serverContainer, programTime, ...source }) {
+export function attachShaka({ player, clientContainer, serverContainer, programTime, stage = clientContainer?.parentElement, ...source }) {
   const manager = player.getAdManager();
   if (
     typeof manager?.addCustomInterstitial !== 'function' ||
@@ -73,13 +74,51 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     video.removeAttribute('data-il-unsqueeze');
     muted = null;
   }
-  const commerce = commerceSurface(clientContainer.parentElement ?? clientContainer, source.commerce, source.fetchImpl);
+  const sceneStage = stage ?? clientContainer;
+  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl);
+  const clock = programTime ?? (() => {
+    if (video.readyState < 2) return null;
+    if (datedPlaylist) return player.getPlayheadTimeAsDate()?.getTime();
+    return nativeProgramTime(video);
+  });
+  const presenting = () => !video.seeking && !video.ended && video.readyState >= 2 &&
+    !video.ownerDocument.hidden && !manager.getCurrentAd()?.isLinear();
+  const playing = () => presenting() && !video.paused;
+  const properties = {
+    position: 'absolute', left: '0', top: '0', right: 'auto', bottom: 'auto', width: '75%', height: '75%',
+  };
+  let original;
+  const allowVideo = source.secondaryVideo ?? true;
+  const allowAudio = allowVideo && source.secondaryVideoAudio === true;
+  const window = sceneStage.ownerDocument.defaultView;
+  const scenes = sceneRenderer(sceneStage, commerce, {
+    clock, moving: playing, tv: Boolean(source.commerce?.tv),
+    allowVideo, allowAudio, animate: source.interval !== false,
+    squeeze(shrink) {
+      if (shrink) {
+        original ??= Object.keys(properties).map(key => [
+          key, video.style.getPropertyValue(key), video.style.getPropertyPriority(key),
+        ]);
+        Object.assign(video.style, properties);
+      } else if (original) {
+        for (const [key, value, priority] of original) video.style.setProperty(key, value, priority);
+        original = null;
+      }
+      return true;
+    },
+  });
   let last, isActive;
   const renderer = {
     show(cue, time, stillActive) {
       isActive = stillActive;
       unmute();
-      desired = last = cue;
+      desired = cue;
+      if (cue.format === 'midroll') { commerce.show(cue, stillActive); return; }
+      if (cue.scene) {
+        scenes.show(cue, time, stillActive);
+        return;
+      }
+      last = cue;
       const ad = asInterstitial(cue, time, video.currentTime);
       if (!submitted.has(ad.id)) {
         submitted.add(ad.id);
@@ -87,38 +126,30 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
       }
     },
     hide() {
+      scenes.hide();
       commerce.hide();
+      if (!desired?.scene) mute(last);
       desired = null;
-      mute(last);
     },
+    update: scenes.update,
+    applyAudioPermissions: scenes.applyAudioPermissions,
     visible(cue) {
+      if (cue.scene) return scenes.visible();
       const visible = ownsCurrent(cue) && imageVisible(matchImage(cue.imageUrl));
       if (visible) commerce.show(cue, isActive);
       return visible;
     },
     destroy() {
+      scenes.hide();
       commerce.hide();
       unmute();
     },
   };
-  const clock =
-    programTime ??
-    (() => {
-      if (video.readyState < 2) return null;
-      if (datedPlaylist) return player.getPlayheadTimeAsDate()?.getTime();
-      return nativeProgramTime(video);
-    });
   const session = createSession({
-    ...source,
-    clock,
-    renderer,
-    playing: () =>
-      !video.paused &&
-      !video.seeking &&
-      !video.ended &&
-      video.readyState >= 2 &&
-      !video.ownerDocument.hidden &&
-      !manager.getCurrentAd()?.isLinear(),
+    ...source, clock, renderer, playing, presenting,
+    presentingSpot: () => !video.seeking && !video.ended && !video.ownerDocument.hidden,
+    scenes: sceneSupported(window),
+    sceneFeatures: sceneFeatures(window, allowVideo, allowAudio),
   });
   const filter = (type, response) => {
     // Shaka NetworkingEngine.RequestType.MANIFEST is 0.

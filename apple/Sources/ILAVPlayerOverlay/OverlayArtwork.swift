@@ -24,12 +24,22 @@ enum OverlayArtwork {
     }
 
     static func load(_ cue: OverlayCue) async throws -> CGImage {
-        let (bytes, response) = try await session.bytes(from: cue.imageURL)
+        guard let url = cue.imageURL else { throw URLError(.badURL) }
+        return try await load(url, expectedMIME: cue.imageMIME, allowGIF: false)
+    }
+
+    static func loadSceneImage(_ url: URL) async throws -> CGImage {
+        try await load(url, expectedMIME: nil, allowGIF: true)
+    }
+
+    private static func load(_ url: URL, expectedMIME: String?, allowGIF: Bool) async throws -> CGImage {
+        let (bytes, response) = try await session.bytes(from: url)
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               response.expectedContentLength <= Int64(maxBytes) else { throw URLError(.badServerResponse) }
         let type = response.mimeType?.lowercased()
-        if let type, !["image/png", "image/jpeg", "application/octet-stream"].contains(type) {
+        if let type, !["image/png", "image/jpeg", "application/octet-stream"].contains(type),
+           !(allowGIF && type == "image/gif") {
             throw URLError(.cannotDecodeContentData)
         }
         var data = Data()
@@ -40,20 +50,20 @@ enum OverlayArtwork {
             }
             try Task.checkCancellation()
             let declaredMIME = type == "application/octet-stream" ? nil : type
-            if let expected = cue.imageMIME, let declaredMIME, expected != declaredMIME {
+            if let expected = expectedMIME, let declaredMIME, expected != declaredMIME {
                 throw URLError(.cannotDecodeContentData)
             }
-            return try decode(data, expectedMIME: cue.imageMIME ?? declaredMIME)
+            return try decode(data, expectedMIME: expectedMIME ?? declaredMIME, allowGIF: allowGIF)
         } onCancel: {
             bytes.task.cancel()
         }
     }
 
-    static func decode(_ data: Data, expectedMIME: String?) throws -> CGImage {
+    static func decode(_ data: Data, expectedMIME: String?, allowGIF: Bool = false) throws -> CGImage {
         let options = [kCGImageSourceShouldCache: false] as CFDictionary
         guard data.count <= maxBytes, let source = CGImageSourceCreateWithData(data as CFData, options),
               let identifier = CGImageSourceGetType(source) as String?,
-              let type = UTType(identifier), type == .png || type == .jpeg,
+              let type = UTType(identifier), type == .png || type == .jpeg || (allowGIF && type == .gif),
               expectedMIME == nil || type.preferredMIMEType == expectedMIME,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,

@@ -54,6 +54,16 @@ final class OverlayLayer extends View {
         invalidate();
     }
 
+    void squeezeForScene(boolean shrink) {
+        if (shrink && originalParams == null) {
+            originalParams = content.getLayoutParams();
+            corner = true;
+            updateBounds();
+        } else if (!shrink && originalParams != null) {
+            clear();
+        }
+    }
+
     void clear() {
         if (originalParams != null) {
             content.setLayoutParams(originalParams);

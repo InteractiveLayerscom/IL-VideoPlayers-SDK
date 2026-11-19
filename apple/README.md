@@ -84,3 +84,20 @@ Reproducí el HLS de la sesión de pruebas. Observá un super y una L de princip
 Usá `ILOverlayPlayerView(player: player, source: .sidecar)` y habilitá `surface.commerceEnabled = true`. Aplicá `ILOverlayPlayerView.commerceFeed(feedURL, locale: "es", country: "AR")` antes de agregar `sid` y `time` desde el cliente de sesión. Seguí pasando la respuesta con `replaceSidecar(_:for:)`.
 
 En tvOS, el control remoto elige variantes y abre el QR. En iOS, la misma acción abre la continuación en el navegador. La app puede asignar `openCheckoutURL` para usar su navegación de compra y llamar a `closeCommercePanel()` para ofrecer primero el cierre de la ficha al gestionar Atrás. [Contrato de compra](../docs/signals.md#compra-con-shopify)
+
+En tvOS, la portada abre el detalle, desde donde se puede recorrer la galería y elegir las opciones de una variante disponible. **Añadir al carrito** conserva una unidad de esa variante. **Finalizar compra** solicita el QR de Shopify. Atrás vuelve al paso anterior. En iOS, **Comprar** conserva la navegación por enlace.
+
+### Tienda durante un midroll VAST
+
+Cuando el host empiece a reproducir un spot con tienda, pasá el `Creative@id` y el ID de entrega de su URL de impresión `/events/{id}/impression`. Solicitá el sidecar conservando el mismo tag, `sid` y rango temporal del feed de esa sesión.
+
+```swift
+superficie.setLinearAdBreak(true, creativeID: creativeID, deliveryID: deliveryID)
+let url = ILOverlayPlayerView.commerceFeed(feedDeLaSesion, locale: "es",
+                                           midrollCreativeID: creativeID, midrollDeliveryID: deliveryID)
+// La respuesta se aplica con replaceSidecar(_:for:) al ítem que inició la consulta.
+// Al finalizar o saltar el spot:
+superficie.setLinearAdBreak(false)
+```
+
+La superficie muestra **Comprar** durante el intervalo de una entrega cuyo ID y creatividad coinciden con el corte activo. El host sigue reproduciendo el spot y midiendo la impresión VAST. Para los demás cortes seguí usando `isInLinearAdBreak`.

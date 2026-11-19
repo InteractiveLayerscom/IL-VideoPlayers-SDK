@@ -30,6 +30,7 @@ final class FixturePublisher implements Closeable {
     final List<String> images = Collections.synchronizedList(new ArrayList<>());
     final List<String> impressions = Collections.synchronizedList(new ArrayList<>());
     final List<HttpUrl> sidecarRequests = Collections.synchronizedList(new ArrayList<>());
+    final List<String> checkoutDestinations = Collections.synchronizedList(new ArrayList<>());
     final List<String> checkoutSelections = Collections.synchronizedList(new ArrayList<>());
     final CountDownLatch requestStarted = new CountDownLatch(1);
     final CountDownLatch releaseImage = new CountDownLatch(1);
@@ -40,19 +41,24 @@ final class FixturePublisher implements Closeable {
     private final SSLSocketFactory originalTrust = HttpsURLConnection.getDefaultSSLSocketFactory();
     private final String live;
     private final String vod;
+    private final String scene;
     private final byte[] segment;
     private final byte[] jpeg;
     private final byte[] png;
+    private final byte[] scenePoster;
     private final String origin;
 
     FixturePublisher(AssetManager assets) throws IOException {
         live = new String(read(assets, "live.m3u8"), StandardCharsets.UTF_8);
         vod = new String(read(assets, "vod.m3u8"), StandardCharsets.UTF_8);
+        scene = new String(read(assets, "creative-scene.json"), StandardCharsets.UTF_8);
         segment = read(assets, "green.ts");
         Bitmap image = Bitmap.createBitmap(32, 18, Bitmap.Config.ARGB_8888);
         image.eraseColor(Color.RED);
         png = encode(image, Bitmap.CompressFormat.PNG);
         jpeg = encode(image, Bitmap.CompressFormat.JPEG);
+        image.eraseColor(Color.MAGENTA);
+        scenePoster = encode(image, Bitmap.CompressFormat.PNG);
         image.recycle();
 
         HeldCertificate cert = new HeldCertificate.Builder().commonName("IL test")
@@ -63,7 +69,8 @@ final class FixturePublisher implements Closeable {
         server.useHttps(publisher.sslSocketFactory(), false);
         server.setDispatcher(new Dispatcher() {
             @Override public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
-                if (request.getPath().equals("/cart") && request.getMethod().equals("POST")) {
+                if (request.getPath().endsWith("/cart") && request.getMethod().equals("POST")) {
+                    checkoutDestinations.add(request.getPath());
                     checkoutSelections.add(request.getBody().readUtf8());
                     return new MockResponse().setHeader("Content-Type", "application/json")
                             .setBody("{\"continueUrl\":\"" + url("/continue") + "\",\"qrImageUrl\":\"" + url("/qr.png") + "\"}");
@@ -94,13 +101,60 @@ final class FixturePublisher implements Closeable {
             if (hold) releaseImage.await(6, TimeUnit.SECONDS);
             responseSent.countDown();
             if (invalidImage) return new MockResponse().setBody("<html/>");
+            if (path.equals("/assets/poster.png")) return bytes(scenePoster, "image/png");
             return path.endsWith("/l") ? bytes(jpeg, "image/jpeg") : bytes(png, "image/png");
         }
         if (path.startsWith("/measure/")) {
             impressions.add(path);
             return new MockResponse().setResponseCode(204);
         }
+        if (path.equals("/animated.gif")) return bytes(android.util.Base64.decode(
+                "R0lGODlhAQABAPAAAP8AAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQAAAAAACwAAAAAAQABAAACAkQBACH5BAAAAAAALAAAAAABAAEAgAAA/wAAAAICRAEAOw==",
+                android.util.Base64.DEFAULT), "image/gif");
         if (path.equals("/qr.png")) return bytes(png, "image/png");
+        if (path.equals("/scene")) {
+            sidecarRequests.add(request);
+            if (!"1".equals(request.queryParameter("scene"))) return new MockResponse().setBody("[]");
+            try {
+                org.json.JSONObject cue = new org.json.JSONObject(
+                        scene.replace("https://ads.example/", url("/"))
+                                .replace(url("/poster.png"), url("/assets/poster.png"))
+                                .replace(url("/cap.png"), url("/assets/cap.png"))
+                                .replace(url("/logo.png"), url("/assets/logo.png"))
+                                .replace(url("/cap/view"), url("/measure/cap")));
+                org.json.JSONObject cap = cue.getJSONArray("products").getJSONObject(1);
+                cap.put("description", "Gorra ajustable").put("images", new org.json.JSONArray().put(url("/assets/back.png")));
+                org.json.JSONArray skus = cap.getJSONArray("variants");
+                for (int i = 0; i < skus.length(); i++) {
+                    org.json.JSONObject sku = skus.getJSONObject(i);
+                    sku.put("selectedOptions", new org.json.JSONArray()
+                            .put(new org.json.JSONObject().put("name", "Color").put("value", sku.getString("label")))
+                            .put(new org.json.JSONObject().put("name", "Talle").put("value", i == 0 ? "S" : "M")));
+                    if (i == 1) sku.put("imageUrl", url("/assets/green.png"));
+                }
+                cue.put("start", 1795046400000L);
+                cue.put("end", 1795046418000L);
+                cue.put("impressionUrl", url("/measure/scene"));
+                return new MockResponse().setHeader("Content-Type", "application/json")
+                        .setBody(new org.json.JSONArray().put(cue).toString());
+            } catch (org.json.JSONException e) {
+                return new MockResponse().setResponseCode(500);
+            }
+        }
+        if (path.equals("/midroll")) {
+            sidecarRequests.add(request);
+            try {
+                org.json.JSONObject offer = new org.json.JSONObject().put("title", "Spot boots")
+                        .put("currency", "USD").put("locale", "es").put("price", 20).put("imageUrl", url("/assets/boots.png"))
+                        .put("handoffUrl", url("/cart")).put("viewUrl", url("/measure/shop-view"))
+                        .put("variants", new org.json.JSONArray().put(new org.json.JSONObject().put("id", "v").put("label", "M")));
+                org.json.JSONObject cue = new org.json.JSONObject().put("format", "midroll").put("id", "delivery-a")
+                        .put("linearCreativeId", "creative-a").put("start", 1795046400000L).put("end", 1795046418000L)
+                        .put("imageUrl", url("/assets/spot.mp4")).put("mimeType", "video/mp4")
+                        .put("impressionUrl", url("/measure/vast")).put("commerce", offer);
+                return new MockResponse().setBody(new org.json.JSONArray().put(cue).toString());
+            } catch (org.json.JSONException e) { throw new AssertionError(e); }
+        }
         if (path.equals("/commerce")) {
             sidecarRequests.add(request);
             return new MockResponse().setHeader("Content-Type", "application/json")

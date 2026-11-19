@@ -1,0 +1,58 @@
+.il-tv-shop {
+  position:absolute;inset:0;z-index:4;isolation:isolate;pointer-events:none;container-type:size;
+  font:500 16px/1.32 Montserrat,Inter,system-ui,sans-serif;color:var(--shop-foreground,#fff);text-align:left;
+}
+.il-tv-shop .il-tv-sheet {
+  position:absolute;inset:0 0 0 auto;width:41%;min-width:min(15rem,100%);box-sizing:border-box;display:flex;
+  flex-direction:column;gap:12px;gap:2cqh;padding:3% 4%;padding:4cqh 4cqw;background:var(--shop-background,#202020);
+  background:color-mix(in srgb,var(--shop-background,#202020) 93%,transparent);
+  pointer-events:auto;overflow:hidden;font:inherit;font-size:clamp(12px,1.45cqw,32px);
+}
+.il-tv-shop[data-page=detail] .il-tv-sheet,.il-tv-shop[data-page=qr] .il-tv-sheet {width:35%;padding-inline:2cqw}
+.il-tv-shop h2,.il-tv-shop h3,.il-tv-shop h4,.il-tv-shop p {color:inherit;margin:0;letter-spacing:normal;line-height:1.22}
+.il-tv-shop h2,.il-tv-shop h3 {font:700 1.13em/1.2 Montserrat,Inter,system-ui,sans-serif;overflow-wrap:anywhere}
+.il-tv-shop h4 {font-size:.92em}
+.il-tv-shop .il-tv-header {padding:0;display:flex;align-items:center;gap:.6em;background:transparent;color:inherit;flex:none}
+.il-tv-shop .il-tv-header h3 {flex:1;text-align:center}
+.il-tv-shop .il-tv-logo {max-width:20%;max-height:5cqh;object-fit:contain}
+.il-tv-shop .il-tv-body {min-height:0;overflow:auto;display:flex;flex:1;flex-direction:column;gap:1.6cqh;scroll-padding:5px;padding:4px}
+.il-tv-shop .il-tv-body > * {flex:none}
+.il-tv-shop .il-tv-hero {width:100%;height:8em;height:23cqh;object-fit:contain}
+.il-tv-shop[data-page=intro] .il-tv-hero {height:10em;height:31cqh}
+.il-tv-shop .il-tv-intro-info {display:grid;gap:.6em;margin:auto 0}
+.il-tv-shop .il-tv-price {font-size:1.55em;font-weight:650}
+.il-tv-shop .il-tv-footer {display:grid;gap:1.2cqh;padding:4px;background:transparent;color:inherit;flex:none}
+.il-tv-shop button {
+  appearance:none;display:inline-flex;justify-content:center;align-items:center;min-height:2.25em;width:auto;max-width:100%;
+  box-sizing:border-box;border:1px solid currentColor;border-radius:.15em;padding:.35em .7em;cursor:pointer;
+  color:inherit;background:transparent;font:600 .9em/1.2 Montserrat,Inter,system-ui,sans-serif;white-space:normal;overflow-wrap:anywhere;
+}
+.il-tv-shop .il-tv-back {font-size:1.3em;min-height:1.45em;padding:.05em .45em}
+.il-tv-shop .il-tv-primary {width:100%;border-radius:.45em;min-height:2.8em;border-color:var(--shop-accent,currentColor)}
+.il-tv-shop button[aria-pressed=true] {background:var(--shop-foreground,#fff);color:var(--shop-background,#202020)}
+.il-tv-shop button:disabled {opacity:.45;cursor:default}
+.il-tv-shop button:focus,.il-tv-shop button:focus-visible {outline:2px solid var(--shop-accent,#fff);outline-offset:1px;box-shadow:0 0 0 4px #131313}
+.il-tv-shop .il-tv-row {display:flex;gap:.4em;overflow:auto;scroll-padding:4px;margin:-4px;padding:4px}
+.il-tv-shop .il-tv-row button {flex:0 0 auto}
+.il-tv-shop .il-tv-gallery-open {position:relative;width:100%;padding:0}
+.il-tv-shop .il-tv-gallery-open span {position:absolute;bottom:0;right:0;padding:.3em .7em;background:#fff;color:#111;font-size:.8em}
+.il-tv-shop .il-tv-line,.il-tv-shop .il-tv-total {display:flex;align-items:center;gap:.6em;border-block:1px solid currentColor;padding:1em 0}
+.il-tv-shop .il-tv-line > div {flex:1;min-width:0}
+.il-tv-shop .il-tv-thumb {width:18%;max-height:11cqh;object-fit:contain}
+.il-tv-shop .il-tv-cart-logo {align-self:center;margin:auto;max-width:40%;max-height:10cqh;object-fit:contain}
+.il-tv-shop .il-tv-total {justify-content:space-between;border-bottom:0}
+.il-tv-shop .il-tv-status {display:grid;gap:.7em;justify-items:center;text-align:center}
+.il-tv-shop .il-tv-qr {width:38%;width:min(19cqh,90%);height:auto;aspect-ratio:1;object-fit:contain;background:white;image-rendering:pixelated}
+.il-tv-shop[data-page=gallery] .il-tv-sheet {inset:0;width:100%;padding:5cqh 5cqw}
+.il-tv-shop[data-page=gallery] .il-tv-sheet::before,.il-tv-shop[data-page=gallery] .il-tv-sheet::after {
+  content:'';position:absolute;inset:4.5% 6% auto 4%;height:38%;pointer-events:none;background:currentColor;
+  mask:url('./tv-assets/gallery-top.svg') center / 100% 100% no-repeat;
+}
+.il-tv-shop[data-page=gallery] .il-tv-sheet::after {inset:auto 6% 4.5% 4%;transform:rotate(180deg);mask-image:url('./tv-assets/gallery-bottom.svg')}
+
+.il-tv-shop[data-page=gallery] .il-tv-body {justify-content:center}
+.il-tv-shop .il-tv-slides {display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr) auto;gap:1.5cqw;align-items:center}
+.il-tv-shop .il-tv-slides img {width:100%;height:12em;height:36cqh;object-fit:contain}
+.il-tv-shop .il-tv-slides img.il-tv-side {opacity:.65;height:8em;height:25cqh}
+.il-tv-shop[data-page=gallery] .il-tv-footer {margin:0 2cqw 1cqh;display:block}
+.il-tv-shop[data-page=gallery] .il-tv-footer p {max-width:75%;max-height:7cqh;overflow:auto}

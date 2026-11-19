@@ -104,3 +104,14 @@ OverlayController overlays = OverlayController.attachCommerce(
 ```
 
 El último argumento permite seleccionar el modo TV. Usá `null` para detectar Android TV, Google TV y Fire TV desde el dispositivo. El modo TV muestra el QR y el modo móvil abre la continuación en el navegador. Si la app intercepta Atrás, consultá `overlays.closeCommercePanel()` antes de ejecutar su navegación. [Contrato de compra](../docs/signals.md#compra-con-shopify)
+
+En TV, «Añadir producto» abre los detalles y las opciones disponibles del catálogo. La galería permite recorrer las fotos del producto. «Añadir al carrito» muestra la variante, una unidad y su total. «Finalizar compra» prepara el carrito de Shopify y muestra el QR. Atrás vuelve a la etapa anterior. En móvil, «Comprar» abre la continuación HTTPS de Shopify.
+
+Para vincular la tienda a un midroll, usá el mismo endpoint y sesión con los que se sirvió el spot. Cuando el host empiece a reproducir el anuncio, pasá los atributos `creativeId` y `deliveryId` del nodo `Shop` de la extensión VAST `iADServerShop`. Al finalizar, avisá al controlador.
+
+```java
+overlays.setLinearAdActive(true, vastCreativeId, deliveryId);
+overlays.setLinearAdActive(false);
+```
+
+El SDK muestra el acceso de compra si el feed devuelve el mismo creativo y entrega dentro de su ventana. El host controla el video del spot, el salto y la medición VAST. Para cortes convencionales, `setLinearAdActive(true)` continúa suspendiendo las gráficas.

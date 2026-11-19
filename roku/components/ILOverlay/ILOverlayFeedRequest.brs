@@ -16,24 +16,7 @@ sub readFeed()
     url = request.url
     if request.kind = "json"
         if request.programTimeMs = invalid then return
-        mediaTime& = request.programTimeMs
-        url = url.split("#")[0]
-        separator = "?"
-        if instr(1, url, "?") > 0 then separator = "&"
-        url = url + separator + "time=" + mediaTime&.toStr() + "&sid=" + transfer.escape(request.sessionId)
-        if request.commerce = true
-            locale = "en"
-            if type(request.locale) = "String" or type(request.locale) = "roString"
-                language = lcase(request.locale).split("-")[0]
-                if language = "es" then locale = "es"
-                if language = "pt" then locale = "pt-BR"
-            end if
-            url = url + "&commerce=1&locale=" + transfer.escape(locale)
-            country = createObject("roRegex", "^[A-Z]{2}$", "")
-            if type(request.country) = "String" or type(request.country) = "roString"
-                if country.isMatch(request.country) then url = url + "&country=" + request.country
-            end if
-        end if
+        url = jsonFeedUrl(request, transfer)
     end if
     transfer.setUrl(url)
     response = { sessionId: request.sessionId, revision: request.revision, status: 0, kind: request.kind }
@@ -58,3 +41,54 @@ sub readFeed()
     end if
     m.top.result = response
 end sub
+
+function jsonFeedUrl(request as Object, transfer as Object) as String
+    mediaTime& = request.programTimeMs
+    url = withoutSessionParameters(request.url)
+    separator = "?"
+    if instr(1, url, "?") > 0 then separator = "&"
+    url = url + separator + "time=" + mediaTime&.toStr() + "&sid=" + transfer.escape(request.sessionId) + "&scene=1&scene_features=media-crop"
+    if request.commerce = true
+        locale = "en"
+        if type(request.locale) = "String" or type(request.locale) = "roString"
+            language = lcase(request.locale).split("-")[0]
+            if language = "es" then locale = "es"
+            if language = "pt" then locale = "pt-BR"
+        end if
+        url = url + "&commerce=1&locale=" + transfer.escape(locale)
+        spot = request.linearSpot
+        if type(spot) = "roAssociativeArray"
+            if feedSpotId(spot.creativeId) and feedSpotId(spot.deliveryId)
+                url += "&shop_midroll=1&midroll_creative_id=" + transfer.escape(spot.creativeId)
+                url += "&midroll_delivery_id=" + transfer.escape(spot.deliveryId)
+            end if
+        end if
+        country = createObject("roRegex", "^[A-Z]{2}$", "")
+        if type(request.country) = "String" or type(request.country) = "roString"
+            if country.isMatch(request.country) then url = url + "&country=" + request.country
+        end if
+    end if
+    return url
+end function
+
+function feedSpotId(id as Dynamic) as Boolean
+    if type(id) <> "String" and type(id) <> "roString" then return false
+    return id.trim() <> "" and len(id) <= 256
+end function
+
+function withoutSessionParameters(url as String) as String
+    url = url.split("#")[0]
+    marker = instr(1, url, "?")
+    if marker = 0 then return url
+    parameters = []
+    owned = { time: true, sid: true, scene: true, scene_features: true, commerce: true, locale: true, country: true, shop_midroll: true, midroll_creative_id: true, midroll_delivery_id: true }
+    for each pair in mid(url, marker + 1).split("&")
+        key = pair.split("=")[0]
+        if pair <> "" and not owned.doesExist(key)
+            parameters.push(pair)
+        end if
+    end for
+    url = left(url, marker - 1)
+    if parameters.count() > 0 then url = url + "?" + parameters.join("&")
+    return url
+end function

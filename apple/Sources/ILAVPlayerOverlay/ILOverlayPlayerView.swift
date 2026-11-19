@@ -2,6 +2,12 @@
 import AVFoundation
 import UIKit
 
+#if os(tvOS)
+typealias PlayerCommercePanel = TVCommercePanel
+#else
+typealias PlayerCommercePanel = CommercePanel
+#endif
+
 public enum ILOverlaySource { case hlsDateRanges, sidecar }
 public enum ILOverlayInputError: Error { case stopped, wrongSource, staleItem }
 
@@ -25,7 +31,20 @@ public final class ILOverlayPlayerView: UIView {
     private var loading: Task<Void, Never>?
     private var displayed: OverlayCue?
     private var stopped = false
-    private var commercePanel: CommercePanel?
+    private var commercePanel: PlayerCommercePanel?
+    private var midrollIdentity: (creative: String, delivery: String)?
+    private var sceneSurface: SceneSurface?
+    private weak var lastProductFocus: UIButton?
+    private var sceneArtworkVisible = false
+
+    /// Leave disabled on devices that cannot sustain two concurrent decoders.
+    public var allowsSecondaryVideo = false {
+        didSet { if oldValue != allowsSecondaryVideo { clearArtwork() } }
+    }
+    /// Enable only when the host permits an audible clip. Secondary video must also be enabled.
+    public var allowsSecondaryVideoAudio = false {
+        didSet { if oldValue != allowsSecondaryVideoAudio { clearArtwork() } }
+    }
     private var viewed = Set<String>()
 
     /// Enable when the app requests the individualized commerce feed.
@@ -35,16 +54,39 @@ public final class ILOverlayPlayerView: UIView {
 
     /// Optional route for apps that present Shopify checkout from their own browser flow.
     public var openCheckoutURL: ((URL) -> Void)?
+    public var openSceneLink: ((URL) -> Void)?
 
-    /// Adds the session capability to the existing sidecar request.
-    public static func commerceFeed(_ endpoint: URL, locale: String, country: String? = nil) -> URL? {
-        guard OverlayCue.httpsURL(endpoint.absoluteString) != nil,
-              var url = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
-        var query = (url.queryItems ?? []).filter { !["commerce", "locale", "country"].contains($0.name) }
+    /// Adds scene negotiation to the existing sidecar request.
+    public static func scenesFeed(_ endpoint: URL) -> URL? {
+        scenesFeed(endpoint, secondaryVideo: false)
+    }
+
+    public static func scenesFeed(_ endpoint: URL, secondaryVideo: Bool, audio: Bool = false) -> URL? {
+        SceneFeed.url(endpoint, video: secondaryVideo, audio: audio)
+    }
+
+    /// Adds scene and commerce negotiation to the existing sidecar request.
+    public static func commerceFeed(_ endpoint: URL, locale: String, country: String? = nil,
+                                    midrollCreativeID: String? = nil, midrollDeliveryID: String? = nil) -> URL? {
+        commerceFeed(endpoint, locale: locale, country: country, secondaryVideo: false,
+                     midrollCreativeID: midrollCreativeID, midrollDeliveryID: midrollDeliveryID)
+    }
+
+    public static func commerceFeed(_ endpoint: URL, locale: String, country: String? = nil,
+                                    secondaryVideo: Bool, audio: Bool = false,
+                                    midrollCreativeID: String? = nil, midrollDeliveryID: String? = nil) -> URL? {
+        guard let scenes = scenesFeed(endpoint, secondaryVideo: secondaryVideo, audio: audio),
+              var url = URLComponents(url: scenes, resolvingAgainstBaseURL: false) else { return nil }
+        var query = (url.queryItems ?? []).filter { !["commerce", "locale", "country", "shop_midroll", "midroll_creative_id", "midroll_delivery_id"].contains($0.name) }
         query += [URLQueryItem(name: "commerce", value: "1"),
                   URLQueryItem(name: "locale", value: OverlayCommerce.language(locale))]
         if let country, country.range(of: "^[A-Z]{2}$", options: .regularExpression) != nil {
             query.append(URLQueryItem(name: "country", value: country))
+        }
+        if OverlayCue.validIdentifier(midrollCreativeID), OverlayCue.validIdentifier(midrollDeliveryID) {
+            query += [URLQueryItem(name: "shop_midroll", value: "1"),
+                      URLQueryItem(name: "midroll_creative_id", value: midrollCreativeID),
+                      URLQueryItem(name: "midroll_delivery_id", value: midrollDeliveryID)]
         }
         url.queryItems = query
         return url.url
@@ -55,19 +97,35 @@ public final class ILOverlayPlayerView: UIView {
 
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if let panel = commercePanel {
-            return panel.hitTest(panel.convert(point, from: self), with: event)
+            if let control = panel.hitTest(panel.convert(point, from: self), with: event) { return control }
         }
+        if let sceneSurface { return sceneSurface.hitTest(sceneSurface.convert(point, from: self), with: event) }
         return nil
     }
 
     public override var preferredFocusEnvironments: [UIFocusEnvironment] {
         if let commercePanel { return [commercePanel] }
+        if let button = lastProductFocus, !button.isHidden { return [button] }
+        if let sceneSurface { return [sceneSurface] }
         return super.preferredFocusEnvironments
     }
 
     /// Set from the host's SSAI/ad SDK callbacks for stitched linear breaks.
     public var isInLinearAdBreak = false {
-        didSet { if isInLinearAdBreak { clearArtwork() } }
+        didSet {
+            midrollIdentity = nil
+            if isInLinearAdBreak || oldValue { clearArtwork() }
+        }
+    }
+
+    /// Pass the identifiers from the VAST creative and its impression URL when the host starts that delivery.
+    public func setLinearAdBreak(_ active: Bool, creativeID: String? = nil, deliveryID: String? = nil) {
+        if active, isInLinearAdBreak, let current = midrollIdentity,
+           current.creative == creativeID, current.delivery == deliveryID { return }
+        isInLinearAdBreak = active
+        if active, let creativeID, let deliveryID, OverlayCue.validIdentifier(creativeID), OverlayCue.validIdentifier(deliveryID) {
+            midrollIdentity = (creativeID, deliveryID)
+        }
     }
 
     /// Set while the app covers the surface, scrubs, or presents Picture in Picture.
@@ -102,7 +160,9 @@ public final class ILOverlayPlayerView: UIView {
         layer.addSublayer(playerLayer)
         playbackObservation = player.observe(\.timeControlStatus) { [weak self] _, _ in
             DispatchQueue.main.async {
-                guard let self, self.player.timeControlStatus != .playing else { return }
+                guard let self, self.player.timeControlStatus != .playing,
+                      self.displayed?.format != .midroll,
+                      self.displayed?.scene == nil || self.player.timeControlStatus != .paused else { return }
                 self.clearArtwork()
             }
         }
@@ -150,11 +210,7 @@ public final class ILOverlayPlayerView: UIView {
         super.layoutSubviews()
         layoutLayers()
         if let panel = commercePanel {
-            let size = panel.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-            let bottom = bounds.height * 0.89
-            let width = min(size.width, bounds.width * 0.85)
-            panel.frame = CGRect(x: bounds.width * 0.94 - width, y: max(0, bottom - size.height),
-                                 width: width, height: min(size.height, bottom))
+            panel.frame = panel.presentationFrame(in: bounds)
         }
     }
 
@@ -192,19 +248,37 @@ public final class ILOverlayPlayerView: UIView {
     }
 
     private func replaceSchedule(_ cues: [OverlayCue]) {
-        timeline = OverlayTimeline(commerceEnabled ? cues : cues.filter { $0.commerce == nil })
+        timeline = OverlayTimeline(commerceEnabled ? cues : cues.filter { $0.commerce == nil || $0.scene != nil })
         // A revised or withdrawn cue immediately releases the L geometry.
-        if let displayed, timeline.active(at: item?.currentDate()) != displayed { clearArtwork() }
+        if let displayed {
+            let active = midrollIdentity.map { timeline.midroll(at: item?.currentDate() ?? Date(), creativeID: $0.creative, deliveryID: $0.delivery) }
+                ?? timeline.active(at: item?.currentDate())
+            if active != displayed { clearArtwork() }
+        }
     }
 
     private func frame(_ timestamp: TimeInterval) {
         bindCurrentItem()
-        guard let item, !timeline.isEmpty, player.timeControlStatus == .playing, player.rate > 0,
-              !isInLinearAdBreak, !isPresentationSuspended, !player.isExternalPlaybackActive,
+        if isInLinearAdBreak {
+            guard !isPresentationSuspended, !player.isExternalPlaybackActive,
+                  item != nil, visibleBounds != nil else { clearArtwork(); return }
+            showMidroll(at: item?.currentDate() ?? Date())
+            return
+        }
+        let moving = player.timeControlStatus == .playing && player.rate > 0
+        guard let item, !timeline.isEmpty, moving || player.timeControlStatus == .paused,
+              !isPresentationSuspended, !player.isExternalPlaybackActive,
               nativeBreaks?.currentEvent == nil, playerLayer.isReadyForDisplay,
               let date = item.currentDate(), let visible = visibleBounds else { clearArtwork(); return }
 
         let active = timeline.active(at: date)
+        if let cue = active, let scene = cue.scene {
+            prepare(nil)
+            showScene(cue, scene: scene, at: date, moving: moving, visible: visible)
+            measureScene(cue, at: timestamp)
+            return
+        }
+        if !moving { clearArtwork(); return }
         prepare(active ?? timeline.upcoming(after: date))
         guard let cue = active, let bitmap, requested == cue else { hide(); return }
         show(cue, image: bitmap)
@@ -224,24 +298,97 @@ public final class ILOverlayPlayerView: UIView {
         }
     }
 
+    func showMidroll(at date: Date) {
+        guard isInLinearAdBreak, commerceEnabled, let midrollIdentity,
+              let cue = timeline.midroll(at: date, creativeID: midrollIdentity.creative, deliveryID: midrollIdentity.delivery),
+              let offer = cue.commerce else { clearArtwork(); return }
+        if displayed != cue {
+            hide()
+            displayed = cue
+            installCommerce(cue, offer: offer, image: nil)
+            layoutLayers()
+        }
+    }
+
+    private func showScene(_ cue: OverlayCue, scene: OverlayScene, at date: Date, moving: Bool, visible: CGRect) {
+        if displayed != cue {
+            hide()
+            displayed = cue
+            let onBuy: ((SceneOffer, UIButton) -> Void)? = commerceEnabled ? { [weak self] offer, button in
+                self?.openOffer(cue, offer: offer, button: button)
+            } : nil
+            var onLink = openSceneLink
+            #if os(iOS)
+            if onLink == nil { onLink = { url in UIApplication.shared.open(url) } }
+            #endif
+            let surface = SceneSurface(cue: cue, scene: scene, allowsVideo: allowsSecondaryVideo,
+                                       allowsAudio: allowsSecondaryVideoAudio,
+                                       buy: onBuy, link: onLink)
+            sceneSurface = surface
+            insertSubview(surface, at: 0)
+            isUserInteractionEnabled = true
+            setNeedsFocusUpdate()
+            layoutLayers()
+        }
+        guard let surface = sceneSurface else { return }
+        let viewport = surface.convert(visible, from: self)
+        surface.update(at: date.timeIntervalSince(cue.start) * 1000, moving: moving, visible: viewport)
+        if sceneArtworkVisible != surface.artworkVisible {
+            sceneArtworkVisible = surface.artworkVisible
+            surface.isHidden = !sceneArtworkVisible
+            layoutLayers()
+        }
+    }
+
+    private func measureScene(_ cue: OverlayCue, at timestamp: TimeInterval) {
+        guard sceneArtworkVisible, let url = cue.impressionURL else { impressions.hidden(); return }
+        if impressions.presented(cue.id, at: timestamp) {
+            Task { await OverlayArtwork.sendImpression(to: url) }
+        }
+    }
+
+    private func openOffer(_ cue: OverlayCue, offer: SceneOffer, button: UIButton) {
+        guard displayed == cue, sceneArtworkVisible else { return }
+        removeCommercePanel()
+        lastProductFocus = button
+        let panel = PlayerCommercePanel(offer.commerce, photo: nil, photoURL: offer.imageURL, brand: cue.brand,
+                                  checkoutURL: openCheckoutURL, closed: { [weak self] in
+            self?.removeCommercePanel()
+        }) { [weak self] in
+            guard let self, let url = offer.commerce.viewURL,
+                  self.viewed.insert(cue.id + "\u{0}" + offer.id).inserted else { return }
+            Task { await OverlayArtwork.sendImpression(to: url) }
+        }
+        commercePanel = panel
+        addSubview(panel)
+        setNeedsLayout()
+        setNeedsFocusUpdate()
+    }
+
     func show(_ cue: OverlayCue, image: CGImage) {
         guard displayed != cue else { return }
+        hide()
         displayed = cue
         artwork.contents = image
         artwork.isHidden = false
         removeCommercePanel()
         if let offer = cue.commerce, commerceEnabled {
-            let panel = CommercePanel(offer, photo: image, checkoutURL: openCheckoutURL) { [weak self] in
-                guard let self, let url = offer.viewURL, self.viewed.insert(cue.id).inserted else { return }
-                Task { await OverlayArtwork.sendImpression(to: url) }
-            }
-            commercePanel = panel
-            isUserInteractionEnabled = true
-            addSubview(panel)
-            setNeedsLayout()
-            setNeedsFocusUpdate()
+            installCommerce(cue, offer: offer, image: image)
         }
         layoutLayers()
+    }
+
+    private func installCommerce(_ cue: OverlayCue, offer: OverlayCommerce, image: CGImage?) {
+        let panel = PlayerCommercePanel(offer, photo: image, photoURL: offer.imageURL,
+                                        brand: cue.brand, midroll: cue.format == .midroll, checkoutURL: openCheckoutURL) { [weak self] in
+            guard let self, let url = offer.viewURL, self.viewed.insert(cue.id).inserted else { return }
+            Task { await OverlayArtwork.sendImpression(to: url) }
+        }
+        commercePanel = panel
+        isUserInteractionEnabled = true
+        addSubview(panel)
+        setNeedsLayout()
+        setNeedsFocusUpdate()
     }
 
     private var visibleBounds: CGRect? {
@@ -280,6 +427,11 @@ public final class ILOverlayPlayerView: UIView {
         guard displayed != nil else { return }
         displayed = nil
         removeCommercePanel()
+        sceneSurface?.dispose()
+        sceneSurface = nil
+        sceneArtworkVisible = false
+        lastProductFocus = nil
+        isUserInteractionEnabled = false
         artwork.contents = nil
         artwork.isHidden = true
         layoutLayers()
@@ -289,7 +441,7 @@ public final class ILOverlayPlayerView: UIView {
         guard let commercePanel else { return }
         commercePanel.dispose()
         self.commercePanel = nil
-        isUserInteractionEnabled = false
+        isUserInteractionEnabled = sceneSurface != nil
         setNeedsFocusUpdate()
     }
 
@@ -297,10 +449,12 @@ public final class ILOverlayPlayerView: UIView {
         let layout = OverlayLayout(canvas: bounds, format: displayed?.format)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        playerLayer.frame = layout.video
+        let sceneL = displayed?.scene != nil && displayed?.format == .l
+        playerLayer.frame = sceneL && (!sceneArtworkVisible || displayed?.layout == "overlay") ? bounds : layout.video
+        sceneSurface?.frame = layout.artwork
         artwork.frame = layout.artwork
         artwork.contentsGravity = displayed?.format == .l ? .resize : .resizeAspect
-        playerLayer.zPosition = displayed?.format == .l ? 1 : 0
+        playerLayer.zPosition = displayed?.format == .l && !sceneL ? 1 : 0
         artwork.zPosition = displayed?.format == .l ? 0 : 1
         CATransaction.commit()
     }
