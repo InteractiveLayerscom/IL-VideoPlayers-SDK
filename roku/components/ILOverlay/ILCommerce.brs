@@ -52,27 +52,61 @@ end function
 
 function commerceCopy(locale as String) as Object
     if locale = "es"
-        return ["OK · Ver producto", "Mostrar código QR", "Cerrar", "Escaneá el código con tu celular",
-                "Preparando tu carrito…", "No se pudo preparar el carrito. Intentá de nuevo."]
+        return { trigger: "OK · Ver producto", heading: "Producto", variant: "Variante", buy: "Comprar", close: "Cerrar",
+            scan: "Escaneá el código con tu celular", preparing: "Preparando tu carrito…", failed: "No se pudo preparar el carrito. Intentá de nuevo." }
     else if locale = "pt-BR"
-        return ["OK · Ver produto", "Mostrar código QR", "Fechar", "Escaneie com seu celular",
-                "Preparando seu carrinho…", "Não foi possível preparar o carrinho. Tente novamente."]
+        return { trigger: "OK · Ver produto", heading: "Produto", variant: "Variante", buy: "Comprar", close: "Fechar",
+            scan: "Escaneie com seu celular", preparing: "Preparando seu carrinho…", failed: "Não foi possível preparar o carrinho. Tente novamente." }
     end if
-    return ["OK · View product", "Show QR code", "Close", "Scan with your phone", "Preparing your cart…",
-            "Could not prepare the cart. Try again."]
+    return { trigger: "OK · View product", heading: "Product", variant: "Variant", buy: "Buy", close: "Close",
+        scan: "Scan with your phone", preparing: "Preparing your cart…", failed: "Could not prepare the cart. Try again." }
 end function
 
 sub initializeCommerce()
     m.panel = m.top.findNode("ilCommerce")
     m.panelBackground = m.top.findNode("ilCommerceBackground")
+    m.panelDetail = m.top.findNode("ilCommerceDetail")
+    m.panelTrigger = m.top.findNode("ilCommerceTrigger")
+    m.panelHeading = m.top.findNode("ilCommerceHeading")
     m.panelName = m.top.findNode("ilCommerceName")
+    m.panelPrice = m.top.findNode("ilCommercePrice")
     m.panelBuy = m.top.findNode("ilCommerceBuy")
+    m.panelBuyBackground = m.top.findNode("ilCommerceBuyBackground")
     m.panelClose = m.top.findNode("ilCommerceClose")
     m.panelVariant = m.top.findNode("ilCommerceVariant")
+    m.panelRange = m.top.findNode("ilCommerceRange")
     m.panelStatus = m.top.findNode("ilCommerceStatus")
     m.panelQr = m.top.findNode("ilCommerceQr")
     m.panelLogo = m.top.findNode("ilCommerceLogo")
     m.panelPhoto = m.top.findNode("ilCommercePhoto")
+    m.closeFocus = sceneOutline(m.panelClose, 116, 38, 3, "0xFFFFFFFF")
+    m.buyFocus = sceneOutline(m.panelDetail, 428, 66, 3, "0xFFFFFFFF")
+    m.buyFocus.translation = [16, 328]
+
+    chipRow = m.top.findNode("ilCommerceChips")
+    chipFont = createObject("roSGNode", "Font")
+    chipFont.uri = "font:SystemFontFile"
+    chipFont.size = 20
+    m.panelChips = []
+    for slot = 0 to 2
+        tile = chipRow.createChild("Rectangle")
+        tile.translation = [slot * 142, 0]
+        tile.width = 132
+        tile.height = 54
+        label = tile.createChild("Label")
+        label.id = "ilCommerceChipLabel" + slot.toStr()
+        label.translation = [6, 0]
+        label.width = 120
+        label.height = 54
+        label.font = chipFont
+        label.horizAlign = "center"
+        label.vertAlign = "center"
+        label.wrap = true
+        label.maxLines = 2
+        label.ellipsizeOnBoundary = true
+        outline = sceneOutline(tile, 132, 54, 3, "0xFFFFFFFF")
+        m.panelChips.push({ tile: tile, label: label, outline: outline })
+    end for
     m.panelQr.observeFieldScoped("loadStatus", "onQrLoad")
     m.commerceHTTPS = createObject("roRegex", "^https://([a-z0-9]([a-z0-9.-]*[a-z0-9])?|\[[a-f0-9:.]+\])(:[0-9]+)?([/?#][^\s]*)?$", "i")
     m.commerceViewed = {}
@@ -102,9 +136,19 @@ sub showCommerce()
     if offer = invalid or m.panel.visible then return
     m.commerceOpen = false
     m.commerceChoice = 0
+    m.commerceFocus = 0
+    m.commerceWindow = 0
+    ' Rows follow the remote's vertical cycle: variants, Buy, Close.
     m.commerceRow = 0
     m.commerceLabels = commerceCopy(offer.locale)
     m.commerceMessage = ""
+    m.panelTrigger.text = m.commerceLabels.trigger
+    m.panelHeading.text = m.commerceLabels.heading
+    m.panelVariant.text = m.commerceLabels.variant
+    m.panelBuy.text = m.commerceLabels.buy
+    m.panelClose.text = m.commerceLabels.close
+    m.panelName.text = offer.title
+    applyCommerceBrand()
     m.panel.visible = true
     renderCommerce()
     if m.top.commerceAutoFocus and not m.top.hasFocus()
@@ -144,85 +188,123 @@ sub cancelCart()
     m.commerceMessage = ""
 end sub
 
+function commerceColor(value as Dynamic, fallback as String) as String
+    hex = mid(sceneColor(value, fallback), 2)
+    if hex = "" then return ""
+    if len(hex) = 6 then hex += "FF"
+    return "0x" + hex
+end function
+
+function linearCommerceChannel(hex as String) as Float
+    value = val(hex, 16) / 255.0
+    if value <= 0.04045 then return value / 12.92
+    return ((value + 0.055) / 1.055) ^ 2.4
+end function
+
+sub applyCommerceBrand()
+    brand = m.active.brand
+    if brand = invalid then brand = {}
+    m.panelBackground.color = commerceColor(brand.background, "#202020")
+    foreground = commerceColor(brand.foreground, "#FFFFFF")
+    for each label in [m.panelTrigger, m.panelHeading, m.panelClose, m.panelName, m.panelPrice, m.panelVariant, m.panelRange, m.panelStatus]
+        label.color = foreground
+    end for
+    m.panelBuyBackground.color = "0xF0F0F0FF"
+    m.panelBuy.color = "0x202020FF"
+    m.chipSelectedColor = "0x515151FF"
+    m.chipSelectedText = "0xFFFFFFFF"
+    accent = commerceColor(brand.accent, "")
+    if accent <> ""
+        red = linearCommerceChannel(mid(accent, 3, 2))
+        green = linearCommerceChannel(mid(accent, 5, 2))
+        blue = linearCommerceChannel(mid(accent, 7, 2))
+        luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        if luminance > 0.179 then m.chipSelectedText = "0x000000FF"
+        m.chipSelectedColor = accent
+        m.panelBuyBackground.color = accent
+        m.panelBuy.color = m.chipSelectedText
+    end if
+    logoUrl = ""
+    if isText(brand.logoUrl)
+        if m.commerceHTTPS.isMatch(brand.logoUrl) then logoUrl = brand.logoUrl
+    end if
+    m.panelLogo.uri = logoUrl
+    m.panelLogo.visible = logoUrl <> ""
+end sub
+
 sub renderCommerce()
     offer = currentOffer()
     if offer = invalid or not m.panel.visible then return
-    width = m.commerceVideoWidth * 0.48
-    row = m.commerceVideoHeight * 0.071
-    margin = m.commerceVideoWidth * 0.016
-    qrSize = m.commerceVideoHeight * 0.30
-    offset = row * 1.2
-    panelHeight = row * 1.1
+    m.panelTrigger.visible = not m.commerceOpen
+    m.panelDetail.visible = m.commerceOpen
+    ' Layout uses a 720p reference surface, including the QR image and its quiet zone.
+    scale = m.commerceVideoHeight / 720
+    if scale * 460 > m.commerceVideoWidth * 0.88 then scale = m.commerceVideoWidth * 0.88 / 460
+    width = m.panelTrigger.width
+    height = m.panelTrigger.height
+    y = m.commerceVideoHeight * 0.94 - height * scale
     if m.commerceOpen
-        panelHeight = row * 5.2
-        if m.panelQr.visible then panelHeight += qrSize
+        width = 460
+        height = 410
+        if m.commerceMessage <> "" then height = 494
+        if m.panelQr.visible then height = 612
+        y = (m.commerceVideoHeight - height * scale) / 2
     end if
-    x = m.commerceVideoWidth * 0.94 - width
-    y = m.commerceVideoHeight * 0.94 - panelHeight
+    x = m.commerceVideoWidth * 0.94 - width * scale
     m.panel.translation = [m.video.translation[0] + x, m.video.translation[1] + y]
+    m.panel.scale = [scale, scale]
     m.panelBackground.width = width
-    m.panelBackground.height = panelHeight
-    foreground = "#ffffff"
-    accent = "#7de4ff"
-    background = "#101929"
-    logoUrl = ""
-    if m.active.brand <> invalid
-        foreground = sceneColor(m.active.brand.foreground, foreground)
-        accent = sceneColor(m.active.brand.accent, accent)
-        background = sceneColor(m.active.brand.background, background)
-        if isText(m.active.brand.logoUrl)
-            if m.commerceHTTPS.isMatch(m.active.brand.logoUrl) then logoUrl = m.active.brand.logoUrl
-        end if
-    end if
-    m.panelBackground.color = background
-    m.panelLogo.width = row * 1.3
-    m.panelLogo.height = row
-    m.panelLogo.translation = [width - margin - m.panelLogo.width, row * 0.1]
-    if m.panelLogo.uri <> logoUrl then m.panelLogo.uri = logoUrl
-    m.panelLogo.visible = m.commerceOpen and logoUrl <> ""
-    m.panelName.translation = [margin, row * 0.1]
-    m.panelName.width = width - margin * 2
-    m.panelName.text = m.commerceLabels[0]
-    m.panelName.color = foreground
-    m.panelBuy.visible = m.commerceOpen
-    m.panelVariant.visible = m.commerceOpen
-    m.panelClose.visible = m.commerceOpen
-    m.panelPhoto.visible = m.commerceOpen
-    m.panelStatus.visible = m.commerceOpen and m.commerceMessage <> ""
+    m.panelBackground.height = height
     if not m.commerceOpen then return
 
-    m.panelPhoto.width = row
-    m.panelPhoto.height = row
-    m.panelPhoto.translation = [margin, row * 0.1]
     url = m.active.imageUrl
     if offer.imageUrl <> invalid then url = offer.imageUrl
     if m.panelPhoto.uri <> url then m.panelPhoto.uri = url
-    m.panelName.translation = [margin + row * 1.2, row * 0.1]
-    m.panelName.width = width - margin * 2 - row * 1.2
-    if m.panelLogo.visible then m.panelName.width -= m.panelLogo.width + margin
-    m.panelName.text = offer.title
-    variant = offer.variants[m.commerceChoice]
-    indicator = ""
-    if offer.variants.count() > 1 then indicator = "‹ "
-    amount = variant.price
+    amount = offer.variants[m.commerceChoice].price
     if offer.locale <> "en" then amount = amount.replace(".", ",")
-    m.panelVariant.text = indicator + variant.label + " · " + offer.currency + " " + amount
-    m.panelBuy.text = m.commerceLabels[1]
-    m.panelClose.text = m.commerceLabels[2]
+    m.panelPrice.text = offer.currency + " " + amount
+    m.closeFocus.visible = m.commerceRow = 2
+    m.buyFocus.visible = m.commerceRow = 1
+    renderCommerceChips(offer.variants)
+    m.panelStatus.visible = m.commerceMessage <> ""
     m.panelStatus.text = m.commerceMessage
-    m.panelStatus.color = foreground
-    m.panelStatus.width = width - margin * 2
-    controls = [m.panelVariant, m.panelBuy, m.panelClose]
-    for i = 0 to controls.count() - 1
-        controls[i].translation = [margin, offset + row * i]
-        controls[i].width = width - margin * 2
-        controls[i].color = foreground
-        if i = m.commerceRow then controls[i].color = accent
+    if m.panelQr.visible
+        m.panelQr.translation = [22, 406]
+        m.panelStatus.translation = [224, 406]
+        m.panelStatus.width = 214
+        m.panelStatus.height = 184
+    else
+        m.panelStatus.translation = [22, 400]
+        m.panelStatus.width = 416
+        m.panelStatus.height = 78
+    end if
+end sub
+
+sub renderCommerceChips(variants as Object)
+    slots = m.panelChips.count()
+    if m.commerceFocus < m.commerceWindow then m.commerceWindow = m.commerceFocus
+    if m.commerceFocus >= m.commerceWindow + slots then m.commerceWindow = m.commerceFocus - slots + 1
+    for slot = 0 to slots - 1
+        index = m.commerceWindow + slot
+        chip = m.panelChips[slot]
+        chip.tile.visible = index < variants.count()
+        if chip.tile.visible
+            chip.label.text = variants[index].label
+            chip.tile.color = "0x303030FF"
+            chip.label.color = "0xFFFFFFFF"
+            if index = m.commerceChoice
+                chip.tile.color = m.chipSelectedColor
+                chip.label.color = m.chipSelectedText
+            end if
+            chip.outline.visible = m.commerceRow = 0 and index = m.commerceFocus
+        end if
     end for
-    m.panelStatus.translation = [margin, offset + row * 3]
-    m.panelQr.translation = [margin, offset + row * 3.8]
-    m.panelQr.width = qrSize
-    m.panelQr.height = qrSize
+    m.panelRange.visible = variants.count() > slots
+    if m.panelRange.visible
+        first = m.commerceWindow + 1
+        last = m.commerceWindow + slots
+        m.panelRange.text = first.toStr() + "–" + last.toStr() + " / " + variants.count().toStr()
+    end if
 end sub
 
 function onKeyEvent(key as String, press as Boolean) as Boolean
@@ -240,6 +322,7 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
     if not m.commerceOpen
         if key <> "ok" then return false
         m.commerceOpen = true
+        m.commerceFocus = m.commerceChoice
         m.commerceRow = 0
         trackProductView()
         renderCommerce()
@@ -260,12 +343,17 @@ function handleCommerceKey(key as String, press as Boolean) as Boolean
         increment = 1
         if key = "up" then increment = 2
         m.commerceRow = (m.commerceRow + increment) mod 3
-    else if (key = "left" or key = "right" or key = "ok") and m.commerceRow = 0
+    else if (key = "left" or key = "right") and m.commerceRow = 0
         total = currentOffer().variants.count()
         increment = 1
         if key = "left" then increment = total - 1
-        m.commerceChoice = (m.commerceChoice + increment) mod total
-        cancelCart()
+        m.commerceFocus = (m.commerceFocus + increment) mod total
+    else if key = "ok" and m.commerceRow = 0
+        if m.commerceChoice <> m.commerceFocus
+            m.commerceChoice = m.commerceFocus
+            cancelCart()
+        end if
+        m.commerceRow = 1
     else if key = "ok" and m.commerceRow = 1
         prepareCart()
     else
@@ -293,10 +381,10 @@ sub prepareCart()
     variant = currentOffer().variants[m.commerceChoice]
     task = createObject("roSGNode", "ILOverlayFeedRequest")
     if task = invalid
-        m.commerceMessage = m.commerceLabels[5]
+        m.commerceMessage = m.commerceLabels.failed
         return
     end if
-    m.commerceMessage = m.commerceLabels[4]
+    m.commerceMessage = m.commerceLabels.preparing
     m.cartTask = task
     task.observeFieldScoped("result", "receiveCart")
     task.request = { sessionId: m.sessionId, revision: m.cartRevision, kind: "commerce",
@@ -310,7 +398,7 @@ sub receiveCart()
     if result = invalid or result.sessionId <> m.sessionId or result.revision <> m.cartRevision then return
     m.cartTask.unobserveFieldScoped("result")
     m.cartTask = invalid
-    m.commerceMessage = m.commerceLabels[5]
+    m.commerceMessage = m.commerceLabels.failed
     if result.status >= 200 and result.status < 300 and isText(result.body)
         answer = parseJson(result.body)
         if type(answer) = "roAssociativeArray"
@@ -318,7 +406,7 @@ sub receiveCart()
                 if m.commerceHTTPS.isMatch(answer.continueUrl) and m.commerceHTTPS.isMatch(answer.qrImageUrl)
                     m.panelQr.uri = answer.qrImageUrl
                     m.panelQr.visible = true
-                    m.commerceMessage = m.commerceLabels[3]
+                    m.commerceMessage = m.commerceLabels.scan
                 end if
             end if
         end if
@@ -329,7 +417,7 @@ end sub
 sub onQrLoad()
     if m.panelQr.visible and m.panelQr.loadStatus = "failed"
         m.panelQr.visible = false
-        m.commerceMessage = m.commerceLabels[5]
+        m.commerceMessage = m.commerceLabels.failed
         renderCommerce()
     end if
 end sub

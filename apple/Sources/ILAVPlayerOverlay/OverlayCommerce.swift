@@ -73,7 +73,9 @@ struct OverlayCommerce: Equatable, Decodable {
     }
 }
 
-enum OverlayCheckout {
+struct OverlayCheckout {
+    let session: URLSession
+
     struct Handoff: Decodable {
         let continueUrl: String
         let qrImageUrl: String?
@@ -88,17 +90,17 @@ enum OverlayCheckout {
         }
     }
 
-    private static let session: URLSession = {
+    static let shared: Self = {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.urlCache = nil
         config.timeoutIntervalForRequest = 5
         config.timeoutIntervalForResource = 10
-        return URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        return Self(session: URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil))
     }()
 
-    static func prepare(_ offer: OverlayCommerce, variant: String) async throws -> (url: URL, qr: URL?) {
+    func prepare(_ offer: OverlayCommerce, variant: String) async throws -> (url: URL, qr: URL?) {
         var request = URLRequest(url: offer.handoffURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -108,11 +110,11 @@ enum OverlayCheckout {
         return (url, OverlayCue.httpsURL(reply.qrImageUrl))
     }
 
-    static func qr(_ url: URL) async throws -> CGImage {
+    func qr(_ url: URL) async throws -> CGImage {
         try OverlayArtwork.decode(try await read(URLRequest(url: url), limit: 256 * 1024), expectedMIME: "image/png")
     }
 
-    private static func read(_ request: URLRequest, limit: Int) async throws -> Data {
+    private func read(_ request: URLRequest, limit: Int) async throws -> Data {
         let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),

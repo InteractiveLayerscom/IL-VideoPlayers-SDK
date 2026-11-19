@@ -22,6 +22,9 @@ sub main()
     offer["end"] = 1700000040000#
     offer.commerce = { title: "Botines", price: "50", currency: "USD", locale: "es",
         handoffUrl: "https://ads.example/handoff", variants: [{ id: "42", label: "Talle 42" }] }
+    for i = 2 to 100
+        offer.commerce.variants.push({ id: "sku-" + i.toStr(), label: "Talle " + i.toStr(), price: i.toStr() + ".50" })
+    end for
     check(overlay.callFunc("attach", video, "session-a"), "attach to the existing video")
     check(overlay.callFunc("getProgramTimeMs") = 1700000000250#, "query the sidecar using the last rendered frame even before cues arrive")
     overlay.commerceAutoFocus = false
@@ -35,6 +38,7 @@ sub main()
         check(overlay.findNode("ilCommerce").visible, "the interactive control appears with the artwork")
         check(overlay.callFunc("handleCommerceKey", "OK", true), "the remote opens the product")
         check(overlay.findNode("ilCommerceName").text = "Botines", "the product description is shown")
+        testShopping(overlay)
         check(overlay.callFunc("handleCommerceKey", "back", true), "the remote closes the product panel")
     end if
     offer.commerce.handoffUrl = "http://ads.example/handoff"
@@ -163,6 +167,35 @@ sub main()
     if m.failures = 0 then print "ROKU_OK"; m.checks
 end sub
 
+sub testShopping(overlay)
+    heading = overlay.findNode("ilCommerceHeading")
+    price = overlay.findNode("ilCommercePrice")
+    check(heading <> invalid and price <> invalid, "detail separates the localized product heading and selected price")
+    if heading = invalid or price = invalid then return
+    check(heading.text = "Producto" and overlay.findNode("ilCommerceVariant").text = "Variante", "offer locale supplies detail labels")
+    check(overlay.findNode("ilCommerceBuy").text = "Comprar", "the primary action is Buy")
+    check(overlay.findNode("ilCommerceBuyBackground").color = "0xF0F0F0FF" and overlay.findNode("ilCommerceBuy").color = "0x202020FF", "an unbranded Buy button uses dark text on a light surface")
+    check(price.text = "USD 50", "the first variant supplies the initial price")
+    ' Left wraps to the last of a hundred SKUs without selecting it.
+    overlay.callFunc("handleCommerceKey", "left", true)
+    lastChip = overlay.findNode("ilCommerceChipLabel2")
+    check(lastChip.text = "Talle 100" and price.text = "USD 50", "the window reveals the focused last SKU while keeping the selected price")
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(price.text = "USD 100,50", "OK confirms the focused SKU and localizes its price")
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    qr = overlay.findNode("ilCommerceQr")
+    check(qr.visible and qr.uri = "https://ads.example/handoff/qr/sku-100.png", "Buy requests a QR from the selected offer and SKU")
+    card = overlay.findNode("ilCommerce")
+    background = overlay.findNode("ilCommerceBackground")
+    check(qr.translation[1] + qr.height <= background.height, "QR fits inside the product panel")
+    check(card.translation[1] >= 18 + 540 * .05 and card.translation[1] + background.height * card.scale[1] <= 18 + 540 * .95, "the complete QR panel fits the translated video's safe height")
+    overlay.callFunc("handleCommerceKey", "up", true)
+    overlay.callFunc("handleCommerceKey", "right", true)
+    check(qr.visible, "moving focus leaves the current checkout intact")
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(not qr.visible and qr.uri = "" and price.text = "USD 50", "changing SKU discards the previous QR")
+end sub
+
 function reported(overlay) as Boolean
     if overlay.impression = invalid then return false
     return overlay.impression.id <> invalid
@@ -196,6 +229,8 @@ sub testScene(overlay, video, rail, foot)
     cue = parseJson(readAsciiFile("pkg:/tests/creative-scene.json"))
     check(cue <> invalid, "the shared scene fixture loads")
     if cue = invalid then return
+    cue.products[0].locale = "en-US"
+    cue.products[1].locale = "pt-BR"
     overlay.commerceEnabled = true
     video.positionInfo = { epoch: 1, video: 1.5#, clip_id: 17 }
     pulse(overlay, cue, "hls")
@@ -226,10 +261,29 @@ sub testScene(overlay, video, rail, foot)
     check(overlay.findNode("ilCommerceName").text = "Gorra", "the second product retains its title")
     check(overlay.findNode("ilCommercePhoto").uri = "https://ads.example/cap.png", "the second product retains its true photo")
     check(overlay.productView.viewUrl = "https://ads.example/cap/view", "the view beacon keeps its offer identity")
+    check(overlay.findNode("ilCommerceHeading").text = "Produto" and overlay.findNode("ilCommerceClose").text = "Fechar", "the scene product uses its own Portuguese locale")
+    check(overlay.findNode("ilCommerceLogo").uri = cue.brand.logoUrl, "the open product retains the brand logo")
+    check(overlay.findNode("ilCommerceBuyBackground").color = "0x006633FF" and overlay.findNode("ilCommerceBuy").color = "0xFFFFFFFF", "an explicit dark accent brands Buy with readable white text")
+    overlay.callFunc("handleCommerceKey", "right", true)
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(overlay.findNode("ilCommerceQr").uri = "https://ads.example/cap/cart/qr/green.png", "scene checkout uses the selected product's handoff and SKU")
+    overlay.callFunc("handleCommerceKey", "down", true)
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(not overlay.findNode("ilCommerce").visible and not overlay.findNode("ilCommerceQr").visible, "the Close control clears the QR and returns to scene navigation")
+    overlay.callFunc("handleCommerceKey", "left", true)
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(overlay.findNode("ilCommerceHeading").text = "Product" and overlay.findNode("ilCommerceVariant").text = "Variant" and overlay.findNode("ilCommerceBuy").text = "Buy", "switching products localizes the complete control set")
     check(overlay.callFunc("handleCommerceKey", "back", true), "back returns to the product scene")
     overlay.linearBreak = true
     check(rail.getChildCount() = 0 and foot.getChildCount() = 0 and video.width = 960, "linear ads remove graphics and restore the program")
     overlay.linearBreak = false
+    cue.id = "bright-accent"
+    cue.brand.accent = "#FF0000"
+    pulse(overlay, cue, "hls")
+    overlay.callFunc("handleCommerceKey", "ok", true)
+    check(overlay.findNode("ilCommerceBuyBackground").color = "0xFF0000FF" and overlay.findNode("ilCommerceBuy").color = "0x000000FF", "a bright accent brands Buy with higher-contrast black text")
+    overlay.callFunc("handleCommerceKey", "back", true)
     cue.imageUrl = "https://ads.example/optional-art"
     for each mime in ["video/mp4", "image/gif", 42]
         cue.mimeType = mime

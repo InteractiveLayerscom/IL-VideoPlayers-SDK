@@ -155,11 +155,11 @@ for (const kind of ['HTML5', 'Video.js', 'AVPlay', 'Shaka']) {
       assert.equal(panel.querySelector('.il-commerce-logo').src, 'https://ads.example/logo.png');
       const button = label => [...panel.querySelectorAll('button')].find(button => button.textContent === label);
       button('Verde').click();
-      button('Show QR code').click();
+      button('Buy').click();
       await settle();
       assert.deepEqual(requests.slice(1).map(([url]) => url.pathname), ['/cap/view', '/cap/cart']);
       assert.deepEqual(JSON.parse(requests.at(-1)[1].body), { variantId: 'green' });
-      button('Close').click();
+      panel.querySelector('button[aria-label="Close"]').click();
       assert.equal(doc.activeElement, second);
 
       paused = true;

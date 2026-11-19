@@ -181,11 +181,11 @@ public final class ILOverlayPlayerView: UIView {
         super.layoutSubviews()
         layoutLayers()
         if let panel = commercePanel {
-            let size = panel.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-            let bottom = bounds.height * 0.89
-            let width = min(size.width, bounds.width * 0.85)
-            panel.frame = CGRect(x: bounds.width * 0.94 - width, y: max(0, bottom - size.height),
-                                 width: width, height: min(size.height, bottom))
+            let bottom = bounds.maxY - bounds.height * 0.11
+            let right = bounds.maxX - bounds.width * 0.06
+            let size = panel.sizeThatFits(CGSize(width: bounds.width, height: bounds.height * 0.86))
+            panel.frame = CGRect(x: max(bounds.minX, right - size.width), y: bottom - size.height,
+                                 width: min(size.width, right - bounds.minX), height: size.height)
         }
     }
 
@@ -326,7 +326,7 @@ public final class ILOverlayPlayerView: UIView {
         artwork.isHidden = false
         removeCommercePanel()
         if let offer = cue.commerce, commerceEnabled {
-            let panel = CommercePanel(offer, photo: image, checkoutURL: openCheckoutURL) { [weak self] in
+            let panel = CommercePanel(offer, photo: image, brand: cue.brand, checkoutURL: openCheckoutURL) { [weak self] in
                 guard let self, let url = offer.viewURL, self.viewed.insert(cue.id).inserted else { return }
                 Task { await OverlayArtwork.sendImpression(to: url) }
             }

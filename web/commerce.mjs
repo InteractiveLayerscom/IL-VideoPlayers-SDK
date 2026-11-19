@@ -55,12 +55,20 @@ export function normalizeBrand(value) {
   return Object.keys(brand).length ? brand : null;
 }
 
+function accentInk(hex) {
+  const [r, g, b] = [1, 3, 5].map(start => {
+    const value = parseInt(hex.slice(start, start + 2), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.179 ? '#000' : '#fff';
+}
+
 const copy = {
-  en: ['View product', 'Show QR code', 'Buy', 'Scan with your phone', 'Continue to Shopify',
+  en: ['View product', 'Product', 'Variant', 'Buy', 'Scan with your phone', 'Continue to Shopify',
     'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.'],
-  es: ['Ver producto', 'Mostrar código QR', 'Comprar', 'Escaneá el código con tu celular', 'Continuar a Shopify',
+  es: ['Ver producto', 'Producto', 'Variante', 'Comprar', 'Escaneá el código con tu celular', 'Continuar a Shopify',
     'Cerrar', 'Preparando tu carrito…', 'No se pudo preparar el carrito. Intentá de nuevo.'],
-  'pt-BR': ['Ver produto', 'Mostrar código QR', 'Comprar', 'Escaneie com seu celular', 'Continuar para Shopify',
+  'pt-BR': ['Ver produto', 'Produto', 'Variante', 'Comprar', 'Escaneie com seu celular', 'Continuar para Shopify',
     'Fechar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho. Tente novamente.'],
 };
 
@@ -86,7 +94,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
   function mount(cue, offer, isActive, trigger) {
     hide();
     const locale = commerceLocale(options.locale ?? offer.locale);
-    const [view, showQR, buy, scan, continueText, closeText, loading, errorText] = copy[locale];
+    const [view, productText, variantText, buy, scan, continueText, closeText, loading, errorText] = copy[locale];
     const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency });
     const previousFocus = trigger ?? doc.activeElement;
     const shell = doc.createElement('div');
@@ -106,25 +114,49 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     panel.hidden = true;
     panel.setAttribute('role', 'group');
     panel.setAttribute('aria-label', offer.title);
+    const header = doc.createElement('div');
+    header.className = 'il-commerce-header';
+    const heading = doc.createElement('span');
+    heading.textContent = productText;
+    const close = button('', closePanel);
+    close.className = 'il-commerce-close';
+    close.setAttribute('aria-label', closeText);
+    close.title = closeText;
+    header.append(heading, close);
+    const title = doc.createElement('strong');
+    title.className = 'il-commerce-title';
+    title.textContent = offer.title;
     const summary = doc.createElement('div');
     summary.className = 'il-commerce-summary';
-    const photo = doc.createElement('img');
-    photo.src = offer.imageUrl || cue.imageUrl;
-    photo.alt = '';
-    const title = doc.createElement('strong');
-    title.textContent = offer.title;
+    const photoUrl = offer.imageUrl || cue.imageUrl;
+    if (photoUrl) {
+      const photo = doc.createElement('img');
+      photo.src = photoUrl;
+      photo.alt = '';
+      summary.appendChild(photo);
+    }
     const price = doc.createElement('span');
-    summary.append(photo, title, price);
+    price.className = 'il-commerce-price';
+    summary.appendChild(price);
+    const caption = doc.createElement('span');
+    caption.className = 'il-commerce-caption';
+    caption.textContent = variantText;
     const choices = doc.createElement('div');
     choices.className = 'il-commerce-variants';
-    const checkout = button(options.tv ? showQR : buy, proceed);
+    choices.setAttribute('role', 'group');
+    choices.setAttribute('aria-label', variantText);
+    const checkout = button(buy, proceed);
+    checkout.className = 'il-commerce-buy';
     const result = doc.createElement('div');
     result.className = 'il-commerce-result';
     result.setAttribute('aria-live', 'polite');
-    const close = button(closeText, closePanel);
+    result.tabIndex = -1;
     if (cue.brand) {
       const { logoUrl, accent, background, foreground } = cue.brand;
-      if (accent) shell.style.setProperty('--il-commerce-accent', accent);
+      if (accent) {
+        shell.style.setProperty('--il-commerce-accent', accent);
+        shell.style.setProperty('--il-commerce-accent-ink', accentInk(accent));
+      }
       if (background) shell.style.setProperty('--il-commerce-background', background);
       if (foreground) shell.style.setProperty('--il-commerce-foreground', foreground);
       if (logoUrl) {
@@ -132,10 +164,10 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
         logo.className = 'il-commerce-logo';
         logo.src = logoUrl;
         logo.alt = '';
-        panel.appendChild(logo);
+        header.prepend(logo);
       }
     }
-    panel.append(summary, choices, checkout, close, result);
+    panel.append(header, title, summary, caption, choices, checkout, result);
     if (!trigger) shell.appendChild(open);
     shell.appendChild(panel);
     const buttons = offer.variants.map(choice => button(choice.label, () => {
@@ -144,6 +176,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       variant = choice;
       result.replaceChildren();
       updateChoice();
+      if (options.tv) checkout.focus();
     }));
     choices.append(...buttons);
 
@@ -152,14 +185,15 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       buttons.forEach((element, index) => {
         element.setAttribute('aria-pressed', String(offer.variants[index] === variant));
       });
-      checkout.disabled = Boolean(request);
+      checkout.setAttribute('aria-disabled', String(Boolean(request)));
     }
 
     function openPanel() {
       if (!isActive()) return;
       panel.hidden = false;
       open.hidden = true;
-      buttons[0].focus();
+      shell.classList.add('il-commerce--open');
+      buttons[offer.variants.indexOf(variant)].focus();
       const key = JSON.stringify([cue.id, offer.id ?? null]);
       if (offer.viewUrl && !viewed.has(key)) {
         viewed.add(key);
@@ -180,6 +214,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       result.replaceChildren();
       updateChoice();
       panel.hidden = true;
+      shell.classList.remove('il-commerce--open');
       open.hidden = false;
       open.focus();
     }
@@ -208,6 +243,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
           qr.referrerPolicy = 'no-referrer';
           qr.addEventListener('error', () => { if (qr.parentNode === result) result.textContent = errorText; });
           result.replaceChildren(qr, doc.createTextNode(scan));
+          result.focus();
         } else if (options.navigate) {
           options.navigate(handoff.continueUrl);
           result.replaceChildren();
@@ -246,10 +282,19 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
         return;
       }
       if (panel.hidden || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
-      const focusable = [...panel.querySelectorAll('button:not([disabled]), a[href]')];
-      const current = focusable.indexOf(doc.activeElement);
-      const step = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
-      focusable[(current + step + focusable.length) % focusable.length]?.focus();
+      const active = doc.activeElement;
+      const index = buttons.indexOf(active);
+      const selected = buttons[offer.variants.indexOf(variant)];
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        const step = event.key === 'ArrowLeft' ? -1 : 1;
+        if (index >= 0) buttons[(index + step + buttons.length) % buttons.length].focus();
+      } else if (event.key === 'ArrowUp') {
+        if (result.contains(active)) checkout.focus();
+        else if (active === checkout) selected.focus();
+        else close.focus();
+      } else if (active === close) selected.focus();
+      else if (index >= 0) checkout.focus();
+      else if (active === checkout && result.hasChildNodes()) (result.querySelector('a') || result).focus();
       event.preventDefault();
       event.stopPropagation();
     });

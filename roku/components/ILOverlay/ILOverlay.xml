@@ -28,15 +28,41 @@
             <Group id="ilSecondary" />
         </Group>
         <Group id="ilCommerce" visible="false">
-            <Rectangle id="ilCommerceBackground" color="#101929" opacity="0.95" />
-            <Poster id="ilCommercePhoto" visible="false" loadDisplayMode="scaleToFit" />
-            <Poster id="ilCommerceLogo" visible="false" loadDisplayMode="scaleToFit" />
-            <Label id="ilCommerceName" />
-            <Label id="ilCommerceVariant" />
-            <Label id="ilCommerceBuy" />
-            <Label id="ilCommerceClose" />
-            <Label id="ilCommerceStatus" wrap="true" />
-            <Poster id="ilCommerceQr" visible="false" loadDisplayMode="scaleToFit" />
+            <Rectangle id="ilCommerceBackground" color="0x202020FF" />
+            <Label id="ilCommerceTrigger" width="266" height="54" vertAlign="center" horizAlign="center">
+                <Font role="font" uri="font:SystemFontFile" size="22" />
+            </Label>
+            <Group id="ilCommerceDetail" visible="false">
+                <Label id="ilCommerceHeading" translation="[22,16]" width="152" height="38" vertAlign="center">
+                    <Font role="font" uri="font:BoldSystemFontFile" size="22" />
+                </Label>
+                <Poster id="ilCommerceLogo" translation="[180,16]" width="120" height="38" visible="false" loadDisplayMode="scaleToFit" />
+                <Label id="ilCommerceClose" translation="[322,16]" width="116" height="38" vertAlign="center" horizAlign="center">
+                    <Font role="font" uri="font:SystemFontFile" size="21" />
+                </Label>
+                <Label id="ilCommerceName" translation="[22,63]" width="416" height="67" wrap="true" maxLines="2" ellipsizeOnBoundary="true" vertAlign="center">
+                    <Font role="font" uri="font:BoldSystemFontFile" size="27" />
+                </Label>
+                <Poster id="ilCommercePhoto" translation="[22,138]" width="76" height="76" loadDisplayMode="scaleToFit" />
+                <Label id="ilCommercePrice" translation="[112,138]" width="326" height="76" vertAlign="center" wrap="true" maxLines="2">
+                    <Font role="font" uri="font:SystemFontFile" size="25" />
+                </Label>
+                <Label id="ilCommerceVariant" translation="[22,224]" width="270" height="34" vertAlign="center">
+                    <Font role="font" uri="font:SystemFontFile" size="21" />
+                </Label>
+                <Label id="ilCommerceRange" translation="[296,224]" width="142" height="34" vertAlign="center" horizAlign="right">
+                    <Font role="font" uri="font:SystemFontFile" size="18" />
+                </Label>
+                <Group id="ilCommerceChips" translation="[22,264]" />
+                <Rectangle id="ilCommerceBuyBackground" translation="[22,334]" width="416" height="54" color="0xF0F0F0FF" />
+                <Label id="ilCommerceBuy" translation="[22,334]" width="416" height="54" vertAlign="center" horizAlign="center" color="0x202020FF">
+                    <Font role="font" uri="font:BoldSystemFontFile" size="24" />
+                </Label>
+                <Label id="ilCommerceStatus" vertAlign="center" wrap="true">
+                    <Font role="font" uri="font:SystemFontFile" size="21" />
+                </Label>
+                <Poster id="ilCommerceQr" width="184" height="184" visible="false" loadDisplayMode="scaleToFit" />
+            </Group>
         </Group>
     </children>
 </component>
