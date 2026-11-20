@@ -16,6 +16,7 @@ La clase HLS de InteractiveLayers es `com.interactivelayers.overlay`. Se publica
 | `X-ASSET-URI` | `imageUrl` | URL final de los píxeles de la creatividad. |
 | `X-ASSET-MIMETYPE` | `mimeType` | `image/png` o `image/jpeg`. Declaralo en URLs firmadas sin extensión. |
 | `X-IL-IMPRESSION-URI` | `impressionUrl` | URL HTTPS opcional de una impresión. Cada integración debe tener un solo responsable de enviar ese evento. |
+| — | `clickUrl` | URL HTTPS opcional que el reproductor web abre en una pestaña nueva al tocar la gráfica. Otro valor se descarta sin rechazar el cue. |
 
 ## Eventos por sesión
 

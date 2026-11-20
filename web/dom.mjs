@@ -64,7 +64,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
     squeeze(false);
   }
 
-  function show(cue, time, stillActive) {
+  function show(cue, time, stillActive, onClick) {
     if (cue.format === 'midroll') { commerce.show(cue, stillActive); return; }
     if (cue.scene) {
       scenes.show(cue, time, stillActive);
@@ -129,6 +129,18 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
         { once: true },
       );
       band.appendChild(img);
+      if (cue.clickUrl) {
+        // Only the graphic's bands take clicks; the root keeps letting them through to the video.
+        const link = doc.createElement('a');
+        link.href = cue.clickUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        // The graphic layer is hidden from assistive technology, so the link stays out of the tab order.
+        link.tabIndex = -1;
+        Object.assign(link.style, { position: 'absolute', inset: '0', pointerEvents: 'auto' });
+        link.addEventListener('click', () => onClick?.(cue));
+        band.appendChild(link);
+      }
       root.appendChild(band);
       images.push(img);
       img.src = cue.imageUrl;
@@ -153,7 +165,9 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     ? () => ['PLAYING', 'PAUSED'].includes(avplay.getState()) && !stage.ownerDocument.hidden
     : () => !video.ended && !video.seeking && video.readyState >= 2 && !stage.ownerDocument.hidden;
   const playing = () => presenting() && (avplay ? avplay.getState() === 'PLAYING' : !video.paused);
-  const clock = programTime ?? (() => nativeProgramTime(video));
+  const clock = programTime ?? (source.timeline === 'media' && video
+    ? () => Math.round(video.currentTime * 1000)
+    : () => nativeProgramTime(video));
   const commerce = commerceSurface(stage, source.commerce, source.fetchImpl);
   const allowVideo = source.secondaryVideo ?? !avplay;
   const allowAudio = allowVideo && source.secondaryVideoAudio === true;
@@ -190,7 +204,7 @@ export function attachVideoJs({ player, stage, ...options }) {
   if (!video) throw new Error('A Video.js HTML5 video tech is required');
   const programTime =
     options.programTime ??
-    (() => {
+    (options.timeline === 'media' ? undefined : () => {
       const vhs = player.tech?.({ IWillNotUseThisInPlugins: true })?.vhs;
       if (!vhs?.convertToProgramTime) return nativeProgramTime(video);
       let utc = null;

@@ -69,6 +69,22 @@ const sdk = attachHtmlVideo({ video, stage, eventsUrl: playback.overlayEventsUrl
 
 `readVideoProgramTime()` devuelve milisegundos Unix del video que se está mostrando o `null`. En un motor que exponga un `video.getStartDate()` válido se puede omitir el callback. Para leer el HLS en el cliente, pasá `playlistUrl` con la variante de la sesión o llamá a `sdk.updateManifest(text)` en el loader que ya usa el publisher.
 
+## Cues desde JavaScript
+
+Si la app ya tiene el cue, pasalo directamente. `sdk.addCue(cue, hooks)` devuelve `true` si el cue es válido y lo reemplaza si ya existe uno con ese `id`. `sdk.removeCue(id)` lo quita y lo oculta si está en pantalla. Estos cues sobreviven a las actualizaciones de `eventsUrl` y del manifiesto, funcionan sin ninguna de esas fuentes y tienen prioridad cuando coinciden con otro cue. Siguen las mismas reglas de presentación y de cortes.
+
+```js
+const sdk = attachHtmlVideo({ video, stage, timeline: 'media' });
+sdk.addCue(
+  { id: 'promo-1', format: 'super', start: 5000, end: 15000,
+    imageUrl: 'https://cdn.example/promo.png', clickUrl: 'https://brand.example/' },
+  { onVisible: cue => report(cue), onHidden: cue => {}, onClick: cue => {} },
+);
+sdk.removeCue('promo-1');
+```
+
+`onVisible(cue)` se llama una sola vez por `id` y, cuando está presente, reemplaza al `onVisible` de la sesión y a la solicitud automática de `impressionUrl` para ese cue. `onHidden(cue)` se llama cada vez que el cue deja de presentarse. Con `timeline: 'media'` en `attachHtmlVideo` o `attachVideoJs`, el reloj es la posición del video en milisegundos y `start`/`end` se cuentan desde su inicio; un `programTime` explícito sigue teniendo prioridad.
+
 ## Samsung AVPlay
 
 ```js
