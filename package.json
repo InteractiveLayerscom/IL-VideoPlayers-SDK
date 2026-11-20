@@ -6,6 +6,7 @@
   "exports": {
     ".": "./web/index.mjs",
     "./shaka": "./web/shaka.mjs",
+    "./ads": "./web/ads.mjs",
     "./player.css": "./web/player.css"
   },
   "files": [

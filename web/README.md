@@ -85,6 +85,32 @@ sdk.removeCue('promo-1');
 
 `onVisible(cue)` se llama una sola vez por `id` y, cuando está presente, reemplaza al `onVisible` de la sesión y a la solicitud automática de `impressionUrl` para ese cue. `onHidden(cue)` se llama cada vez que el cue deja de presentarse. Con `timeline: 'media'` en `attachHtmlVideo` o `attachVideoJs`, el reloj es la posición del video en milisegundos y `start`/`end` se cuentan desde su inicio; un `programTime` explícito sigue teniendo prioridad.
 
+## Anuncios desde un plan
+
+El backend de Interactive Layers calcula un plan de anuncios por video. Con ese plan, el módulo opcional `@interactivelayers/player-sdk/ads` pide los gráficos de escena a Google Ad Manager desde el navegador y los dibuja con `addCue`. La entrada principal del SDK no lo importa: sin plan no se carga ni se ejecuta código de servidor de anuncios.
+
+```js
+import { attachHtmlVideo } from '@interactivelayers/player-sdk';
+import { attachAds } from '@interactivelayers/player-sdk/ads';
+
+const session = attachHtmlVideo({ video, stage, timeline: 'media' });
+const ads = attachAds({ session, video, plan, pageUrl, fetchImpl, onEvent });
+// Al cerrar el reproductor:
+ads.destroy();
+```
+
+Para video bajo demanda la sesión debe usar `timeline: 'media'`, porque las ventanas del plan se cuentan en milisegundos desde el inicio del video. `pageUrl` reemplaza a `plan.page_url`; `fetchImpl` es `globalThis.fetch` por defecto. `onEvent({ type, format, window })` es opcional y recibe `request`, `fill`, `no_fill`, `error`, `impression` y `click` para diagnóstico. Un plan ausente, inválido o vencido (`expires_at`) deja el módulo inactivo sin lanzar errores.
+
+Qué hace:
+
+- Sirve el súper (`super`) y la L (`l_shape`, que se dibuja con el formato `l`) cuando `plan.scenes.graphics` tiene un tag de `https://pubads.g.doubleclick.net/gampad/ads` para ese formato, y alterna los formatos que puede servir según los gráficos ya mostrados.
+- Decide en cada momento, a partir de la posición del video, si una ventana es utilizable: la acorta a `max_seconds`, la aleja `cut_clearance_seconds` de cada corte, la descarta si queda por debajo de `min_seconds`, deja 30 segundos entre inicios y `gap_after_seconds` tras el gráfico anterior, y respeta `max_per_video`. Cada ventana se intenta una sola vez por sesión, aunque el espectador vuelva atrás.
+- Pide el tag unos 4 segundos antes de la ventana (o en el acto si el espectador entra en ella con tiempo suficiente), con la segmentación de la ventana en `cust_params`, un `correlator` nuevo y `url`/`description_url`. Hace una sola solicitud por ventana, sin cookies, sin redirecciones y con 4 segundos de límite.
+- Acepta sólo un anuncio InLine con una imagen PNG o JPEG estática por HTTPS cuya proporción coincida con el formato (20:3 o 16:9). Rechaza wrappers, anuncios lineales y recursos HTML o iframe.
+- Envía las URL de `Impression` y `creativeView` una vez cuando el gráfico es visible y las de seguimiento de clic al hacer clic. Quita el cue al terminar la ventana o con `destroy()`.
+
+Todavía no hace cortes de video (preroll y midroll) ni el overlay de display de 300×250; el plan puede traerlos y el módulo los ignora.
+
 ## Samsung AVPlay
 
 ```js
