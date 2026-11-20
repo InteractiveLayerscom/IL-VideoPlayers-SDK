@@ -128,7 +128,15 @@ playButton.addEventListener('click', () => { ads.start(); video.play(); });
 
 Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`.
 
-Todavía no hace el overlay de display de 300×250; el plan puede traerlo y el módulo lo ignora.
+### Overlay de display de 300×250
+
+Cuando `plan.scenes.formats` incluye `overlay_300x250` y el plan trae `scenes.overlay.ad_unit` (una ruta de GAM que empieza con `/` y el código numérico de la red), el overlay entra en la misma rotación y pacing que el súper y la L. **Necesita `stage`**: el módulo crea dentro un contenedor de 300×250 sobre el video, a la derecha y por encima de los controles (12 px del borde derecho, 58 px del inferior). Sin `stage`, o con uno menor de 640×360, no se sirve.
+
+```js
+const ads = attachAds({ session, video, plan, stage });
+```
+
+Carga `gpt.js` una sola vez (sólo en este caso), define un slot de 300×250 con `disableInitialLoad`, le pone la segmentación de la ventana más `il_format=overlay_300x250` y `page_url`, y lo refresca unos 4 segundos antes de la ventana. Muestra el contenedor sólo cuando `slotRenderEnded` indica que no está vacío y sólo durante la parte utilizable de la ventana; un slot vacío cuenta como sin relleno. Al terminar la ventana, o con `destroy()`, lo oculta y destruye el slot. Nunca se ve durante un corte de video de `linear: 'ima'`. `onEvent` recibe `request`, `fill`, `no_fill`, `error` e `impression` (`impressionViewable` de GPT) con `format: 'overlay_300x250'`. Mientras el overlay ocupa su ventana no se pide otro formato.
 
 ## Samsung AVPlay
 

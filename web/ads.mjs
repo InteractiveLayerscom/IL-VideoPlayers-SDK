@@ -10,6 +10,11 @@ const SHAPES = { super: 20 / 3, l_shape: 16 / 9 };
 const VIDEO_EVENTS = ['playing', 'pause', 'timeupdate', 'seeking', 'seeked', 'ended'];
 
 const IMA_URL = 'https://imasdk.googleapis.com/js/sdkloader/ima3.js';
+const GPT_URL = 'https://securepubads.g.doubleclick.net/tag/js/gpt.js';
+const OVERLAY = 'overlay_300x250';
+const OVERLAY_UNIT = /^\/\d+(\/[^\s/]+)*$/;
+// Below this the 300x250 box would cover most of the picture.
+const MIN_STAGE = [640, 360];
 
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -233,7 +238,14 @@ export function attachAds({
   const page = pageUrl ?? valid.page_url;
   const cuts = Object.freeze(planCuts(valid.cuts, page).map(Object.freeze));
   const scenes = valid.scenes;
-  const formats = scenes ? servableFormats(scenes) : [];
+  const unit = scenes?.overlay?.ad_unit;
+  const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
+    !!stage?.ownerDocument && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1];
+  const graphics = scenes ? servableFormats(scenes) : [];
+  // The overlay takes its place in plan order among the scene graphics.
+  const formats = !overlayServable ? graphics : [...new Set(scenes.formats)]
+    .flatMap((format) => format === OVERLAY ? [{ format }] : graphics.filter((graphic) => graphic.format === format));
+  const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
   const pacing = scenes?.pacing;
   const minMs = scenes ? ms(pacing.min_seconds) : 0;
@@ -287,9 +299,103 @@ export function attachAds({
     if (added) cues.set(id, window.end);
   }
 
+  const onRender = (event) => {
+    if (overlay.pending && event?.slot === overlay.pending.slot) overlay.pending.resolve(event);
+  };
+  const onViewable = (event) => {
+    if (disposed || !overlay.live || event?.slot !== overlay.live.slot || overlay.viewed) return;
+    overlay.viewed = true;
+    emit('impression', OVERLAY, overlay.live.window);
+  };
+  function setUpGpt() {
+    overlay.ready ??= (async () => {
+      await loadScript(GPT_URL);
+      const gpt = globalThis.googletag;
+      if (disposed) reject('disposed');
+      if (!gpt?.pubads) reject('gpt_unavailable');
+      const node = stage.ownerDocument.createElement('div');
+      node.id = 'il-ads-overlay-' + Math.random().toString(36).slice(2, 10);
+      node.dataset.ilAdsOverlay = '';
+      Object.assign(node.style, { position: 'absolute', right: '12px', bottom: '58px', width: '300px', height: '250px', zIndex: '2', display: 'none' });
+      stage.append(node);
+      overlay.node = node;
+      gpt.pubads().disableInitialLoad();
+      gpt.pubads().addEventListener('slotRenderEnded', onRender);
+      gpt.pubads().addEventListener('impressionViewable', onViewable);
+      gpt.enableServices();
+      overlay.gpt = gpt;
+      return gpt;
+    })();
+    return overlay.ready;
+  }
+  function dropSlot() {
+    if (overlay.slot) {
+      try {
+        overlay.gpt.destroySlots([overlay.slot]);
+      } catch {
+        // GPT may already be gone.
+      }
+    }
+    overlay.slot = overlay.live = null;
+    if (overlay.node) overlay.node.style.display = 'none';
+  }
+  // Visible only during the usable part of its window and never during a video break.
+  function updateOverlay(time) {
+    if (!overlay.live) return;
+    if (time >= overlay.live.window.end) return dropSlot();
+    overlay.node.style.display = !inBreak && time >= overlay.live.window.start ? 'block' : 'none';
+  }
+
+  async function requestOverlay(window) {
+    const abort = new AbortController();
+    controller = abort;
+    const timeout = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      emit('request', OVERLAY, window);
+      const gpt = await setUpGpt();
+      if (disposed || abort.signal.aborted) reject('aborted');
+      const service = gpt.pubads();
+      const slot = gpt.defineSlot(unit, [300, 250], overlay.node.id);
+      if (!slot) reject('slot_unavailable');
+      overlay.slot = slot;
+      slot.addService(service);
+      for (const [key, value] of Object.entries(window.targeting && typeof window.targeting === 'object' ? window.targeting : {}))
+        if (key !== 'il_format') slot.setTargeting(key, Array.isArray(value) ? value.map(String) : String(value));
+      slot.setTargeting('il_format', OVERLAY);
+      if (page) service.set('page_url', page);
+      const rendered = new Promise((resolve, fail) => {
+        overlay.pending = { slot, resolve };
+        abort.signal.addEventListener('abort', () => fail(new Error('timeout')));
+      });
+      gpt.display(overlay.node.id);
+      service.refresh([slot]);
+      const event = await rendered;
+      if (disposed) return;
+      if (event.isEmpty) {
+        dropSlot();
+        return emit('no_fill', OVERLAY, window);
+      }
+      if (now() >= window.end) return dropSlot();
+      shown.push(window);
+      overlay.live = { window, slot };
+      overlay.viewed = false;
+      emit('fill', OVERLAY, window);
+      updateOverlay(now());
+    } catch {
+      if (disposed) return;
+      dropSlot();
+      emit('error', OVERLAY, window);
+    } finally {
+      overlay.pending = null;
+      clearTimeout(timeout);
+      if (controller === abort) controller = null;
+    }
+  }
+
   async function request(window) {
     attempted.add(window.id);
     const { format, tagUrl } = formats[shown.length % formats.length];
+    if (format === OVERLAY) return requestOverlay(window);
     const abort = new AbortController();
     controller = abort;
     const timeout = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
@@ -321,7 +427,9 @@ export function attachAds({
       cues.delete(id);
       session.removeCue(id);
     }
-    if (controller || !formats.length) return;
+    updateOverlay(time);
+    // The single overlay slot is not reused while it still holds a creative.
+    if (controller || overlay.live || !formats.length) return;
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
       window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, shown, pacing));
@@ -403,6 +511,7 @@ export function attachAds({
           ima.cut = cutOf(e);
           video.pause?.();
           inBreak = true;
+          updateOverlay(now());
           session.setLinearAd(true);
           emitBreak('break_start', ima.cut);
         });
@@ -468,6 +577,14 @@ export function attachAds({
       }
       ima.manager = ima.loader = ima.display = null;
       endBreak();
+      dropSlot();
+      overlay.node?.remove();
+      try {
+        overlay.gpt?.pubads().removeEventListener?.('slotRenderEnded', onRender);
+        overlay.gpt?.pubads().removeEventListener?.('impressionViewable', onViewable);
+      } catch {
+        // GPT may already be gone.
+      }
       controller?.abort();
       controller = null;
       for (const id of cues.keys()) session.removeCue(id);

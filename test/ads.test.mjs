@@ -477,3 +477,173 @@ test('a loader error keeps the content going and destroy during a break releases
   assert.deepEqual(second.linearStates, [true, false]);
   assert.equal(manager.destroyed, true);
 });
+
+function fakeGpt() {
+  const service = Object.assign(eventTarget(), {
+    initialLoadDisabled: false, refreshed: [], values: {},
+    disableInitialLoad() { this.initialLoadDisabled = true; },
+    set(key, value) { this.values[key] = value; },
+    refresh(slots) { this.refreshed.push(...slots); },
+  });
+  const made = { service, slots: [], destroyed: [], displayed: [], enabled: 0 };
+  globalThis.googletag = {
+    pubads: () => service,
+    enableServices() { made.enabled++; },
+    defineSlot(unit, size, id) {
+      const slot = { unit, size, id, targeting: {}, services: [], addService(s) { this.services.push(s); return this; },
+        setTargeting(key, value) { this.targeting[key] = value; return this; } };
+      made.slots.push(slot);
+      return slot;
+    },
+    display(id) { made.displayed.push(id); },
+    destroySlots(slots) { made.destroyed.push(...slots); return true; },
+  };
+  made.render = (isEmpty = false, slot = made.slots.at(-1)) => service.fire('slotRenderEnded', { slot, isEmpty });
+  return made;
+}
+
+function makeStage(width = 960, height = 540) {
+  const { document } = new JSDOM('<div id="stage"></div>').window;
+  const stage = document.getElementById('stage');
+  Object.defineProperty(stage, 'clientWidth', { value: width });
+  Object.defineProperty(stage, 'clientHeight', { value: height });
+  return stage;
+}
+
+function overlayRig({ formats = ['overlay_300x250'], windows, stage = makeStage(), linear, answer = (format) => inline(format), start = 0 } = {}) {
+  const gpt = fakeGpt();
+  const made = linear ? fakeIma() : null;
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: start, pause() {}, play() { return Promise.resolve(); } });
+  const events = [], scripts = [], added = [];
+  const plan = makePlan({ formats, windows, cuts: linear ? undefined : [] });
+  const ads = attachAds({ session: { addCue(cue) { added.push(cue); return true; }, removeCue() {}, setLinearAd() {} }, video, plan, stage, linear,
+    adContainer: linear ? {} : undefined, loadScript: async (src) => { scripts.push(src); }, onEvent: (e) => events.push(e),
+    fetchImpl: async (url) => ({ ok: true, text: async () => answer(new URLSearchParams(new URL(url).searchParams.get('cust_params')).get('il_format')) }) });
+  const at = async (seconds) => {
+    video.currentTime = seconds;
+    video.dispatchEvent(new Event('timeupdate'));
+    await flush();
+  };
+  const box = () => stage?.querySelector('[data-il-ads-overlay]');
+  return { ads, gpt, made, stage, events, scripts, added, at, box };
+}
+
+const GPT_URL = 'https://securepubads.g.doubleclick.net/tag/js/gpt.js';
+
+test('nothing of GPT is loaded without an overlay unit or the overlay format', async () => {
+  const gpt = fakeGpt();
+  for (const plan of [makePlan({ formats: ['super', 'overlay_300x250'], cuts: [] }), makePlan({ formats: ['super'], cuts: [] })]) {
+    if (plan.scenes.formats.length === 2) plan.scenes.overlay = { ad_unit: 'overlay', size: [300, 250] };
+    const scripts = [];
+    const video = new EventTarget();
+    video.currentTime = 42;
+    const ads = attachAds({ session: { addCue: () => true, removeCue() {} }, video, plan, stage: makeStage(), loadScript: async (src) => { scripts.push(src); },
+      fetchImpl: async () => ({ ok: true, text: async () => '<VAST version="3.0"/>' }) });
+    video.dispatchEvent(new Event('timeupdate'));
+    await flush();
+    assert.deepEqual(scripts, []);
+    ads.destroy();
+  }
+  assert.equal(gpt.slots.length, 0);
+});
+
+test('the overlay defines one 300x250 slot with window targeting, il_format and page_url', async () => {
+  const r = overlayRig();
+  await r.at(37.3);
+  assert.deepEqual(r.scripts, [GPT_URL]);
+  assert.equal(r.gpt.service.initialLoadDisabled, true);
+  assert.equal(r.gpt.slots.length, 1);
+  const [slot] = r.gpt.slots;
+  assert.equal(slot.unit, '/123/site/overlay');
+  assert.deepEqual(slot.size, [300, 250]);
+  assert.equal(slot.id, r.box().id);
+  assert.deepEqual(slot.targeting, { ilayers_context: 'cocina', il_format: 'overlay_300x250' });
+  assert.equal(r.gpt.service.values.page_url, 'https://publisher.example/video');
+  assert.deepEqual(r.gpt.service.refreshed, [slot]);
+  assert.deepEqual(r.events[0], { type: 'request', format: 'overlay_300x250', window: 'p17' });
+  const { style } = r.box();
+  assert.deepEqual([style.position, style.right, style.bottom, style.width, style.height], ['absolute', '12px', '58px', '300px', '250px']);
+  r.ads.destroy();
+});
+
+test('the overlay shows only after a non-empty render, during the window, and goes at its end', async () => {
+  const r = overlayRig();
+  await r.at(37.3);
+  assert.equal(r.box().style.display, 'none');
+  r.gpt.render(false);
+  await r.at(38);
+  assert.equal(r.box().style.display, 'none');
+  assert.equal(r.events.at(-1).type, 'fill');
+  await r.at(41.2);
+  assert.equal(r.box().style.display, 'block');
+  r.gpt.service.fire('impressionViewable', { slot: r.gpt.slots[0] });
+  assert.equal(r.events.at(-1).type, 'impression');
+  await r.at(52.9);
+  assert.equal(r.box().style.display, 'none');
+  assert.deepEqual(r.gpt.destroyed, [r.gpt.slots[0]]);
+  r.ads.destroy();
+});
+
+test('an empty slot is a no fill and destroy hides the overlay and destroys the slot', async () => {
+  const empty = overlayRig();
+  await empty.at(42);
+  empty.gpt.render(true);
+  await empty.at(43);
+  assert.equal(empty.events.at(-1).type, 'no_fill');
+  assert.equal(empty.box().style.display, 'none');
+  assert.deepEqual(empty.gpt.destroyed, [empty.gpt.slots[0]]);
+  empty.ads.destroy();
+  const r = overlayRig();
+  await r.at(42);
+  r.gpt.render(false);
+  await r.at(43);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.destroy();
+  assert.equal(r.box(), null);
+  assert.deepEqual(r.gpt.destroyed, [r.gpt.slots[0]]);
+});
+
+test('no overlay container on a missing or small stage', async () => {
+  for (const stage of [null, makeStage(639, 360), makeStage(640, 359)]) {
+    const r = overlayRig({ stage });
+    await r.at(42);
+    assert.deepEqual(r.scripts, []);
+    assert.equal(r.gpt.slots.length, 0);
+    if (stage) assert.equal(stage.children.length, 0);
+    r.ads.destroy();
+  }
+});
+
+test('the overlay joins the rotation with super and l_shape', async () => {
+  const windows = [{ id: 'a', start_ms: 10000, end_ms: 15000 }, { id: 'b', start_ms: 50000, end_ms: 55000 },
+    { id: 'c', start_ms: 90000, end_ms: 95000 }, { id: 'd', start_ms: 130000, end_ms: 135000 }];
+  const r = overlayRig({ windows, formats: ['super', 'overlay_300x250', 'l_shape'] });
+  for (const t of [10, 50, 90, 130]) {
+    await r.at(t);
+    if (r.gpt.slots.length && r.events.at(-1).type === 'request') r.gpt.render(false);
+    await r.at(t + 0.5);
+  }
+  assert.deepEqual(r.events.filter((e) => e.type === 'request').map((e) => e.format), ['super', 'overlay_300x250', 'l_shape', 'super']);
+  assert.deepEqual(r.added.map((c) => c.format), ['super', 'l', 'super']);
+  assert.equal(r.gpt.slots.length, 1);
+  r.ads.destroy();
+});
+
+test('the overlay hides when a video ad break starts', async () => {
+  const r = overlayRig({ linear: 'ima' });
+  await r.at(42);
+  r.gpt.render(false);
+  await r.at(43);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.start();
+  const manager = r.made.load();
+  manager.fire('pause', {});
+  assert.equal(r.box().style.display, 'none');
+  await r.at(43.5);
+  assert.equal(r.box().style.display, 'none');
+  manager.fire('resume', {});
+  await r.at(44);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.destroy();
+});
