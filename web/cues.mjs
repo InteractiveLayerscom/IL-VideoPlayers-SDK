@@ -49,6 +49,7 @@ export function normalizeCue(item) {
     end: item.end,
     ...(mimeType ? { imageUrl: item.imageUrl, mimeType } : {}),
     impressionUrl: item.impressionUrl ?? null,
+    ...(isHttps(item.clickUrl) ? { clickUrl: item.clickUrl } : {}),
     ...(commerce ? { commerce } : {}),
     ...(scene ? { scene, products, ...(item.layout === 'overlay' ? { layout: 'overlay' } : {}) } : {}),
     ...(brand ? { brand } : {}),

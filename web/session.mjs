@@ -28,8 +28,11 @@ export function createSession({
     } else throw new Error('Provide a playback session ID on this device');
   }
   const cues = new Map();
+  // Cues placed by the host stay until removeCue or destroy.
+  const pinned = new Map();
   const measured = new Set();
   let current = null,
+    currentHooks = null,
     disposed = false,
     inBreak = false,
     spot = null,
@@ -107,13 +110,18 @@ export function createSession({
       return !inBreak && (cue.scene ? presenting() : playing());
     }
     let active = null;
+    for (const { cue } of pinned.values()) {
+      if (!active && canShow(cue) && cue.start <= time && time < cue.end) active = cue;
+    }
     for (const [id, cue] of cues) {
       if (Number.isFinite(time) && cue.end < time - 120000) cues.delete(id);
       else if (!active && canShow(cue) && cue.start <= time && time < cue.end) active = cue;
     }
+    const hooks = active && pinned.get(active.id)?.cue === active ? pinned.get(active.id).hooks : null;
     if (active?.id !== current?.id) {
-      if (current) renderer.hide();
+      if (current) conceal();
       current = active;
+      currentHooks = hooks;
       if (active)
         renderer.show(active, time, () => {
           const now = playhead();
@@ -125,15 +133,17 @@ export function createSession({
             active.start <= now &&
             now < active.end
           );
-        });
+        }, hooks?.onClick);
     } else if (active && current !== active) {
       renderer.applyAudioPermissions?.(active);
       current = active;
+      currentHooks = hooks;
     }
     if (active) renderer.update?.(time);
     if (active && active.format !== 'midroll' && renderer.visible(active) && !measured.has(active.id)) {
       measured.add(active.id);
-      if (onVisible) onVisible(active);
+      if (hooks?.onVisible) hooks.onVisible(active);
+      else if (onVisible) onVisible(active);
       else if (active.impressionUrl) {
         void fetchImpl(active.impressionUrl, {
           method: 'GET',
@@ -143,6 +153,13 @@ export function createSession({
         }).catch(() => {});
       }
     }
+  }
+
+  function conceal() {
+    const [cue, hooks] = [current, currentHooks];
+    renderer.hide();
+    current = currentHooks = null;
+    hooks?.onHidden?.(cue);
   }
 
   function tick() {
@@ -162,6 +179,21 @@ export function createSession({
   if (interval !== false) timer = setInterval(tick, interval);
   return {
     tick,
+    addCue(item, { onVisible, onHidden, onClick } = {}) {
+      const cue = normalizeCue(item);
+      if (!cue || disposed) return false;
+      if (current?.id === cue.id && currentHooks) conceal();
+      pinned.set(cue.id, { cue, hooks: { onVisible, onHidden, onClick } });
+      tick();
+      return true;
+    },
+    removeCue(id) {
+      if (!pinned.has(id)) return false;
+      if (current?.id === id && currentHooks) conceal();
+      pinned.delete(id);
+      tick();
+      return true;
+    },
     updateManifest(text) {
       manifest(text);
       tick();
@@ -184,9 +216,10 @@ export function createSession({
       disposed = true;
       clearInterval(timer);
       pending?.abort();
-      if (current) renderer.hide();
+      if (current) conceal();
       renderer.destroy?.();
       cues.clear();
+      pinned.clear();
       measured.clear();
       current = null;
     },
