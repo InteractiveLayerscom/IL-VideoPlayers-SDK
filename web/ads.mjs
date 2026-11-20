@@ -231,6 +231,34 @@ export function parseGraphicVast(xml, format, availableMs, Parser = globalThis.D
   };
 }
 
+export function planUrl({ origin, project, asset } = {}) {
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new TypeError('origin must be an https origin');
+  }
+  if (parsed.protocol !== 'https:' || (parsed.origin !== origin && parsed.origin + '/' !== origin)) {
+    throw new TypeError('origin must be an https origin');
+  }
+  for (const [name, value] of [['project', project], ['asset', asset]]) {
+    if (typeof value !== 'string' || !value) throw new TypeError(name + ' must be a non-empty string');
+  }
+  return `${parsed.origin}/il-player/ad-plan?project=${encodeURIComponent(project)}&asset=${encodeURIComponent(asset)}`;
+}
+
+export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {}) {
+  try {
+    if (new URL(url).protocol !== 'https:' || typeof fetchImpl !== 'function') return null;
+    const response = await fetchImpl(url, { method: 'GET', credentials: 'omit', redirect: 'error', signal });
+    if (response.status !== 200) return null;
+    const plan = JSON.parse(await response.text());
+    return plan && typeof plan === 'object' && !Array.isArray(plan) && plan.version === 1 ? plan : null;
+  } catch {
+    return null;
+  }
+}
+
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
   stage, linear, adContainer, loadScript = loadScriptOnce,

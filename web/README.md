@@ -140,6 +140,50 @@ const ads = attachAds({ session, video, plan, stage });
 
 Carga `gpt.js` una sola vez (sólo en este caso) y hace todas las llamadas a GPT por `googletag.cmd`. Si la página todavía no activó GPT, el módulo usa `disableInitialLoad`, fija `page_url` y activa los servicios; si la página ya lo había activado (`googletag.pubadsReady`), no toca esa configuración global. Define un slot de 300×250 con la segmentación de la ventana más `il_format=overlay_300x250` y lo pide una sola vez unos 4 segundos antes de la ventana. Muestra el contenedor sólo cuando `slotRenderEnded` indica que no está vacío y sólo durante la parte utilizable de la ventana; un slot vacío cuenta como sin relleno. Al terminar la ventana, o con `destroy()`, lo oculta y destruye el slot. Nunca se ve durante un corte de video (de `linear: 'ima'` o señalado con `setBreakActive(true)`). El tamaño de `stage` se mide cuando toca pedir la ventana. `onEvent` recibe `request`, `fill`, `no_fill`, `error` e `impression` (`impressionViewable` de GPT) con `format: 'overlay_300x250'`. Mientras el overlay ocupa su ventana no se pide otro formato.
 
+### Players de terceros
+
+Un player propio del publisher no recibe el plan dentro de la página: lo pide al backend de Interactive Layers.
+
+```js
+import { loadPlan, planUrl } from '@interactivelayers/player-sdk/ads';
+
+const plan = await loadPlan(planUrl({ origin: 'https://console.interactivelayers.com', project, asset }));
+```
+
+`planUrl` arma `<origin>/il-player/ad-plan?project=…&asset=…` (el origen debe ser `https:`; si no, lanza `TypeError`, igual que con un `project` o `asset` vacío). `loadPlan` nunca lanza: hace un solo `GET` sin cookies ni redirecciones y devuelve el plan, o `null`. El endpoint sólo responde a los dominios verificados del proyecto. `null` significa «reproducí sin anuncios esta vez»: sin plan todavía (el backend lo prepara en segundo plano), error de red o respuesta inválida. El navegador puede cachear la respuesta unos minutos. `loadPlan(url, { fetchImpl, signal })` acepta un `AbortSignal`.
+
+**HTML5 `<video>`.** El SDK reproduce los gráficos y el módulo pide los cortes a IMA.
+
+```js
+const session = attachHtmlVideo({ video, stage, timeline: 'media' });
+const ads = attachAds({ session, video, stage, plan, linear: 'ima', adContainer });
+playButton.addEventListener('click', () => { ads.start(); video.play(); });
+```
+
+Llamá a `ads.start()` dentro del gesto de reproducción del espectador. Con `plan` en `null`, `attachAds` queda inactivo y el video se reproduce sin anuncios.
+
+**Un player con su propia integración de anuncios** (el ad manager de Shaka Player, o Video.js con un plugin de IMA). El player dibuja y mide sus cortes; el SDK sólo agrega los gráficos y el overlay. Adjuntá el adaptador del SDK con `timeline: 'media'` y llamá a `attachAds` sin `linear`, para que el módulo no cargue IMA. Entregale al player sus cortes: `ads.vmap()` es el VMAP que su IMA toma como respuesta de anuncios, o recorré `ads.cuts` y programá cada `tagUrl` con la API de anuncios del propio player. Cuando un corte empieza y cuando termina, llamá a `ads.setBreakActive(true)` y `ads.setBreakActive(false)` desde los eventos de esa API, para que los gráficos y el overlay no aparezcan durante el corte.
+
+```js
+// Shaka Player con su ad manager: el SDK dibuja sobre el mismo <video> con el adaptador HTML5.
+const session = attachHtmlVideo({ video, stage, timeline: 'media' });
+const ads = attachAds({ session, video, stage, plan });
+const vmap = ads.vmap(); // Pasalo a la API de anuncios del ad manager de Shaka.
+// En los eventos de inicio y fin de corte de esa API:
+//   ads.setBreakActive(true);  ...  ads.setBreakActive(false);
+```
+
+```js
+// Video.js con un plugin de IMA.
+const session = attachVideoJs({ player: videojsPlayer, stage, timeline: 'media' });
+const ads = attachAds({ session, video: videojsPlayer.el().querySelector('video'), stage, plan });
+const vmap = ads.vmap(); // Pasalo como respuesta de anuncios (adsResponse) de la solicitud de IMA.
+// En los eventos de inicio y fin de corte del plugin:
+//   ads.setBreakActive(true);  ...  ads.setBreakActive(false);
+```
+
+Cada llamada a `ads.vmap()` trae un `correlator` nuevo: pedilo una vez por reproducción. Al cerrar el player, `ads.destroy()`.
+
 ## Samsung AVPlay
 
 ```js
