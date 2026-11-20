@@ -12,13 +12,15 @@ const VIDEO_EVENTS = ['playing', 'pause', 'timeupdate', 'seeking', 'seeked', 'en
 const IMA_URL = 'https://imasdk.googleapis.com/js/sdkloader/ima3.js';
 const GPT_URL = 'https://securepubads.g.doubleclick.net/tag/js/gpt.js';
 const OVERLAY = 'overlay_300x250';
+const IMA_LOAD_TIMEOUT_MS = 8000;
+const BREAK_WATCHDOG_MS = 120000;
 const OVERLAY_UNIT = /^\/\d+(\/[^\s/]+)*$/;
 // Below this the 300x250 box would cover most of the picture.
 const MIN_STAGE = [640, 360];
 
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
-const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, start() {}, destroy() {} });
+const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, setBreakActive() {}, start() {}, destroy() {} });
 
 function reject(reason) {
   throw new Error(reason);
@@ -240,11 +242,16 @@ export function attachAds({
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
   const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
-    !!stage?.ownerDocument && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1];
+    !!stage?.ownerDocument;
   const graphics = scenes ? servableFormats(scenes) : [];
   // The overlay takes its place in plan order among the scene graphics.
   const formats = !overlayServable ? graphics : [...new Set(scenes.formats)]
     .flatMap((format) => format === OVERLAY ? [{ format }] : graphics.filter((graphic) => graphic.format === format));
+  // The stage is measured when a window is due, so a stage laid out after attach still counts.
+  const servableNow = () => overlayServable && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1]
+    ? formats : graphics;
+  let hostBreak = false;
+  const breakOn = () => inBreak || hostBreak;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
   const pacing = scenes?.pacing;
@@ -255,7 +262,8 @@ export function attachAds({
   let controller = null;
   let disposed = false;
   let inBreak = false;
-  const ima = { sdk: null, display: null, loader: null, manager: null, started: false, running: false, cut: null };
+  const ima = { sdk: null, display: null, loader: null, manager: null, started: false, running: false, cut: null,
+    gaveUp: false, loadTimer: null, watchdog: null, observer: null };
 
   const emit = (type, format, window) => {
     try {
@@ -307,34 +315,54 @@ export function attachAds({
     overlay.viewed = true;
     emit('impression', OVERLAY, overlay.live.window);
   };
+  // Every GPT call goes through the documented command queue, so a page that already
+  // uses GPT keeps its own setup; page-wide settings are touched only when we enable services.
+  const gptQueue = (fn) => {
+    const tag = (globalThis.googletag ??= { cmd: [] });
+    tag.cmd ??= [];
+    tag.cmd.push(fn);
+  };
   function setUpGpt() {
-    overlay.ready ??= (async () => {
-      await loadScript(GPT_URL);
-      const gpt = globalThis.googletag;
-      if (disposed) reject('disposed');
-      if (!gpt?.pubads) reject('gpt_unavailable');
-      const node = stage.ownerDocument.createElement('div');
-      node.id = 'il-ads-overlay-' + Math.random().toString(36).slice(2, 10);
-      node.dataset.ilAdsOverlay = '';
-      Object.assign(node.style, { position: 'absolute', right: '12px', bottom: '58px', width: '300px', height: '250px', zIndex: '2', display: 'none' });
-      stage.append(node);
-      overlay.node = node;
-      gpt.pubads().disableInitialLoad();
-      gpt.pubads().addEventListener('slotRenderEnded', onRender);
-      gpt.pubads().addEventListener('impressionViewable', onViewable);
-      gpt.enableServices();
-      overlay.gpt = gpt;
-      return gpt;
-    })();
+    overlay.ready ??= new Promise((resolve, fail) => {
+      gptQueue(() => {
+        try {
+          if (disposed) reject('disposed');
+          const gpt = globalThis.googletag;
+          const service = gpt.pubads();
+          const own = !gpt.pubadsReady;
+          const node = stage.ownerDocument.createElement('div');
+          node.id = 'il-ads-overlay-' + Math.random().toString(36).slice(2, 10);
+          node.dataset.ilAdsOverlay = '';
+          Object.assign(node.style, { position: 'absolute', right: '12px', bottom: '58px', width: '300px', height: '250px', zIndex: '2', display: 'none' });
+          stage.append(node);
+          overlay.node = node;
+          if (own) {
+            service.disableInitialLoad();
+            if (page) service.set('page_url', page);
+          }
+          service.addEventListener('slotRenderEnded', onRender);
+          service.addEventListener('impressionViewable', onViewable);
+          if (own) gpt.enableServices();
+          overlay.gpt = gpt;
+          resolve(gpt);
+        } catch (error) {
+          fail(error);
+        }
+      });
+      Promise.resolve().then(() => loadScript(GPT_URL)).catch(fail);
+    });
     return overlay.ready;
   }
   function dropSlot() {
-    if (overlay.slot) {
-      try {
-        overlay.gpt.destroySlots([overlay.slot]);
-      } catch {
-        // GPT may already be gone.
-      }
+    const slot = overlay.slot;
+    if (slot) {
+      gptQueue(() => {
+        try {
+          overlay.gpt.destroySlots([slot]);
+        } catch {
+          // GPT may already be gone.
+        }
+      });
     }
     overlay.slot = overlay.live = null;
     if (overlay.node) overlay.node.style.display = 'none';
@@ -343,7 +371,7 @@ export function attachAds({
   function updateOverlay(time) {
     if (!overlay.live) return;
     if (time >= overlay.live.window.end) return dropSlot();
-    overlay.node.style.display = !inBreak && time >= overlay.live.window.start ? 'block' : 'none';
+    overlay.node.style.display = !breakOn() && time >= overlay.live.window.start ? 'block' : 'none';
   }
 
   async function requestOverlay(window) {
@@ -354,22 +382,28 @@ export function attachAds({
       emit('request', OVERLAY, window);
       const gpt = await setUpGpt();
       if (disposed || abort.signal.aborted) reject('aborted');
-      const service = gpt.pubads();
-      const slot = gpt.defineSlot(unit, [300, 250], overlay.node.id);
-      if (!slot) reject('slot_unavailable');
-      overlay.slot = slot;
-      slot.addService(service);
-      for (const [key, value] of Object.entries(window.targeting && typeof window.targeting === 'object' ? window.targeting : {}))
-        if (key !== 'il_format') slot.setTargeting(key, Array.isArray(value) ? value.map(String) : String(value));
-      slot.setTargeting('il_format', OVERLAY);
-      if (page) service.set('page_url', page);
-      const rendered = new Promise((resolve, fail) => {
-        overlay.pending = { slot, resolve };
+      const event = await new Promise((resolve, fail) => {
         abort.signal.addEventListener('abort', () => fail(new Error('timeout')));
+        gptQueue(() => {
+          try {
+            if (disposed || abort.signal.aborted) reject('aborted');
+            const service = gpt.pubads();
+            const slot = gpt.defineSlot(unit, [300, 250], overlay.node.id);
+            if (!slot) reject('slot_unavailable');
+            overlay.slot = slot;
+            slot.addService(service);
+            for (const [key, value] of Object.entries(window.targeting && typeof window.targeting === 'object' ? window.targeting : {}))
+              if (key !== 'il_format') slot.setTargeting(key, Array.isArray(value) ? value.map(String) : String(value));
+            slot.setTargeting('il_format', OVERLAY);
+            overlay.pending = { slot, resolve };
+            // display() fetches unless initial load is off; then refresh() is the one fetch.
+            gpt.display(overlay.node.id);
+            if (service.isInitialLoadDisabled?.()) service.refresh([slot]);
+          } catch (error) {
+            fail(error);
+          }
+        });
       });
-      gpt.display(overlay.node.id);
-      service.refresh([slot]);
-      const event = await rendered;
       if (disposed) return;
       if (event.isEmpty) {
         dropSlot();
@@ -377,7 +411,7 @@ export function attachAds({
       }
       if (now() >= window.end) return dropSlot();
       shown.push(window);
-      overlay.live = { window, slot };
+      overlay.live = { window, slot: overlay.slot };
       overlay.viewed = false;
       emit('fill', OVERLAY, window);
       updateOverlay(now());
@@ -394,7 +428,8 @@ export function attachAds({
 
   async function request(window) {
     attempted.add(window.id);
-    const { format, tagUrl } = formats[shown.length % formats.length];
+    const list = servableNow();
+    const { format, tagUrl } = list[shown.length % list.length];
     if (format === OVERLAY) return requestOverlay(window);
     const abort = new AbortController();
     controller = abort;
@@ -429,7 +464,7 @@ export function attachAds({
     }
     updateOverlay(time);
     // The single overlay slot is not reused while it still holds a creative.
-    if (controller || overlay.live || !formats.length) return;
+    if (controller || overlay.live || breakOn() || !servableNow().length) return;
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
       window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, shown, pacing));
@@ -466,6 +501,7 @@ export function attachAds({
     return cuts.filter((cut) => cut.at <= time + 1).at(-1) ?? cuts[0] ?? null;
   }
   function endBreak() {
+    clearTimeout(ima.watchdog);
     if (!inBreak) return false;
     inBreak = false;
     session.setLinearAd(false);
@@ -488,15 +524,37 @@ export function attachAds({
     ima.cut = null;
     if (endBreak()) resume();
   }
-  const contentEnded = () => ima.loader?.contentComplete?.();
+  // An ad played in the same <video> also fires `ended`; only the content's end counts.
+  const contentEnded = () => {
+    if (!inBreak) ima.loader?.contentComplete?.();
+  };
+  const resized = () => {
+    try {
+      ima.manager?.resize(video.clientWidth || 640, video.clientHeight || 360, ima.sdk.ViewMode.NORMAL);
+    } catch {
+      // A failed resize leaves the ad at its previous size.
+    }
+  };
+  function destroyManager() {
+    try {
+      ima.manager?.destroy?.();
+    } catch {
+      // Tearing down IMA must not throw into the host.
+    }
+    ima.manager = null;
+  }
 
   async function setUpIma() {
     try {
       await loadScript(IMA_URL);
       const sdk = globalThis.google?.ima;
-      if (disposed) return;
+      if (disposed || ima.gaveUp) return;
       if (!sdk) reject('ima_unavailable');
+      clearTimeout(ima.loadTimer);
       ima.sdk = sdk;
+      // Joining late: a pre-roll would interrupt content already under way.
+      const playable = (Number(video.currentTime) || 0) > 1 ? cuts.filter((cut) => cut.at > 0) : cuts;
+      if (!playable.length) return;
       ima.display = new sdk.AdDisplayContainer(adContainer, video);
       if (ima.started) ima.display.initialize();
       ima.loader = new sdk.AdsLoader(ima.display);
@@ -514,6 +572,13 @@ export function attachAds({
           updateOverlay(now());
           session.setLinearAd(true);
           emitBreak('break_start', ima.cut);
+          clearTimeout(ima.watchdog);
+          ima.watchdog = setTimeout(() => {
+            if (!disposed && inBreak) adError();
+          }, BREAK_WATCHDOG_MS);
+        });
+        if (sdk.AdEvent.Type.ALL_ADS_COMPLETED) manager.addEventListener(sdk.AdEvent.Type.ALL_ADS_COMPLETED, () => {
+          if (ima.manager === manager) destroyManager();
         });
         manager.addEventListener(sdk.AdEvent.Type.CONTENT_RESUME_REQUESTED, () => {
           if (disposed) return;
@@ -526,8 +591,12 @@ export function attachAds({
         startManager();
       });
       video.addEventListener('ended', contentEnded);
+      if (typeof globalThis.ResizeObserver === 'function') {
+        ima.observer = new globalThis.ResizeObserver(resized);
+        ima.observer.observe(video);
+      }
       const request = new sdk.AdsRequest();
-      request.adsResponse = buildVmap(cuts);
+      request.adsResponse = buildVmap(playable);
       if (page) request.pageUrl = page;
       request.linearAdSlotWidth = video.clientWidth || 640;
       request.linearAdSlotHeight = video.clientHeight || 360;
@@ -552,9 +621,22 @@ export function attachAds({
       windows = usableWindows({ scenes, cuts: seconds.filter(isNumber).map((at) => ({ at })) });
       sync();
     },
+    setBreakActive(active) {
+      if (disposed) return;
+      hostBreak = Boolean(active);
+      updateOverlay(now());
+      sync();
+    },
     start() {
       if (disposed || !useIma || ima.started) return;
       ima.started = true;
+      if (!ima.sdk) {
+        ima.loadTimer = setTimeout(() => {
+          if (disposed || ima.sdk) return;
+          ima.gaveUp = true;
+          emitBreak('break_error', null);
+        }, IMA_LOAD_TIMEOUT_MS);
+      }
       // IMA needs this inside the viewer's play gesture.
       try {
         ima.display?.initialize();
@@ -568,6 +650,8 @@ export function attachAds({
       disposed = true;
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       video.removeEventListener('ended', contentEnded);
+      clearTimeout(ima.loadTimer);
+      ima.observer?.disconnect();
       for (const part of [ima.manager, ima.loader, ima.display]) {
         try {
           part?.destroy?.();
@@ -579,11 +663,15 @@ export function attachAds({
       endBreak();
       dropSlot();
       overlay.node?.remove();
-      try {
-        overlay.gpt?.pubads().removeEventListener?.('slotRenderEnded', onRender);
-        overlay.gpt?.pubads().removeEventListener?.('impressionViewable', onViewable);
-      } catch {
-        // GPT may already be gone.
+      if (overlay.gpt) {
+        gptQueue(() => {
+          try {
+            overlay.gpt.pubads().removeEventListener?.('slotRenderEnded', onRender);
+            overlay.gpt.pubads().removeEventListener?.('impressionViewable', onViewable);
+          } catch {
+            // GPT may already be gone.
+          }
+        });
       }
       controller?.abort();
       controller = null;

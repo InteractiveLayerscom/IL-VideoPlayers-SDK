@@ -126,7 +126,9 @@ const ads = attachAds({ session, video, plan, linear: 'ima', adContainer });
 playButton.addEventListener('click', () => { ads.start(); video.play(); });
 ```
 
-Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`.
+Llamá a `attachAds` antes del gesto de reproducción del espectador, para que `start()` pueda inicializar IMA dentro de ese gesto. Si IMA llega cuando el video ya pasó su primer segundo, se salta el preroll (los midrolls se mantienen); si `ima3.js` no cargó 8 segundos después de `start()`, el módulo renuncia a IMA en esa reproducción (`break_error`) y el contenido sigue. Un corte que no termina en 120 segundos se trata como error y el contenido se reanuda.
+
+Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`. Mientras tu reproductor de anuncios pasa un corte, llamá a `ads.setBreakActive(true)` (y `false` al terminar): el overlay se oculta y no empieza ninguna solicitud de gráficos, igual que durante un corte de IMA.
 
 ### Overlay de display de 300×250
 
@@ -136,7 +138,7 @@ Cuando `plan.scenes.formats` incluye `overlay_300x250` y el plan trae `scenes.ov
 const ads = attachAds({ session, video, plan, stage });
 ```
 
-Carga `gpt.js` una sola vez (sólo en este caso), define un slot de 300×250 con `disableInitialLoad`, le pone la segmentación de la ventana más `il_format=overlay_300x250` y `page_url`, y lo refresca unos 4 segundos antes de la ventana. Muestra el contenedor sólo cuando `slotRenderEnded` indica que no está vacío y sólo durante la parte utilizable de la ventana; un slot vacío cuenta como sin relleno. Al terminar la ventana, o con `destroy()`, lo oculta y destruye el slot. Nunca se ve durante un corte de video de `linear: 'ima'`. `onEvent` recibe `request`, `fill`, `no_fill`, `error` e `impression` (`impressionViewable` de GPT) con `format: 'overlay_300x250'`. Mientras el overlay ocupa su ventana no se pide otro formato.
+Carga `gpt.js` una sola vez (sólo en este caso) y hace todas las llamadas a GPT por `googletag.cmd`. Si la página todavía no activó GPT, el módulo usa `disableInitialLoad`, fija `page_url` y activa los servicios; si la página ya lo había activado (`googletag.pubadsReady`), no toca esa configuración global. Define un slot de 300×250 con la segmentación de la ventana más `il_format=overlay_300x250` y lo pide una sola vez unos 4 segundos antes de la ventana. Muestra el contenedor sólo cuando `slotRenderEnded` indica que no está vacío y sólo durante la parte utilizable de la ventana; un slot vacío cuenta como sin relleno. Al terminar la ventana, o con `destroy()`, lo oculta y destruye el slot. Nunca se ve durante un corte de video (de `linear: 'ima'` o señalado con `setBreakActive(true)`). El tamaño de `stage` se mide cuando toca pedir la ventana. `onEvent` recibe `request`, `fill`, `no_fill`, `error` e `impression` (`impressionViewable` de GPT) con `format: 'overlay_300x250'`. Mientras el overlay ocupa su ventana no se pide otro formato.
 
 ## Samsung AVPlay
 
