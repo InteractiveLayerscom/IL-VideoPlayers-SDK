@@ -279,6 +279,8 @@ export function attachAds({
   const servableNow = () => overlayServable && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1]
     ? formats : graphics;
   let hostBreak = false;
+  let played = false;
+  const failedCuts = new Set();
   const breakOn = () => inBreak || hostBreak;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
@@ -365,8 +367,13 @@ export function attachAds({
           stage.append(node);
           overlay.node = node;
           if (own) {
-            service.disableInitialLoad();
-            if (page) service.set('page_url', page);
+            // GPT deprecated the per-service calls in favour of setConfig; the old ones stay for a GPT without it.
+            if (typeof gpt.setConfig === 'function') {
+              gpt.setConfig({ disableInitialLoad: true, ...(page ? { adsenseAttributes: { page_url: page } } : {}) });
+            } else {
+              service.disableInitialLoad();
+              if (page) service.set('page_url', page);
+            }
           }
           service.addEventListener('slotRenderEnded', onRender);
           service.addEventListener('impressionViewable', onViewable);
@@ -420,13 +427,19 @@ export function attachAds({
             if (!slot) reject('slot_unavailable');
             overlay.slot = slot;
             slot.addService(service);
+            const targeting = {};
             for (const [key, value] of Object.entries(window.targeting && typeof window.targeting === 'object' ? window.targeting : {}))
-              if (key !== 'il_format') slot.setTargeting(key, Array.isArray(value) ? value.map(String) : String(value));
-            slot.setTargeting('il_format', OVERLAY);
+              targeting[key] = Array.isArray(value) ? value.map(String) : String(value);
+            targeting.il_format = OVERLAY;
+            if (typeof slot.setConfig === 'function') slot.setConfig({ targeting });
+            else for (const [key, value] of Object.entries(targeting)) slot.setTargeting(key, value);
             overlay.pending = { slot, resolve };
             // display() fetches unless initial load is off; then refresh() is the one fetch.
             gpt.display(overlay.node.id);
-            if (service.isInitialLoadDisabled?.()) service.refresh([slot]);
+            const initialLoadOff = typeof gpt.getConfig === 'function'
+              ? gpt.getConfig('disableInitialLoad')?.disableInitialLoad === true
+              : service.isInitialLoadDisabled?.();
+            if (initialLoadOff) service.refresh([slot]);
           } catch (error) {
             fail(error);
           }
@@ -482,8 +495,10 @@ export function attachAds({
     }
   }
 
-  function sync() {
+  function sync(event) {
     if (disposed) return;
+    // No ad server is asked before the viewer has started playback in this session.
+    if (event?.type === 'playing' || video.paused === false) played = true;
     const time = now();
     for (const [id, end] of cues) {
       if (time < end) continue;
@@ -492,7 +507,7 @@ export function attachAds({
     }
     updateOverlay(time);
     // The single overlay slot is not reused while it still holds a creative.
-    if (controller || overlay.live || breakOn() || !servableNow().length) return;
+    if (!played || controller || overlay.live || breakOn() || !servableNow().length) return;
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
       window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, shown, pacing));
@@ -548,9 +563,21 @@ export function attachAds({
   }
   function adError() {
     if (disposed) return;
-    emitBreak('break_error', ima.cut ?? cutOf(null));
+    const cut = ima.cut ?? cutOf(null);
+    const playing = inBreak;
     ima.cut = null;
     if (endBreak()) resume();
+    if (!playing && cut && failedCuts.has(cut.id)) return;
+    if (cut) failedCuts.add(cut.id);
+    emitBreak('break_error', cut);
+  }
+  // With ad rules IMA reports a break it could not fetch, or an empty one, without AD_ERROR.
+  function breakFailed(event) {
+    if (disposed || inBreak) return;
+    const cut = !played && cuts[0]?.at === 0 ? cuts[0] : cutOf(event);
+    if (!cut || failedCuts.has(cut.id)) return;
+    failedCuts.add(cut.id);
+    emitBreak('break_error', cut);
   }
   // An ad played in the same <video> also fires `ended`; only the content's end counts.
   const contentEnded = () => {
@@ -604,6 +631,16 @@ export function attachAds({
           ima.watchdog = setTimeout(() => {
             if (!disposed && inBreak) adError();
           }, BREAK_WATCHDOG_MS);
+        });
+        if (sdk.AdEvent.Type.AD_BREAK_FETCH_ERROR) manager.addEventListener(sdk.AdEvent.Type.AD_BREAK_FETCH_ERROR, breakFailed);
+        if (sdk.AdEvent.Type.LOG) manager.addEventListener(sdk.AdEvent.Type.LOG, (e) => {
+          let data;
+          try {
+            data = e?.getAdData?.();
+          } catch {
+            data = null;
+          }
+          if (data?.adError) breakFailed(e);
         });
         if (sdk.AdEvent.Type.ALL_ADS_COMPLETED) manager.addEventListener(sdk.AdEvent.Type.ALL_ADS_COMPLETED, () => {
           if (ima.manager === manager) destroyManager();

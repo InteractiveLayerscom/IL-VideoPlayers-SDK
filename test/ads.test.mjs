@@ -33,6 +33,7 @@ function harness(options = {}) {
   const plan = 'plan' in options ? options.plan : makePlan();
   const video = new EventTarget();
   video.currentTime = start;
+  video.paused = true;
   const requests = [], pixels = [], events = [], added = [], removed = [];
   const session = {
     addCue(cue, hooks) { added.push({ cue, hooks }); return true; },
@@ -50,6 +51,7 @@ function harness(options = {}) {
   const ads = attachAds({ session, video, plan, pageUrl, fetchImpl, onEvent: (event) => events.push(event) });
   const at = async (seconds, type = 'timeupdate') => {
     video.currentTime = seconds;
+    video.paused = false;
     video.dispatchEvent(new Event(type));
     await flush();
   };
@@ -213,7 +215,7 @@ test('min_seconds and max_seconds shape the usable window', async () => {
 
 test('landing inside a window requests at once only with min_seconds left', async () => {
   const late = harness({ start: 50 });
-  await flush();
+  await late.at(50, 'playing');
   assert.equal(late.requests.length, 1);
   late.ads.destroy();
   const tooLate = harness({ start: 52 });
@@ -289,6 +291,7 @@ test('a window is attempted once, even after seeking back', async () => {
 test('destroy aborts a pending request and no cue is added', async () => {
   const video = new EventTarget();
   video.currentTime = 42;
+  video.paused = false;
   let signal, release;
   const added = [];
   const ads = attachAds({ session: { addCue: (c) => added.push(c), removeCue() {} }, video, plan: makePlan(),
@@ -326,7 +329,8 @@ function fakeIma() {
     AdsRequest: class {},
     AdsManagerLoadedEvent: { Type: { ADS_MANAGER_LOADED: 'loaded' } },
     AdErrorEvent: { Type: { AD_ERROR: 'adError' } },
-    AdEvent: { Type: { CONTENT_PAUSE_REQUESTED: 'pause', CONTENT_RESUME_REQUESTED: 'resume', ALL_ADS_COMPLETED: 'allDone' } },
+    AdEvent: { Type: { CONTENT_PAUSE_REQUESTED: 'pause', CONTENT_RESUME_REQUESTED: 'resume', ALL_ADS_COMPLETED: 'allDone',
+      AD_BREAK_FETCH_ERROR: 'fetchError', LOG: 'log' } },
     ViewMode: { NORMAL: 'normal' },
   } };
   made.load = (loader = made.loaders.at(-1)) => {
@@ -479,10 +483,10 @@ test('a loader error keeps the content going and destroy during a break releases
   assert.equal(manager.destroyed, true);
 });
 
-function fakeGpt({ hostReady = false, hostInitialLoadOff = false, queued = false } = {}) {
+function fakeGpt({ hostReady = false, hostInitialLoadOff = false, queued = false, legacy = false } = {}) {
   const service = Object.assign(eventTarget(), {
     initialLoadDisabled: hostInitialLoadOff, refreshed: [], values: {}, fetches: 0,
-    disableInitialLoad() { this.initialLoadDisabled = true; made.calls.push('disableInitialLoad'); },
+    disableInitialLoad() { this.initialLoadDisabled = true; made.calls.push('legacy:disableInitialLoad'); },
     isInitialLoadDisabled() { return this.initialLoadDisabled; },
     set(key, value) { this.values[key] = value; },
     refresh(slots) { this.refreshed.push(...slots); this.fetches++; },
@@ -497,7 +501,8 @@ function fakeGpt({ hostReady = false, hostInitialLoadOff = false, queued = false
     enableServices() { made.enabled++; made.calls.push('enableServices'); },
     defineSlot(unit, size, id) {
       const slot = { unit, size, id, targeting: {}, services: [], addService(s) { this.services.push(s); return this; },
-        setTargeting(key, value) { this.targeting[key] = value; return this; } };
+        setTargeting(key, value) { made.calls.push('legacy:setTargeting'); this.targeting[key] = value; return this; },
+        ...(legacy ? {} : { setConfig(config) { Object.assign(this.targeting, config.targeting); } }) };
       made.slots.push(slot);
       return slot;
     },
@@ -506,6 +511,14 @@ function fakeGpt({ hostReady = false, hostInitialLoadOff = false, queued = false
       if ((hostReady || made.enabled) && !service.initialLoadDisabled) service.fetches++;
     },
     destroySlots(slots) { made.destroyed.push(...slots); return true; },
+    ...(legacy ? {} : { setConfig(config) {
+      if (config.disableInitialLoad) { service.initialLoadDisabled = true; made.calls.push('setConfig:disableInitialLoad'); }
+      // The current API carries the page URL here; the deprecated `service.set` is recorded separately.
+      if (config.adsenseAttributes?.page_url) { service.values.page_url = config.adsenseAttributes.page_url; made.calls.push('setConfig:page_url'); }
+    }, getConfig(key) {
+      // Like GPT: an object with the requested key. A host that enabled services elsewhere may have set it too.
+      return key === 'disableInitialLoad' ? { disableInitialLoad: service.initialLoadDisabled === true } : {};
+    } }),
   };
   made.render = (isEmpty = false, slot = made.slots.at(-1)) => service.fire('slotRenderEnded', { slot, isEmpty });
   return made;
@@ -524,7 +537,7 @@ function overlayRig({ formats = ['overlay_300x250'], windows, stage = makeStage(
   const gpt = fakeGpt(gptOptions);
   const made = linear ? fakeIma() : null;
   const video = new EventTarget();
-  Object.assign(video, { currentTime: start, pause() {}, play() { return Promise.resolve(); } });
+  Object.assign(video, { currentTime: start, paused: true, pause() {}, play() { return Promise.resolve(); } });
   const events = [], scripts = [], added = [];
   const plan = makePlan({ formats, windows, cuts: linear ? undefined : [] });
   const ads = attachAds({ session: { addCue(cue) { added.push(cue); return true; }, removeCue() {}, setLinearAd() {} }, video, plan, stage, linear,
@@ -532,6 +545,7 @@ function overlayRig({ formats = ['overlay_300x250'], windows, stage = makeStage(
     fetchImpl: async (url) => ({ ok: true, text: async () => answer(new URLSearchParams(new URL(url).searchParams.get('cust_params')).get('il_format')) }) });
   const at = async (seconds) => {
     video.currentTime = seconds;
+    video.paused = false;
     video.dispatchEvent(new Event('timeupdate'));
     await flush();
   };
@@ -665,7 +679,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 test('our own GPT setup disables initial load, sets page_url and fetches the slot once', async () => {
   const r = overlayRig();
   await r.at(42);
-  assert.deepEqual(r.gpt.calls, ['disableInitialLoad', 'enableServices']);
+  assert.deepEqual(r.gpt.calls, ['setConfig:disableInitialLoad', 'setConfig:page_url', 'enableServices']);
   assert.equal(r.gpt.service.values.page_url, 'https://publisher.example/video');
   assert.equal(r.gpt.service.fetches, 1);
   assert.equal(r.gpt.service.refreshed.length, 1);
@@ -884,4 +898,90 @@ test('loadPlan sends a credential-less GET that does not follow redirects', asyn
   assert.equal(seen.init.credentials, 'omit');
   assert.equal(seen.init.redirect, 'error');
   assert.equal(seen.init.signal, signal);
+});
+
+test('GPT uses setConfig when it has it and the old calls only without it', async () => {
+  const r = overlayRig();
+  await r.at(42);
+  assert.deepEqual(r.gpt.calls, ['setConfig:disableInitialLoad', 'setConfig:page_url', 'enableServices']);
+  assert.deepEqual(r.gpt.slots[0].targeting, { ilayers_context: 'cocina', il_format: 'overlay_300x250' });
+  assert.equal(r.gpt.service.fetches, 1);
+  r.ads.destroy();
+  const old = overlayRig({ gptOptions: { legacy: true } });
+  await old.at(42);
+  assert.deepEqual(old.gpt.calls, ['legacy:disableInitialLoad', 'enableServices', 'legacy:setTargeting', 'legacy:setTargeting']);
+  assert.deepEqual(old.gpt.slots[0].targeting, { ilayers_context: 'cocina', il_format: 'overlay_300x250' });
+  assert.equal(old.gpt.service.fetches, 1);
+  old.ads.destroy();
+  const host = overlayRig({ gptOptions: { hostReady: true } });
+  await host.at(42);
+  assert.deepEqual(host.gpt.calls, []);
+  assert.equal(host.gpt.service.fetches, 1);
+  host.ads.destroy();
+});
+
+test('nothing is requested before the viewer starts playback', async () => {
+  const h = harness({ start: 40 });
+  await flush();
+  h.video.dispatchEvent(new Event('timeupdate'));
+  await flush();
+  assert.equal(h.requests.length, 0);
+  h.video.paused = false;
+  h.video.dispatchEvent(new Event('playing'));
+  await flush();
+  assert.equal(h.requests.length, 1);
+  h.ads.destroy();
+  const r = overlayRig({ start: 40 });
+  await flush();
+  assert.deepEqual(r.scripts, []);
+  r.ads.destroy();
+});
+
+test('after playback has started, seeking while paused prepares the next window', async () => {
+  const h = harness();
+  await h.at(5, 'playing');
+  h.video.paused = true;
+  h.video.currentTime = 40;
+  h.video.dispatchEvent(new Event('seeked'));
+  await flush();
+  assert.equal(h.requests.length, 1);
+  h.ads.destroy();
+});
+
+test('a break IMA cannot fetch reports break_error once, with its cut', async () => {
+  const made = fakeIma();
+  const { ads, video, linearStates, events } = breakRig({ linear: 'ima' });
+  await flush();
+  ads.start();
+  const manager = made.load();
+  manager.fire('fetchError', {});
+  manager.fire('fetchError', {});
+  manager.fire('log', { getAdData: () => ({ adError: { getMessage: () => 'empty' } }) });
+  assert.deepEqual(events.map((e) => [e.type, e.cut]), [['break_error', 'pre']]);
+  manager.fire('log', { getAdData: () => ({ message: 'just a log' }) });
+  assert.equal(events.length, 1);
+  video.currentTime = 59.2;
+  video.dispatchEvent(new Event('playing'));
+  manager.fire('pause', {});
+  manager.fire('log', { getAdData: () => ({ adError: {} }) });
+  manager.fire('fetchError', {});
+  assert.deepEqual(linearStates, [true]);
+  assert.deepEqual(events.map((e) => e.type), ['break_error', 'break_start']);
+  manager.fire('resume', {});
+  video.currentTime = 120;
+  ads.destroy();
+});
+
+test('a mid-roll fetch failure after playback names the mid-roll', async () => {
+  const made = fakeIma();
+  const { ads, video, events } = breakRig({ linear: 'ima' });
+  await flush();
+  ads.start();
+  const manager = made.load();
+  video.paused = false;
+  video.dispatchEvent(new Event('playing'));
+  video.currentTime = 59.1;
+  manager.fire('log', { getAdData: () => ({ adError: {} }) });
+  assert.deepEqual(events.map((e) => [e.type, e.cut]), [['break_error', 'mid-1']]);
+  ads.destroy();
 });
