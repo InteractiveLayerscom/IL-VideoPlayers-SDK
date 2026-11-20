@@ -109,7 +109,36 @@ Qué hace:
 - Acepta sólo un anuncio InLine con una imagen PNG o JPEG estática por HTTPS cuya proporción coincida con el formato (20:3 o 16:9). Rechaza wrappers, anuncios lineales y recursos HTML o iframe.
 - Envía las URL de `Impression` y `creativeView` una vez cuando el gráfico es visible y las de seguimiento de clic al hacer clic. Quita el cue al terminar la ventana o con `destroy()`.
 
-Todavía no hace cortes de video (preroll y midroll) ni el overlay de display de 300×250; el plan puede traerlos y el módulo los ignora.
+- Acepta un plan con cortes y sin `scenes` (sólo cortes de video).
+
+### Cortes de video
+
+`ads.cuts` es la lista de cortes del plan en orden, `[{ id, at, position, tagUrl }]`: sólo tags de `https://pubads.g.doubleclick.net/gampad/ads`, con `url` y `description_url` puestos a la URL de la página y sin `correlator`. `ads.vmap()` devuelve un VMAP 1.0 con un `AdBreak` lineal por corte (`timeOffset="start"` para el segundo 0) y un `correlator` nuevo en cada llamada. Sin cortes, o con un plan inválido, `cuts` es `[]` y `vmap()` es un VMAP vacío válido.
+
+Hay tres maneras de usarlos:
+
+1. **Tu propio reproductor de anuncios**: programá los cortes con `ads.cuts` y pedí cada `tagUrl` (agregando tu `correlator`).
+2. **Tu propio IMA**: pasá `ads.vmap()` como `adsResponse` de tu `AdsRequest`.
+3. **El reproductor del módulo**: con `linear: 'ima'` y un `adContainer` (el elemento sobre el video donde IMA dibuja), el módulo carga `ima3.js` una sola vez, pide el VMAP y deja que IMA programe los cortes. Llamá a `ads.start()` dentro del gesto de reproducción del espectador. Durante un corte pausa el video y llama `session.setLinearAd(true)`; al terminar, o ante un error o un corte vacío, vuelve a `false` y reanuda el contenido. `onEvent({ type, cut })` recibe `break_start`, `break_end` y `break_error`.
+
+```js
+const ads = attachAds({ session, video, plan, linear: 'ima', adContainer });
+playButton.addEventListener('click', () => { ads.start(); video.play(); });
+```
+
+Llamá a `attachAds` antes del gesto de reproducción del espectador, para que `start()` pueda inicializar IMA dentro de ese gesto. Si IMA llega cuando el video ya pasó su primer segundo, se salta el preroll (los midrolls se mantienen); si `ima3.js` no cargó 8 segundos después de `start()`, el módulo renuncia a IMA en esa reproducción (`break_error`) y el contenido sigue. Un corte que no termina en 120 segundos se trata como error y el contenido se reanuda.
+
+Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`. Mientras tu reproductor de anuncios pasa un corte, llamá a `ads.setBreakActive(true)` (y `false` al terminar): el overlay se oculta y no empieza ninguna solicitud de gráficos, igual que durante un corte de IMA.
+
+### Overlay de display de 300×250
+
+Cuando `plan.scenes.formats` incluye `overlay_300x250` y el plan trae `scenes.overlay.ad_unit` (una ruta de GAM que empieza con `/` y el código numérico de la red), el overlay entra en la misma rotación y pacing que el súper y la L. **Necesita `stage`**: el módulo crea dentro un contenedor de 300×250 sobre el video, a la derecha y por encima de los controles (12 px del borde derecho, 58 px del inferior). Sin `stage`, o con uno menor de 640×360, no se sirve.
+
+```js
+const ads = attachAds({ session, video, plan, stage });
+```
+
+Carga `gpt.js` una sola vez (sólo en este caso) y hace todas las llamadas a GPT por `googletag.cmd`. Si la página todavía no activó GPT, el módulo usa `disableInitialLoad`, fija `page_url` y activa los servicios; si la página ya lo había activado (`googletag.pubadsReady`), no toca esa configuración global. Define un slot de 300×250 con la segmentación de la ventana más `il_format=overlay_300x250` y lo pide una sola vez unos 4 segundos antes de la ventana. Muestra el contenedor sólo cuando `slotRenderEnded` indica que no está vacío y sólo durante la parte utilizable de la ventana; un slot vacío cuenta como sin relleno. Al terminar la ventana, o con `destroy()`, lo oculta y destruye el slot. Nunca se ve durante un corte de video (de `linear: 'ima'` o señalado con `setBreakActive(true)`). El tamaño de `stage` se mide cuando toca pedir la ventana. `onEvent` recibe `request`, `fill`, `no_fill`, `error` e `impression` (`impressionViewable` de GPT) con `format: 'overlay_300x250'`. Mientras el overlay ocupa su ventana no se pide otro formato.
 
 ## Samsung AVPlay
 

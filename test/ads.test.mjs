@@ -300,3 +300,537 @@ test('destroy aborts a pending request and no cue is added', async () => {
   await flush();
   assert.equal(added.length, 0);
 });
+
+const MID = TAG + '&vpos=midroll';
+const breakPlan = (extra = {}) => makePlan({ cuts: [
+  { id: 'pre', at: 0, position: 'preroll', tag_url: TAG, contextual: false },
+  { id: 'mid-1', at: 59.0, position: 'midroll', tag_url: MID, contextual: true },
+  { id: 'bad', at: 90, position: 'midroll', tag_url: 'https://evil.example/gampad/ads?iu=/1' }], ...extra });
+
+function eventTarget() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) ?? []), fn]); },
+    removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) ?? []).filter((f) => f !== fn)); },
+    fire(type, event = {}) { for (const fn of listeners.get(type) ?? []) fn(event); },
+  };
+}
+
+function fakeIma() {
+  const made = { loaders: [], managers: [], displays: [], requests: [] };
+  globalThis.google = { ima: {
+    AdDisplayContainer: class { constructor(el, video) { Object.assign(this, { el, video, initialized: 0 }); made.displays.push(this); }
+      initialize() { this.initialized++; } destroy() { this.destroyed = true; } },
+    AdsLoader: class { constructor(display) { Object.assign(this, eventTarget(), { display }); made.loaders.push(this); }
+      requestAds(request) { made.requests.push(request); } contentComplete() { this.completed = true; } destroy() { this.destroyed = true; } },
+    AdsRequest: class {},
+    AdsManagerLoadedEvent: { Type: { ADS_MANAGER_LOADED: 'loaded' } },
+    AdErrorEvent: { Type: { AD_ERROR: 'adError' } },
+    AdEvent: { Type: { CONTENT_PAUSE_REQUESTED: 'pause', CONTENT_RESUME_REQUESTED: 'resume', ALL_ADS_COMPLETED: 'allDone' } },
+    ViewMode: { NORMAL: 'normal' },
+  } };
+  made.load = (loader = made.loaders.at(-1)) => {
+    const manager = Object.assign(eventTarget(), { init() { this.inited = true; }, start() { this.started = true; }, destroy() { this.destroyed = true; },
+      resize(w, h) { this.sizes = [...(this.sizes ?? []), [w, h]]; } });
+    made.managers.push(manager);
+    loader.fire('loaded', { getAdsManager: () => manager });
+    return manager;
+  };
+  return made;
+}
+
+function breakRig({ plan = breakPlan(), start = 0, ...rest } = {}) {
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: start, paused: true, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } });
+  const linearStates = [], events = [], scripts = [];
+  const session = { addCue() { return true; }, removeCue() {}, setLinearAd(value) { linearStates.push(value); } };
+  const ads = attachAds({ session, video, plan, adContainer: {}, fetchImpl: async () => ({ ok: true, text: async () => '<VAST version="3.0"/>' }),
+    loadScript: async (src) => { scripts.push(src); }, onEvent: (e) => events.push(e), ...rest });
+  return { ads, video, linearStates, events, scripts };
+}
+
+const parseXml = (xml) => new globalThis.DOMParser().parseFromString(xml, 'application/xml');
+
+test('cuts list GAM breaks in order with the page URL; other tags are dropped', () => {
+  const { ads } = breakRig();
+  assert.deepEqual(ads.cuts.map(({ id, at, position }) => [id, at, position]), [['pre', 0, 'preroll'], ['mid-1', 59, 'midroll']]);
+  const tag = new URL(ads.cuts[1].tagUrl);
+  assert.equal(tag.searchParams.get('vpos'), 'midroll');
+  assert.equal(tag.searchParams.get('url'), 'https://publisher.example/video');
+  assert.equal(tag.searchParams.get('description_url'), 'https://publisher.example/video');
+  assert.equal(tag.searchParams.get('correlator'), null);
+  ads.destroy();
+});
+
+test('vmap() has one linear AdBreak per cut with a CDATA tag and a fresh correlator', () => {
+  const { ads } = breakRig();
+  const xml = ads.vmap();
+  const doc = parseXml(xml);
+  assert.equal(doc.getElementsByTagName('parsererror').length, 0);
+  assert.equal(doc.documentElement.getAttribute('version'), '1.0');
+  const breaks = Array.from(doc.getElementsByTagName('vmap:AdBreak'));
+  assert.deepEqual(breaks.map((b) => [b.getAttribute('timeOffset'), b.getAttribute('breakType'), b.getAttribute('breakId')]),
+    [['start', 'linear', 'pre'], ['00:00:59.000', 'linear', 'mid-1']]);
+  const uri = breaks[1].getElementsByTagName('vmap:AdTagURI')[0];
+  assert.equal(uri.getAttribute('templateType'), 'vast3');
+  assert.match(xml, /<vmap:AdTagURI templateType="vast3"><!\[CDATA\[https:\/\/pubads/);
+  const tag = new URL(uri.textContent);
+  assert.equal(tag.searchParams.get('vpos'), 'midroll');
+  assert.equal(tag.searchParams.get('url'), 'https://publisher.example/video');
+  assert.match(tag.searchParams.get('correlator'), /^\d{13,}$/);
+  const again = new URL(parseXml(ads.vmap()).getElementsByTagName('vmap:AdTagURI')[1].textContent);
+  assert.notEqual(again.searchParams.get('correlator'), tag.searchParams.get('correlator'));
+  ads.destroy();
+});
+
+test('an invalid plan or no cuts gives an empty VMAP; a plan with only cuts is accepted', () => {
+  for (const plan of [null, makePlan({ cuts: [] })]) {
+    const { ads } = breakRig({ plan });
+    assert.deepEqual(ads.cuts, []);
+    const doc = parseXml(ads.vmap());
+    assert.equal(doc.getElementsByTagName('parsererror').length, 0);
+    assert.equal(doc.documentElement.localName, 'VMAP');
+    assert.equal(doc.getElementsByTagName('vmap:AdBreak').length, 0);
+    ads.setBreaks([10]);
+    ads.start();
+    ads.destroy();
+  }
+  const { scenes, ...cutsOnly } = breakPlan();
+  const { ads } = breakRig({ plan: cutsOnly });
+  assert.equal(ads.cuts.length, 2);
+  ads.destroy();
+});
+
+test('setBreaks replaces plan cuts for the clearance of scene graphics', async () => {
+  const plan = makePlan({ cuts: [], pacing: { cut_clearance_seconds: 3 }, windows: [{ id: 'w', start_ms: 10000, end_ms: 19000 }] });
+  const h = harness({ plan });
+  h.ads.setBreaks([20]);
+  await h.at(9);
+  assert.equal(h.added[0].cue.end, 17000);
+  h.ads.destroy();
+  const cleared = harness({ plan: makePlan({ cuts: [{ id: 'm', at: 20, tag_url: TAG }], pacing: { cut_clearance_seconds: 3 },
+    windows: [{ id: 'w', start_ms: 10000, end_ms: 19000 }] }) });
+  cleared.ads.setBreaks([]);
+  await cleared.at(9);
+  assert.equal(cleared.added[0].cue.end, 19000);
+  cleared.ads.destroy();
+});
+
+test('nothing of IMA is loaded without linear: ima, and start() does nothing', async () => {
+  const made = fakeIma();
+  const { ads, scripts } = breakRig();
+  ads.start();
+  await flush();
+  assert.deepEqual(scripts, []);
+  assert.equal(made.displays.length, 0);
+  ads.destroy();
+});
+
+test('linear: ima requests the VMAP with the page URL and plays breaks over the content', async () => {
+  const made = fakeIma();
+  const { ads, video, linearStates, events, scripts } = breakRig({ linear: 'ima' });
+  await flush();
+  assert.deepEqual(scripts, ['https://imasdk.googleapis.com/js/sdkloader/ima3.js']);
+  assert.equal(made.requests.length, 1);
+  assert.equal(made.requests[0].adsResponse.match(/<vmap:AdBreak /g).length, 2);
+  assert.equal(made.requests[0].pageUrl, 'https://publisher.example/video');
+  ads.start();
+  ads.start();
+  assert.equal(made.displays[0].initialized, 1);
+  const manager = made.load();
+  assert.equal(manager.started, true);
+  video.paused = false;
+  manager.fire('pause', { getAd: () => ({ getAdPodInfo: () => ({ getTimeOffset: () => 0 }) }) });
+  assert.equal(video.paused, true);
+  assert.deepEqual(linearStates, [true]);
+  manager.fire('resume', {});
+  assert.deepEqual(linearStates, [true, false]);
+  assert.equal(video.paused, false);
+  video.currentTime = 59.2;
+  manager.fire('pause', {});
+  manager.fire('adError', { getError: () => 'boom' });
+  assert.deepEqual(linearStates, [true, false, true, false]);
+  assert.equal(video.paused, false);
+  assert.deepEqual(events.filter((e) => e.cut).map((e) => [e.type, e.cut]),
+    [['break_start', 'pre'], ['break_end', 'pre'], ['break_start', 'mid-1'], ['break_error', 'mid-1']]);
+  video.dispatchEvent(new Event('ended'));
+  assert.equal(made.loaders[0].completed, true);
+  ads.destroy();
+  assert.equal(manager.destroyed, true);
+  assert.equal(made.loaders[0].destroyed, true);
+});
+
+test('a loader error keeps the content going and destroy during a break releases it', async () => {
+  const made = fakeIma();
+  const first = breakRig({ linear: 'ima' });
+  await flush();
+  first.ads.start();
+  made.loaders[0].fire('adError', { getError: () => 'no ads' });
+  assert.equal(first.events.at(-1).type, 'break_error');
+  assert.deepEqual(first.linearStates, []);
+  first.ads.destroy();
+  const second = breakRig({ linear: 'ima' });
+  await flush();
+  second.ads.start();
+  const manager = made.load();
+  manager.fire('pause', {});
+  second.ads.destroy();
+  assert.deepEqual(second.linearStates, [true, false]);
+  assert.equal(manager.destroyed, true);
+});
+
+function fakeGpt({ hostReady = false, hostInitialLoadOff = false, queued = false } = {}) {
+  const service = Object.assign(eventTarget(), {
+    initialLoadDisabled: hostInitialLoadOff, refreshed: [], values: {}, fetches: 0,
+    disableInitialLoad() { this.initialLoadDisabled = true; made.calls.push('disableInitialLoad'); },
+    isInitialLoadDisabled() { return this.initialLoadDisabled; },
+    set(key, value) { this.values[key] = value; },
+    refresh(slots) { this.refreshed.push(...slots); this.fetches++; },
+  });
+  const made = { service, slots: [], destroyed: [], displayed: [], enabled: 0, calls: [] };
+  const queue = [];
+  made.arrive = () => { tag.cmd = { push: (fn) => fn() }; for (const fn of queue.splice(0)) fn(); };
+  const tag = globalThis.googletag = {
+    cmd: queued ? queue : { push: (fn) => fn() },
+    pubadsReady: hostReady,
+    pubads: () => service,
+    enableServices() { made.enabled++; made.calls.push('enableServices'); },
+    defineSlot(unit, size, id) {
+      const slot = { unit, size, id, targeting: {}, services: [], addService(s) { this.services.push(s); return this; },
+        setTargeting(key, value) { this.targeting[key] = value; return this; } };
+      made.slots.push(slot);
+      return slot;
+    },
+    display(id) {
+      made.displayed.push(id);
+      if ((hostReady || made.enabled) && !service.initialLoadDisabled) service.fetches++;
+    },
+    destroySlots(slots) { made.destroyed.push(...slots); return true; },
+  };
+  made.render = (isEmpty = false, slot = made.slots.at(-1)) => service.fire('slotRenderEnded', { slot, isEmpty });
+  return made;
+}
+
+function makeStage(width = 960, height = 540) {
+  const { document } = new JSDOM('<div id="stage"></div>').window;
+  const stage = document.getElementById('stage');
+  Object.defineProperty(stage, 'clientWidth', { value: width, configurable: true });
+  Object.defineProperty(stage, 'clientHeight', { value: height, configurable: true });
+  return stage;
+}
+
+function overlayRig({ formats = ['overlay_300x250'], windows, stage = makeStage(), linear, answer = (format) => inline(format), start = 0,
+  gptOptions, loadScript } = {}) {
+  const gpt = fakeGpt(gptOptions);
+  const made = linear ? fakeIma() : null;
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: start, pause() {}, play() { return Promise.resolve(); } });
+  const events = [], scripts = [], added = [];
+  const plan = makePlan({ formats, windows, cuts: linear ? undefined : [] });
+  const ads = attachAds({ session: { addCue(cue) { added.push(cue); return true; }, removeCue() {}, setLinearAd() {} }, video, plan, stage, linear,
+    adContainer: linear ? {} : undefined, loadScript: loadScript ?? (async (src) => { scripts.push(src); }), onEvent: (e) => events.push(e),
+    fetchImpl: async (url) => ({ ok: true, text: async () => answer(new URLSearchParams(new URL(url).searchParams.get('cust_params')).get('il_format')) }) });
+  const at = async (seconds) => {
+    video.currentTime = seconds;
+    video.dispatchEvent(new Event('timeupdate'));
+    await flush();
+  };
+  const box = () => stage?.querySelector('[data-il-ads-overlay]');
+  return { ads, gpt, made, stage, events, scripts, added, at, box };
+}
+
+const GPT_URL = 'https://securepubads.g.doubleclick.net/tag/js/gpt.js';
+
+test('nothing of GPT is loaded without an overlay unit or the overlay format', async () => {
+  const gpt = fakeGpt();
+  for (const plan of [makePlan({ formats: ['super', 'overlay_300x250'], cuts: [] }), makePlan({ formats: ['super'], cuts: [] })]) {
+    if (plan.scenes.formats.length === 2) plan.scenes.overlay = { ad_unit: 'overlay', size: [300, 250] };
+    const scripts = [];
+    const video = new EventTarget();
+    video.currentTime = 42;
+    const ads = attachAds({ session: { addCue: () => true, removeCue() {} }, video, plan, stage: makeStage(), loadScript: async (src) => { scripts.push(src); },
+      fetchImpl: async () => ({ ok: true, text: async () => '<VAST version="3.0"/>' }) });
+    video.dispatchEvent(new Event('timeupdate'));
+    await flush();
+    assert.deepEqual(scripts, []);
+    ads.destroy();
+  }
+  assert.equal(gpt.slots.length, 0);
+});
+
+test('the overlay defines one 300x250 slot with window targeting, il_format and page_url', async () => {
+  const r = overlayRig();
+  await r.at(37.3);
+  assert.deepEqual(r.scripts, [GPT_URL]);
+  assert.equal(r.gpt.service.initialLoadDisabled, true);
+  assert.equal(r.gpt.slots.length, 1);
+  const [slot] = r.gpt.slots;
+  assert.equal(slot.unit, '/123/site/overlay');
+  assert.deepEqual(slot.size, [300, 250]);
+  assert.equal(slot.id, r.box().id);
+  assert.deepEqual(slot.targeting, { ilayers_context: 'cocina', il_format: 'overlay_300x250' });
+  assert.equal(r.gpt.service.values.page_url, 'https://publisher.example/video');
+  assert.deepEqual(r.gpt.service.refreshed, [slot]);
+  assert.deepEqual(r.events[0], { type: 'request', format: 'overlay_300x250', window: 'p17' });
+  const { style } = r.box();
+  assert.deepEqual([style.position, style.right, style.bottom, style.width, style.height], ['absolute', '12px', '58px', '300px', '250px']);
+  r.ads.destroy();
+});
+
+test('the overlay shows only after a non-empty render, during the window, and goes at its end', async () => {
+  const r = overlayRig();
+  await r.at(37.3);
+  assert.equal(r.box().style.display, 'none');
+  r.gpt.render(false);
+  await r.at(38);
+  assert.equal(r.box().style.display, 'none');
+  assert.equal(r.events.at(-1).type, 'fill');
+  await r.at(41.2);
+  assert.equal(r.box().style.display, 'block');
+  r.gpt.service.fire('impressionViewable', { slot: r.gpt.slots[0] });
+  assert.equal(r.events.at(-1).type, 'impression');
+  await r.at(52.9);
+  assert.equal(r.box().style.display, 'none');
+  assert.deepEqual(r.gpt.destroyed, [r.gpt.slots[0]]);
+  r.ads.destroy();
+});
+
+test('an empty slot is a no fill and destroy hides the overlay and destroys the slot', async () => {
+  const empty = overlayRig();
+  await empty.at(42);
+  empty.gpt.render(true);
+  await empty.at(43);
+  assert.equal(empty.events.at(-1).type, 'no_fill');
+  assert.equal(empty.box().style.display, 'none');
+  assert.deepEqual(empty.gpt.destroyed, [empty.gpt.slots[0]]);
+  empty.ads.destroy();
+  const r = overlayRig();
+  await r.at(42);
+  r.gpt.render(false);
+  await r.at(43);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.destroy();
+  assert.equal(r.box(), null);
+  assert.deepEqual(r.gpt.destroyed, [r.gpt.slots[0]]);
+});
+
+test('no overlay container on a missing or small stage', async () => {
+  for (const stage of [null, makeStage(639, 360), makeStage(640, 359)]) {
+    const r = overlayRig({ stage });
+    await r.at(42);
+    assert.deepEqual(r.scripts, []);
+    assert.equal(r.gpt.slots.length, 0);
+    if (stage) assert.equal(stage.children.length, 0);
+    r.ads.destroy();
+  }
+});
+
+test('the overlay joins the rotation with super and l_shape', async () => {
+  const windows = [{ id: 'a', start_ms: 10000, end_ms: 15000 }, { id: 'b', start_ms: 50000, end_ms: 55000 },
+    { id: 'c', start_ms: 90000, end_ms: 95000 }, { id: 'd', start_ms: 130000, end_ms: 135000 }];
+  const r = overlayRig({ windows, formats: ['super', 'overlay_300x250', 'l_shape'] });
+  for (const t of [10, 50, 90, 130]) {
+    await r.at(t);
+    if (r.gpt.slots.length && r.events.at(-1).type === 'request') r.gpt.render(false);
+    await r.at(t + 0.5);
+  }
+  assert.deepEqual(r.events.filter((e) => e.type === 'request').map((e) => e.format), ['super', 'overlay_300x250', 'l_shape', 'super']);
+  assert.deepEqual(r.added.map((c) => c.format), ['super', 'l', 'super']);
+  assert.equal(r.gpt.slots.length, 1);
+  r.ads.destroy();
+});
+
+test('the overlay hides when a video ad break starts', async () => {
+  const r = overlayRig({ linear: 'ima' });
+  await flush();
+  await r.at(42);
+  r.gpt.render(false);
+  await r.at(43);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.start();
+  const manager = r.made.load();
+  manager.fire('pause', {});
+  assert.equal(r.box().style.display, 'none');
+  await r.at(43.5);
+  assert.equal(r.box().style.display, 'none');
+  manager.fire('resume', {});
+  await r.at(44);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.destroy();
+});
+
+const ticks = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+
+test('our own GPT setup disables initial load, sets page_url and fetches the slot once', async () => {
+  const r = overlayRig();
+  await r.at(42);
+  assert.deepEqual(r.gpt.calls, ['disableInitialLoad', 'enableServices']);
+  assert.equal(r.gpt.service.values.page_url, 'https://publisher.example/video');
+  assert.equal(r.gpt.service.fetches, 1);
+  assert.equal(r.gpt.service.refreshed.length, 1);
+  r.ads.destroy();
+});
+
+test('a page that already enabled GPT keeps its setup and the slot is fetched once', async () => {
+  for (const hostInitialLoadOff of [false, true]) {
+    const r = overlayRig({ gptOptions: { hostReady: true, hostInitialLoadOff } });
+    await r.at(42);
+    assert.deepEqual(r.gpt.calls, []);
+    assert.equal(r.gpt.service.values.page_url, undefined);
+    assert.equal(r.gpt.displayed.length, 1);
+    assert.equal(r.gpt.service.fetches, 1);
+    assert.equal(r.gpt.service.refreshed.length, hostInitialLoadOff ? 1 : 0);
+    assert.deepEqual(r.gpt.slots[0].targeting, { ilayers_context: 'cocina', il_format: 'overlay_300x250' });
+    r.ads.destroy();
+  }
+});
+
+test('destroy while gpt.js is loading leaves nothing behind when it arrives', async () => {
+  const r = overlayRig({ gptOptions: { queued: true } });
+  await r.at(42);
+  assert.equal(r.events.at(-1).type, 'request');
+  r.ads.destroy();
+  r.gpt.arrive();
+  await ticks();
+  assert.equal(r.gpt.slots.length, 0);
+  assert.equal(r.gpt.enabled, 0);
+  assert.equal(r.stage.children.length, 0);
+  assert.equal(r.events.at(-1).type, 'request');
+});
+
+test('a stage laid out after attach gets its overlay', async () => {
+  const stage = makeStage(0, 0);
+  let size = [0, 0];
+  Object.defineProperty(stage, 'clientWidth', { get: () => size[0] });
+  Object.defineProperty(stage, 'clientHeight', { get: () => size[1] });
+  const r = overlayRig({ stage });
+  size = [960, 540];
+  await r.at(42);
+  assert.equal(r.gpt.slots.length, 1);
+  r.ads.destroy();
+});
+
+test('setBreakActive hides the overlay and holds scene requests', async () => {
+  const h = harness();
+  h.ads.setBreakActive(true);
+  await h.at(42);
+  assert.equal(h.requests.length, 0);
+  h.ads.setBreakActive(false);
+  await flush();
+  assert.equal(h.requests.length, 1);
+  h.ads.destroy();
+  const r = overlayRig();
+  await r.at(42);
+  r.gpt.render(false);
+  await r.at(43);
+  r.ads.setBreakActive(true);
+  assert.equal(r.box().style.display, 'none');
+  await r.at(44);
+  assert.equal(r.box().style.display, 'none');
+  r.ads.setBreakActive(false);
+  assert.equal(r.box().style.display, 'block');
+  r.ads.destroy();
+});
+
+test('the content ended event is ignored while a break plays in the same video', async () => {
+  const made = fakeIma();
+  const { ads, video } = breakRig({ linear: 'ima' });
+  await flush();
+  ads.start();
+  const manager = made.load();
+  manager.fire('pause', {});
+  video.dispatchEvent(new Event('ended'));
+  assert.equal(made.loaders[0].completed, undefined);
+  manager.fire('resume', {});
+  video.dispatchEvent(new Event('ended'));
+  assert.equal(made.loaders[0].completed, true);
+  ads.destroy();
+});
+
+test('an ad error on the manager resumes the content', async () => {
+  const made = fakeIma();
+  const { ads, video, linearStates, events } = breakRig({ linear: 'ima' });
+  await flush();
+  ads.start();
+  const manager = made.load();
+  manager.fire('pause', {});
+  assert.equal(video.paused, true);
+  manager.fire('adError', {});
+  assert.equal(video.paused, false);
+  assert.deepEqual(linearStates, [true, false]);
+  assert.deepEqual(events.map((e) => e.type), ['break_start', 'break_error']);
+  ads.destroy();
+});
+
+test('IMA joining late skips the pre-roll but keeps the mid-roll', async () => {
+  const made = fakeIma();
+  const { ads } = breakRig({ linear: 'ima', start: 30 });
+  await flush();
+  const xml = made.requests[0].adsResponse;
+  assert.equal(xml.match(/<vmap:AdBreak /g).length, 1);
+  assert.doesNotMatch(xml, /timeOffset="start"/);
+  ads.destroy();
+});
+
+test('IMA not loaded 8 seconds after start() is given up; destroy while loading leaves nothing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const made = fakeIma();
+  const late = deferred();
+  const { ads, events, linearStates } = breakRig({ linear: 'ima', loadScript: () => late.promise });
+  ads.start();
+  t.mock.timers.tick(7999);
+  assert.deepEqual(events, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(events.map((e) => e.type), ['break_error']);
+  late.resolve();
+  await ticks();
+  assert.equal(made.displays.length, 0);
+  assert.deepEqual(linearStates, []);
+  ads.destroy();
+  const pending = deferred();
+  const gone = breakRig({ linear: 'ima', loadScript: () => pending.promise });
+  gone.ads.destroy();
+  pending.resolve();
+  await ticks();
+  assert.equal(made.displays.length, 0);
+  assert.equal(made.loaders.length, 0);
+});
+
+test('a break that never ends is released after 120 seconds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const made = fakeIma();
+  const { ads, video, linearStates, events } = breakRig({ linear: 'ima' });
+  await ticks();
+  ads.start();
+  const manager = made.load();
+  manager.fire('pause', {});
+  t.mock.timers.tick(119999);
+  assert.deepEqual(linearStates, [true]);
+  t.mock.timers.tick(1);
+  assert.deepEqual(linearStates, [true, false]);
+  assert.equal(video.paused, false);
+  assert.equal(events.at(-1).type, 'break_error');
+  ads.destroy();
+});
+
+test('ALL_ADS_COMPLETED destroys the manager; resizes reach it until destroy', async () => {
+  const observers = [];
+  globalThis.ResizeObserver = class { constructor(fn) { this.fn = fn; observers.push(this); } observe(el) { this.el = el; } disconnect() { this.off = true; } };
+  try {
+    const made = fakeIma();
+    const { ads, video } = breakRig({ linear: 'ima' });
+    await flush();
+    ads.start();
+    const manager = made.load();
+    assert.equal(observers[0].el, video);
+    observers[0].fn();
+    assert.deepEqual(manager.sizes, [[640, 360]]);
+    manager.fire('allDone', {});
+    assert.equal(manager.destroyed, true);
+    ads.destroy();
+    assert.equal(observers[0].off, true);
+  } finally {
+    delete globalThis.ResizeObserver;
+  }
+});
