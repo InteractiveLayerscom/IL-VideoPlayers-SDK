@@ -109,7 +109,26 @@ Qué hace:
 - Acepta sólo un anuncio InLine con una imagen PNG o JPEG estática por HTTPS cuya proporción coincida con el formato (20:3 o 16:9). Rechaza wrappers, anuncios lineales y recursos HTML o iframe.
 - Envía las URL de `Impression` y `creativeView` una vez cuando el gráfico es visible y las de seguimiento de clic al hacer clic. Quita el cue al terminar la ventana o con `destroy()`.
 
-Todavía no hace cortes de video (preroll y midroll) ni el overlay de display de 300×250; el plan puede traerlos y el módulo los ignora.
+- Acepta un plan con cortes y sin `scenes` (sólo cortes de video).
+
+### Cortes de video
+
+`ads.cuts` es la lista de cortes del plan en orden, `[{ id, at, position, tagUrl }]`: sólo tags de `https://pubads.g.doubleclick.net/gampad/ads`, con `url` y `description_url` puestos a la URL de la página y sin `correlator`. `ads.vmap()` devuelve un VMAP 1.0 con un `AdBreak` lineal por corte (`timeOffset="start"` para el segundo 0) y un `correlator` nuevo en cada llamada. Sin cortes, o con un plan inválido, `cuts` es `[]` y `vmap()` es un VMAP vacío válido.
+
+Hay tres maneras de usarlos:
+
+1. **Tu propio reproductor de anuncios**: programá los cortes con `ads.cuts` y pedí cada `tagUrl` (agregando tu `correlator`).
+2. **Tu propio IMA**: pasá `ads.vmap()` como `adsResponse` de tu `AdsRequest`.
+3. **El reproductor del módulo**: con `linear: 'ima'` y un `adContainer` (el elemento sobre el video donde IMA dibuja), el módulo carga `ima3.js` una sola vez, pide el VMAP y deja que IMA programe los cortes. Llamá a `ads.start()` dentro del gesto de reproducción del espectador. Durante un corte pausa el video y llama `session.setLinearAd(true)`; al terminar, o ante un error o un corte vacío, vuelve a `false` y reanuda el contenido. `onEvent({ type, cut })` recibe `break_start`, `break_end` y `break_error`.
+
+```js
+const ads = attachAds({ session, video, plan, linear: 'ima', adContainer });
+playButton.addEventListener('click', () => { ads.start(); video.play(); });
+```
+
+Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`.
+
+Todavía no hace el overlay de display de 300×250; el plan puede traerlo y el módulo lo ignora.
 
 ## Samsung AVPlay
 

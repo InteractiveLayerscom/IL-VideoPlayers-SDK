@@ -300,3 +300,180 @@ test('destroy aborts a pending request and no cue is added', async () => {
   await flush();
   assert.equal(added.length, 0);
 });
+
+const MID = TAG + '&vpos=midroll';
+const breakPlan = (extra = {}) => makePlan({ cuts: [
+  { id: 'pre', at: 0, position: 'preroll', tag_url: TAG, contextual: false },
+  { id: 'mid-1', at: 59.0, position: 'midroll', tag_url: MID, contextual: true },
+  { id: 'bad', at: 90, position: 'midroll', tag_url: 'https://evil.example/gampad/ads?iu=/1' }], ...extra });
+
+function eventTarget() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) ?? []), fn]); },
+    removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) ?? []).filter((f) => f !== fn)); },
+    fire(type, event = {}) { for (const fn of listeners.get(type) ?? []) fn(event); },
+  };
+}
+
+function fakeIma() {
+  const made = { loaders: [], managers: [], displays: [], requests: [] };
+  globalThis.google = { ima: {
+    AdDisplayContainer: class { constructor(el, video) { Object.assign(this, { el, video, initialized: 0 }); made.displays.push(this); }
+      initialize() { this.initialized++; } destroy() { this.destroyed = true; } },
+    AdsLoader: class { constructor(display) { Object.assign(this, eventTarget(), { display }); made.loaders.push(this); }
+      requestAds(request) { made.requests.push(request); } contentComplete() { this.completed = true; } destroy() { this.destroyed = true; } },
+    AdsRequest: class {},
+    AdsManagerLoadedEvent: { Type: { ADS_MANAGER_LOADED: 'loaded' } },
+    AdErrorEvent: { Type: { AD_ERROR: 'adError' } },
+    AdEvent: { Type: { CONTENT_PAUSE_REQUESTED: 'pause', CONTENT_RESUME_REQUESTED: 'resume' } },
+    ViewMode: { NORMAL: 'normal' },
+  } };
+  made.load = (loader = made.loaders.at(-1)) => {
+    const manager = Object.assign(eventTarget(), { init() { this.inited = true; }, start() { this.started = true; }, destroy() { this.destroyed = true; } });
+    made.managers.push(manager);
+    loader.fire('loaded', { getAdsManager: () => manager });
+    return manager;
+  };
+  return made;
+}
+
+function breakRig({ plan = breakPlan(), start = 0, ...rest } = {}) {
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: start, paused: true, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } });
+  const linearStates = [], events = [], scripts = [];
+  const session = { addCue() { return true; }, removeCue() {}, setLinearAd(value) { linearStates.push(value); } };
+  const ads = attachAds({ session, video, plan, adContainer: {}, fetchImpl: async () => ({ ok: true, text: async () => '<VAST version="3.0"/>' }),
+    loadScript: async (src) => { scripts.push(src); }, onEvent: (e) => events.push(e), ...rest });
+  return { ads, video, linearStates, events, scripts };
+}
+
+const parseXml = (xml) => new globalThis.DOMParser().parseFromString(xml, 'application/xml');
+
+test('cuts list GAM breaks in order with the page URL; other tags are dropped', () => {
+  const { ads } = breakRig();
+  assert.deepEqual(ads.cuts.map(({ id, at, position }) => [id, at, position]), [['pre', 0, 'preroll'], ['mid-1', 59, 'midroll']]);
+  const tag = new URL(ads.cuts[1].tagUrl);
+  assert.equal(tag.searchParams.get('vpos'), 'midroll');
+  assert.equal(tag.searchParams.get('url'), 'https://publisher.example/video');
+  assert.equal(tag.searchParams.get('description_url'), 'https://publisher.example/video');
+  assert.equal(tag.searchParams.get('correlator'), null);
+  ads.destroy();
+});
+
+test('vmap() has one linear AdBreak per cut with a CDATA tag and a fresh correlator', () => {
+  const { ads } = breakRig();
+  const xml = ads.vmap();
+  const doc = parseXml(xml);
+  assert.equal(doc.getElementsByTagName('parsererror').length, 0);
+  assert.equal(doc.documentElement.getAttribute('version'), '1.0');
+  const breaks = Array.from(doc.getElementsByTagName('vmap:AdBreak'));
+  assert.deepEqual(breaks.map((b) => [b.getAttribute('timeOffset'), b.getAttribute('breakType'), b.getAttribute('breakId')]),
+    [['start', 'linear', 'pre'], ['00:00:59.000', 'linear', 'mid-1']]);
+  const uri = breaks[1].getElementsByTagName('vmap:AdTagURI')[0];
+  assert.equal(uri.getAttribute('templateType'), 'vast3');
+  assert.match(xml, /<vmap:AdTagURI templateType="vast3"><!\[CDATA\[https:\/\/pubads/);
+  const tag = new URL(uri.textContent);
+  assert.equal(tag.searchParams.get('vpos'), 'midroll');
+  assert.equal(tag.searchParams.get('url'), 'https://publisher.example/video');
+  assert.match(tag.searchParams.get('correlator'), /^\d{13,}$/);
+  const again = new URL(parseXml(ads.vmap()).getElementsByTagName('vmap:AdTagURI')[1].textContent);
+  assert.notEqual(again.searchParams.get('correlator'), tag.searchParams.get('correlator'));
+  ads.destroy();
+});
+
+test('an invalid plan or no cuts gives an empty VMAP; a plan with only cuts is accepted', () => {
+  for (const plan of [null, makePlan({ cuts: [] })]) {
+    const { ads } = breakRig({ plan });
+    assert.deepEqual(ads.cuts, []);
+    const doc = parseXml(ads.vmap());
+    assert.equal(doc.getElementsByTagName('parsererror').length, 0);
+    assert.equal(doc.documentElement.localName, 'VMAP');
+    assert.equal(doc.getElementsByTagName('vmap:AdBreak').length, 0);
+    ads.setBreaks([10]);
+    ads.start();
+    ads.destroy();
+  }
+  const { scenes, ...cutsOnly } = breakPlan();
+  const { ads } = breakRig({ plan: cutsOnly });
+  assert.equal(ads.cuts.length, 2);
+  ads.destroy();
+});
+
+test('setBreaks replaces plan cuts for the clearance of scene graphics', async () => {
+  const plan = makePlan({ cuts: [], pacing: { cut_clearance_seconds: 3 }, windows: [{ id: 'w', start_ms: 10000, end_ms: 19000 }] });
+  const h = harness({ plan });
+  h.ads.setBreaks([20]);
+  await h.at(9);
+  assert.equal(h.added[0].cue.end, 17000);
+  h.ads.destroy();
+  const cleared = harness({ plan: makePlan({ cuts: [{ id: 'm', at: 20, tag_url: TAG }], pacing: { cut_clearance_seconds: 3 },
+    windows: [{ id: 'w', start_ms: 10000, end_ms: 19000 }] }) });
+  cleared.ads.setBreaks([]);
+  await cleared.at(9);
+  assert.equal(cleared.added[0].cue.end, 19000);
+  cleared.ads.destroy();
+});
+
+test('nothing of IMA is loaded without linear: ima, and start() does nothing', async () => {
+  const made = fakeIma();
+  const { ads, scripts } = breakRig();
+  ads.start();
+  await flush();
+  assert.deepEqual(scripts, []);
+  assert.equal(made.displays.length, 0);
+  ads.destroy();
+});
+
+test('linear: ima requests the VMAP with the page URL and plays breaks over the content', async () => {
+  const made = fakeIma();
+  const { ads, video, linearStates, events, scripts } = breakRig({ linear: 'ima' });
+  await flush();
+  assert.deepEqual(scripts, ['https://imasdk.googleapis.com/js/sdkloader/ima3.js']);
+  assert.equal(made.requests.length, 1);
+  assert.equal(made.requests[0].adsResponse.match(/<vmap:AdBreak /g).length, 2);
+  assert.equal(made.requests[0].pageUrl, 'https://publisher.example/video');
+  ads.start();
+  ads.start();
+  assert.equal(made.displays[0].initialized, 1);
+  const manager = made.load();
+  assert.equal(manager.started, true);
+  video.paused = false;
+  manager.fire('pause', { getAd: () => ({ getAdPodInfo: () => ({ getTimeOffset: () => 0 }) }) });
+  assert.equal(video.paused, true);
+  assert.deepEqual(linearStates, [true]);
+  manager.fire('resume', {});
+  assert.deepEqual(linearStates, [true, false]);
+  assert.equal(video.paused, false);
+  video.currentTime = 59.2;
+  manager.fire('pause', {});
+  manager.fire('adError', { getError: () => 'boom' });
+  assert.deepEqual(linearStates, [true, false, true, false]);
+  assert.equal(video.paused, false);
+  assert.deepEqual(events.filter((e) => e.cut).map((e) => [e.type, e.cut]),
+    [['break_start', 'pre'], ['break_end', 'pre'], ['break_start', 'mid-1'], ['break_error', 'mid-1']]);
+  video.dispatchEvent(new Event('ended'));
+  assert.equal(made.loaders[0].completed, true);
+  ads.destroy();
+  assert.equal(manager.destroyed, true);
+  assert.equal(made.loaders[0].destroyed, true);
+});
+
+test('a loader error keeps the content going and destroy during a break releases it', async () => {
+  const made = fakeIma();
+  const first = breakRig({ linear: 'ima' });
+  await flush();
+  first.ads.start();
+  made.loaders[0].fire('adError', { getError: () => 'no ads' });
+  assert.equal(first.events.at(-1).type, 'break_error');
+  assert.deepEqual(first.linearStates, []);
+  first.ads.destroy();
+  const second = breakRig({ linear: 'ima' });
+  await flush();
+  second.ads.start();
+  const manager = made.load();
+  manager.fire('pause', {});
+  second.ads.destroy();
+  assert.deepEqual(second.linearStates, [true, false]);
+  assert.equal(manager.destroyed, true);
+});

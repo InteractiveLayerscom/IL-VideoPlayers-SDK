@@ -9,21 +9,44 @@ const SDK_FORMATS = { super: 'super', l_shape: 'l' };
 const SHAPES = { super: 20 / 3, l_shape: 16 / 9 };
 const VIDEO_EVENTS = ['playing', 'pause', 'timeupdate', 'seeking', 'seeked', 'ended'];
 
-const inert = Object.freeze({ destroy() {} });
+const IMA_URL = 'https://imasdk.googleapis.com/js/sdkloader/ima3.js';
+
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, start() {}, destroy() {} });
 
 function reject(reason) {
   throw new Error(reason);
+}
+
+const scripts = new Map();
+// Google's scripts are loaded once per page, and only when a plan needs them.
+function loadScriptOnce(src) {
+  if (!scripts.has(src)) {
+    scripts.set(src, new Promise((resolve, fail) => {
+      const doc = globalThis.document;
+      if (!doc) return fail(new Error('script_unavailable'));
+      const script = doc.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => {
+        scripts.delete(src);
+        fail(new Error('script_blocked'));
+      };
+      doc.head.append(script);
+    }));
+  }
+  return scripts.get(src);
 }
 
 function readPlan(plan, now) {
   const scenes = plan?.scenes;
   const pacing = scenes?.pacing;
   const expires = typeof plan?.expires_at === 'string' ? Date.parse(plan.expires_at) : NaN;
+  if (plan?.version !== 1 || !(expires > now)) return null;
+  if (scenes == null) return Array.isArray(plan.cuts) ? plan : null;
   if (
-    plan?.version !== 1 ||
-    !(expires > now) ||
     !Array.isArray(scenes?.formats) ||
     !Array.isArray(scenes.windows) ||
     !isNumber(pacing?.min_seconds) ||
@@ -103,6 +126,43 @@ export function graphicTag(tagUrl, format, targeting, pageUrl) {
   return url.href;
 }
 
+// The plan's video breaks with a GAM tag, in time order, for any ad player.
+export function planCuts(cuts, pageUrl) {
+  return (Array.isArray(cuts) ? cuts : [])
+    .filter((cut) => typeof cut?.id === 'string' && isNumber(cut.at) && cut.at >= 0 && graphicTagAllowed(cut.tag_url))
+    .map((cut) => {
+      const url = new URL(cut.tag_url);
+      if (pageUrl) {
+        url.searchParams.set('url', pageUrl);
+        url.searchParams.set('description_url', pageUrl);
+      }
+      return { id: cut.id, at: cut.at, position: cut.position, tagUrl: url.href };
+    })
+    .sort((a, b) => a.at - b.at);
+}
+
+const pad = (value, size) => String(value).padStart(size, '0');
+function timeOffset(seconds) {
+  if (seconds === 0) return 'start';
+  const total = ms(seconds);
+  return `${pad(Math.floor(total / 3600000), 2)}:${pad(Math.floor(total / 60000) % 60, 2)}:` +
+    `${pad(Math.floor(total / 1000) % 60, 2)}.${pad(total % 1000, 3)}`;
+}
+const attribute = (value) => String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
+
+// VMAP 1.0 with one linear break per cut; every call carries a fresh correlator.
+export function buildVmap(cuts) {
+  const breaks = cuts.map((cut) => {
+    const url = new URL(cut.tagUrl);
+    url.searchParams.set('correlator', String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, '0'));
+    const tag = url.href.replaceAll(']]>', ']]]]><![CDATA[>');
+    return `<vmap:AdBreak timeOffset="${timeOffset(cut.at)}" breakType="linear" breakId="${attribute(cut.id)}">` +
+      `<vmap:AdSource id="${attribute(cut.id)}" allowMultipleAds="true" followRedirects="true">` +
+      `<vmap:AdTagURI templateType="vast3"><![CDATA[${tag}]]></vmap:AdTagURI></vmap:AdSource></vmap:AdBreak>`;
+  });
+  return `<?xml version="1.0" encoding="UTF-8"?><vmap:VMAP xmlns:vmap="http://www.iab.net/videosuite/vmap" version="1.0">${breaks.join('')}</vmap:VMAP>`;
+}
+
 function httpsUrl(value) {
   if (!value || /[\s[\]{}<>"]/.test(value)) reject('unsupported_vast_url');
   const url = new URL(value);
@@ -164,19 +224,26 @@ export function parseGraphicVast(xml, format, availableMs, Parser = globalThis.D
   };
 }
 
-export function attachAds({ session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent } = {}) {
+export function attachAds({
+  session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
+  stage, linear, adContainer, loadScript = loadScriptOnce,
+} = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
-  const formats = servableFormats(valid.scenes);
-  const windows = usableWindows(valid);
-  const { pacing } = valid.scenes;
-  const minMs = ms(pacing.min_seconds);
   const page = pageUrl ?? valid.page_url;
+  const cuts = Object.freeze(planCuts(valid.cuts, page).map(Object.freeze));
+  const scenes = valid.scenes;
+  const formats = scenes ? servableFormats(scenes) : [];
+  let windows = scenes ? usableWindows(valid) : [];
+  const pacing = scenes?.pacing;
+  const minMs = scenes ? ms(pacing.min_seconds) : 0;
   const attempted = new Set();
   const shown = [];
   const cues = new Map();
   let controller = null;
   let disposed = false;
+  let inBreak = false;
+  const ima = { sdk: null, display: null, loader: null, manager: null, started: false, running: false, cut: null };
 
   const emit = (type, format, window) => {
     try {
@@ -261,13 +328,146 @@ export function attachAds({ session, video, plan, pageUrl, fetchImpl = globalThi
     if (next) void request(next);
   }
 
+  const emitBreak = (type, cut) => {
+    try {
+      onEvent?.({ type, cut: cut?.id ?? null });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  };
+  const resume = () => {
+    try {
+      void Promise.resolve(video.play?.()).catch(() => {});
+    } catch {
+      // The host can still start playback itself.
+    }
+  };
+  // IMA reports the pod's time offset; fall back to the last cut before the playhead.
+  function cutOf(event) {
+    let offset;
+    try {
+      offset = event?.getAd?.()?.getAdPodInfo?.()?.getTimeOffset?.();
+    } catch {
+      offset = undefined;
+    }
+    if (isNumber(offset) && offset >= 0) {
+      const match = cuts.find((cut) => Math.abs(cut.at - offset) < 1);
+      if (match) return match;
+    }
+    const time = Number(video.currentTime) || 0;
+    return cuts.filter((cut) => cut.at <= time + 1).at(-1) ?? cuts[0] ?? null;
+  }
+  function endBreak() {
+    if (!inBreak) return false;
+    inBreak = false;
+    session.setLinearAd(false);
+    return true;
+  }
+  function startManager() {
+    if (!ima.manager || !ima.started || ima.running) return;
+    ima.running = true;
+    try {
+      ima.manager.init(video.clientWidth || 640, video.clientHeight || 360, ima.sdk.ViewMode.NORMAL);
+      ima.manager.start();
+    } catch {
+      emitBreak('break_error', null);
+      if (endBreak()) resume();
+    }
+  }
+  function adError() {
+    if (disposed) return;
+    emitBreak('break_error', ima.cut ?? cutOf(null));
+    ima.cut = null;
+    if (endBreak()) resume();
+  }
+  const contentEnded = () => ima.loader?.contentComplete?.();
+
+  async function setUpIma() {
+    try {
+      await loadScript(IMA_URL);
+      const sdk = globalThis.google?.ima;
+      if (disposed) return;
+      if (!sdk) reject('ima_unavailable');
+      ima.sdk = sdk;
+      ima.display = new sdk.AdDisplayContainer(adContainer, video);
+      if (ima.started) ima.display.initialize();
+      ima.loader = new sdk.AdsLoader(ima.display);
+      ima.loader.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, adError);
+      ima.loader.addEventListener(sdk.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, (event) => {
+        if (disposed) return;
+        const manager = event.getAdsManager(video);
+        ima.manager = manager;
+        manager.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, adError);
+        manager.addEventListener(sdk.AdEvent.Type.CONTENT_PAUSE_REQUESTED, (e) => {
+          if (disposed) return;
+          ima.cut = cutOf(e);
+          video.pause?.();
+          inBreak = true;
+          session.setLinearAd(true);
+          emitBreak('break_start', ima.cut);
+        });
+        manager.addEventListener(sdk.AdEvent.Type.CONTENT_RESUME_REQUESTED, () => {
+          if (disposed) return;
+          const cut = ima.cut;
+          ima.cut = null;
+          endBreak();
+          emitBreak('break_end', cut);
+          resume();
+        });
+        startManager();
+      });
+      video.addEventListener('ended', contentEnded);
+      const request = new sdk.AdsRequest();
+      request.adsResponse = buildVmap(cuts);
+      if (page) request.pageUrl = page;
+      request.linearAdSlotWidth = video.clientWidth || 640;
+      request.linearAdSlotHeight = video.clientHeight || 360;
+      request.nonLinearAdSlotWidth = request.linearAdSlotWidth;
+      request.nonLinearAdSlotHeight = 150;
+      ima.loader.requestAds(request);
+    } catch {
+      // Without IMA the content simply plays without breaks.
+      if (!disposed) emitBreak('break_error', null);
+    }
+  }
+
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
+  const useIma = linear === 'ima' && cuts.length > 0 && !!adContainer;
+  if (useIma) void setUpIma();
   sync();
   return {
+    cuts,
+    vmap: () => buildVmap(cuts),
+    setBreaks(seconds) {
+      if (disposed || !scenes || !Array.isArray(seconds)) return;
+      windows = usableWindows({ scenes, cuts: seconds.filter(isNumber).map((at) => ({ at })) });
+      sync();
+    },
+    start() {
+      if (disposed || !useIma || ima.started) return;
+      ima.started = true;
+      // IMA needs this inside the viewer's play gesture.
+      try {
+        ima.display?.initialize();
+      } catch {
+        // A failed initialisation surfaces later as an ad error.
+      }
+      startManager();
+    },
     destroy() {
       if (disposed) return;
       disposed = true;
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
+      video.removeEventListener('ended', contentEnded);
+      for (const part of [ima.manager, ima.loader, ima.display]) {
+        try {
+          part?.destroy?.();
+        } catch {
+          // Tearing down IMA must not throw into the host.
+        }
+      }
+      ima.manager = ima.loader = ima.display = null;
+      endBreak();
       controller?.abort();
       controller = null;
       for (const id of cues.keys()) session.removeCue(id);
