@@ -513,6 +513,11 @@ function fakeGpt({ hostReady = false, hostInitialLoadOff = false, queued = false
     destroySlots(slots) { made.destroyed.push(...slots); return true; },
     ...(legacy ? {} : { setConfig(config) {
       if (config.disableInitialLoad) { service.initialLoadDisabled = true; made.calls.push('setConfig:disableInitialLoad'); }
+      // The current API carries the page URL here; the deprecated `service.set` is recorded separately.
+      if (config.adsenseAttributes?.page_url) { service.values.page_url = config.adsenseAttributes.page_url; made.calls.push('setConfig:page_url'); }
+    }, getConfig(key) {
+      // Like GPT: an object with the requested key. A host that enabled services elsewhere may have set it too.
+      return key === 'disableInitialLoad' ? { disableInitialLoad: service.initialLoadDisabled === true } : {};
     } }),
   };
   made.render = (isEmpty = false, slot = made.slots.at(-1)) => service.fire('slotRenderEnded', { slot, isEmpty });
@@ -674,7 +679,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 test('our own GPT setup disables initial load, sets page_url and fetches the slot once', async () => {
   const r = overlayRig();
   await r.at(42);
-  assert.deepEqual(r.gpt.calls, ['setConfig:disableInitialLoad', 'enableServices']);
+  assert.deepEqual(r.gpt.calls, ['setConfig:disableInitialLoad', 'setConfig:page_url', 'enableServices']);
   assert.equal(r.gpt.service.values.page_url, 'https://publisher.example/video');
   assert.equal(r.gpt.service.fetches, 1);
   assert.equal(r.gpt.service.refreshed.length, 1);
@@ -898,7 +903,7 @@ test('loadPlan sends a credential-less GET that does not follow redirects', asyn
 test('GPT uses setConfig when it has it and the old calls only without it', async () => {
   const r = overlayRig();
   await r.at(42);
-  assert.deepEqual(r.gpt.calls, ['setConfig:disableInitialLoad', 'enableServices']);
+  assert.deepEqual(r.gpt.calls, ['setConfig:disableInitialLoad', 'setConfig:page_url', 'enableServices']);
   assert.deepEqual(r.gpt.slots[0].targeting, { ilayers_context: 'cocina', il_format: 'overlay_300x250' });
   assert.equal(r.gpt.service.fetches, 1);
   r.ads.destroy();

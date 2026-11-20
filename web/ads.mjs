@@ -367,9 +367,13 @@ export function attachAds({
           stage.append(node);
           overlay.node = node;
           if (own) {
-            if (typeof gpt.setConfig === 'function') gpt.setConfig({ disableInitialLoad: true });
-            else service.disableInitialLoad();
-            if (page) service.set('page_url', page);
+            // GPT deprecated the per-service calls in favour of setConfig; the old ones stay for a GPT without it.
+            if (typeof gpt.setConfig === 'function') {
+              gpt.setConfig({ disableInitialLoad: true, ...(page ? { adsenseAttributes: { page_url: page } } : {}) });
+            } else {
+              service.disableInitialLoad();
+              if (page) service.set('page_url', page);
+            }
           }
           service.addEventListener('slotRenderEnded', onRender);
           service.addEventListener('impressionViewable', onViewable);
@@ -432,7 +436,10 @@ export function attachAds({
             overlay.pending = { slot, resolve };
             // display() fetches unless initial load is off; then refresh() is the one fetch.
             gpt.display(overlay.node.id);
-            if (service.isInitialLoadDisabled?.()) service.refresh([slot]);
+            const initialLoadOff = typeof gpt.getConfig === 'function'
+              ? gpt.getConfig('disableInitialLoad')?.disableInitialLoad === true
+              : service.isInitialLoadDisabled?.();
+            if (initialLoadOff) service.refresh([slot]);
           } catch (error) {
             fail(error);
           }
