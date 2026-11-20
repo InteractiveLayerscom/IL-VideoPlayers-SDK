@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { attachAds, parseGraphicVast, usableWindows } from '../web/ads.mjs';
+import { attachAds, loadPlan, parseGraphicVast, planUrl, usableWindows } from '../web/ads.mjs';
 import { normalizeCue } from '../web/cues.mjs';
 
 globalThis.DOMParser = new JSDOM('').window.DOMParser;
@@ -833,4 +833,55 @@ test('ALL_ADS_COMPLETED destroys the manager; resizes reach it until destroy', a
   } finally {
     delete globalThis.ResizeObserver;
   }
+});
+
+test('planUrl builds and encodes the plan endpoint', () => {
+  assert.equal(planUrl({ origin: 'https://console.interactivelayers.com', project: 'p 1', asset: 'a&b/c' }),
+    'https://console.interactivelayers.com/il-player/ad-plan?project=p%201&asset=a%26b%2Fc');
+  assert.equal(planUrl({ origin: 'https://console.interactivelayers.com/', project: 'p', asset: 'a' }),
+    'https://console.interactivelayers.com/il-player/ad-plan?project=p&asset=a');
+});
+
+test('planUrl rejects a bad origin, project or asset', () => {
+  const ok = { origin: 'https://console.interactivelayers.com', project: 'p', asset: 'a' };
+  for (const origin of ['http://console.interactivelayers.com', 'console.interactivelayers.com', 'https://x.example/path', '', undefined]) {
+    assert.throws(() => planUrl({ ...ok, origin }), TypeError);
+  }
+  for (const project of ['', undefined, 5]) assert.throws(() => planUrl({ ...ok, project }), TypeError);
+  for (const asset of ['', undefined, null]) assert.throws(() => planUrl({ ...ok, asset }), TypeError);
+  assert.throws(() => planUrl(), TypeError);
+});
+
+const PLAN_URL = 'https://console.interactivelayers.com/il-player/ad-plan?project=p&asset=a';
+const answer = (status, body) => async () => new Response(body, { status });
+
+test('loadPlan returns the plan on 200', async () => {
+  const plan = makePlan();
+  assert.deepEqual(await loadPlan(PLAN_URL, { fetchImpl: answer(200, JSON.stringify(plan)) }), plan);
+});
+
+test('loadPlan returns null for no plan, errors and malformed bodies', async () => {
+  const bad = [answer(204, null), answer(404, '{}'), answer(500, '{}'), answer(200, 'not json'),
+    answer(200, JSON.stringify({ version: 2 })), answer(200, '[]'), answer(200, 'null'),
+    async () => { throw new TypeError('network'); }];
+  for (const fetchImpl of bad) assert.equal(await loadPlan(PLAN_URL, { fetchImpl }), null);
+});
+
+test('loadPlan refuses a non-https URL without fetching', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return new Response('{"version":1}'); };
+  assert.equal(await loadPlan(PLAN_URL.replace('https:', 'http:'), { fetchImpl }), null);
+  assert.equal(await loadPlan('nope', { fetchImpl }), null);
+  assert.equal(calls, 0);
+});
+
+test('loadPlan sends a credential-less GET that does not follow redirects', async () => {
+  const signal = new AbortController().signal;
+  let seen;
+  await loadPlan(PLAN_URL, { signal, fetchImpl: async (url, init) => { seen = { url, init }; return new Response('{"version":1}'); } });
+  assert.equal(seen.url, PLAN_URL);
+  assert.equal(seen.init.method, 'GET');
+  assert.equal(seen.init.credentials, 'omit');
+  assert.equal(seen.init.redirect, 'error');
+  assert.equal(seen.init.signal, signal);
 });
