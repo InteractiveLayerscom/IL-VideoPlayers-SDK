@@ -279,8 +279,10 @@ export function attachAds({
   const servableNow = () => overlayServable && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1]
     ? formats : graphics;
   let hostBreak = false;
-  let played = false;
+  // Re-attaching to a video that already played keeps the latch. A resume position alone is not playback.
+  let played = (Number(video.played?.length) || 0) > 0;
   const failedCuts = new Set();
+  const startedCuts = new Set();
   const breakOn = () => inBreak || hostBreak;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
@@ -436,9 +438,10 @@ export function attachAds({
             overlay.pending = { slot, resolve };
             // display() fetches unless initial load is off; then refresh() is the one fetch.
             gpt.display(overlay.node.id);
-            const initialLoadOff = typeof gpt.getConfig === 'function'
-              ? gpt.getConfig('disableInitialLoad')?.disableInitialLoad === true
-              : service.isInitialLoadDisabled?.();
+            const answer = typeof gpt.getConfig === 'function' ? gpt.getConfig('disableInitialLoad') : undefined;
+            // A host may have turned initial load off through the old API, which getConfig does not report.
+            const initialLoadOff = typeof answer?.disableInitialLoad === 'boolean' ? answer.disableInitialLoad
+              : typeof answer === 'boolean' ? answer : Boolean(service.isInitialLoadDisabled?.());
             if (initialLoadOff) service.refresh([slot]);
           } catch (error) {
             fail(error);
@@ -498,7 +501,8 @@ export function attachAds({
   function sync(event) {
     if (disposed) return;
     // No ad server is asked before the viewer has started playback in this session.
-    if (event?.type === 'playing' || video.paused === false) played = true;
+    // An ad playing in the content <video> (iOS custom playback) is not content playback.
+    if (!inBreak && (event?.type === 'playing' || video.paused === false)) played = true;
     const time = now();
     for (const [id, end] of cues) {
       if (time < end) continue;
@@ -543,6 +547,29 @@ export function attachAds({
     const time = Number(video.currentTime) || 0;
     return cuts.filter((cut) => cut.at <= time + 1).at(-1) ?? cuts[0] ?? null;
   }
+  const podCut = (event) => {
+    let offset;
+    try {
+      offset = event?.getAd?.()?.getAdPodInfo?.()?.getTimeOffset?.();
+    } catch {
+      offset = undefined;
+    }
+    return isNumber(offset) && offset >= 0 ? cuts.find((cut) => Math.abs(cut.at - offset) < 1) ?? null : null;
+  };
+  // A failure without an ad: IMA prefetches a break before its time and only plays breaks
+  // later than the latest one that started or failed.
+  function failedCut(event) {
+    const fromAd = podCut(event);
+    if (fromAd) return fromAd;
+    if (!played && cuts[0]?.at === 0) return cuts[0];
+    let settled = -1;
+    cuts.forEach((cut, index) => {
+      if (startedCuts.has(cut.id) || failedCuts.has(cut.id)) settled = index;
+    });
+    const candidates = cuts.slice(settled + 1);
+    const time = Number(video.currentTime) || 0;
+    return candidates.filter((cut) => cut.at <= time + 1).at(-1) ?? candidates[0] ?? null;
+  }
   function endBreak() {
     clearTimeout(ima.watchdog);
     if (!inBreak) return false;
@@ -563,18 +590,18 @@ export function attachAds({
   }
   function adError() {
     if (disposed) return;
-    const cut = ima.cut ?? cutOf(null);
     const playing = inBreak;
+    const cut = playing ? ima.cut ?? cutOf(null) : failedCut(null);
     ima.cut = null;
     if (endBreak()) resume();
-    if (!playing && cut && failedCuts.has(cut.id)) return;
+    if (!playing && (!cut || failedCuts.has(cut.id))) return;
     if (cut) failedCuts.add(cut.id);
     emitBreak('break_error', cut);
   }
   // With ad rules IMA reports a break it could not fetch, or an empty one, without AD_ERROR.
   function breakFailed(event) {
     if (disposed || inBreak) return;
-    const cut = !played && cuts[0]?.at === 0 ? cuts[0] : cutOf(event);
+    const cut = failedCut(event);
     if (!cut || failedCuts.has(cut.id)) return;
     failedCuts.add(cut.id);
     emitBreak('break_error', cut);
@@ -622,6 +649,7 @@ export function attachAds({
         manager.addEventListener(sdk.AdEvent.Type.CONTENT_PAUSE_REQUESTED, (e) => {
           if (disposed) return;
           ima.cut = cutOf(e);
+          if (ima.cut) startedCuts.add(ima.cut.id);
           video.pause?.();
           inBreak = true;
           updateOverlay(now());

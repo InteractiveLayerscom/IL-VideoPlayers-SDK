@@ -105,7 +105,7 @@ Qué hace:
 
 - Sirve el súper (`super`) y la L (`l_shape`, que se dibuja con el formato `l`) cuando `plan.scenes.graphics` tiene un tag de `https://pubads.g.doubleclick.net/gampad/ads` para ese formato, y alterna los formatos que puede servir según los gráficos ya mostrados.
 - Decide en cada momento, a partir de la posición del video, si una ventana es utilizable: la acorta a `max_seconds`, la aleja `cut_clearance_seconds` de cada corte, la descarta si queda por debajo de `min_seconds`, deja 30 segundos entre inicios y `gap_after_seconds` tras el gráfico anterior, y respeta `max_per_video`. Cada ventana se intenta una sola vez por sesión, aunque el espectador vuelva atrás.
-- No pide nada al servidor de anuncios (gráficos ni overlay) antes de que el espectador empiece la reproducción; después, una pausa no corta una solicitud en curso y buscar en pausa puede preparar la ventana siguiente.
+- No pide nada al servidor de anuncios (gráficos ni overlay) antes de que el espectador empiece la reproducción; después, una pausa no corta una solicitud en curso y buscar en pausa puede preparar la ventana siguiente. Un video que ya se reprodujo (`video.played` no está vacío) cuenta como iniciado al llamar a `attachAds`; una posición de reanudación sin reproducción no cuenta, y un anuncio que IMA reproduce en el mismo `<video>` tampoco.
 - Pide el tag unos 4 segundos antes de la ventana (o en el acto si el espectador entra en ella con tiempo suficiente), con la segmentación de la ventana en `cust_params`, un `correlator` nuevo y `url`/`description_url`. Hace una sola solicitud por ventana, sin cookies, sin redirecciones y con 4 segundos de límite.
 - Acepta sólo un anuncio InLine con una imagen PNG o JPEG estática por HTTPS cuya proporción coincida con el formato (20:3 o 16:9). Rechaza wrappers, anuncios lineales y recursos HTML o iframe.
 - Envía las URL de `Impression` y `creativeView` una vez cuando el gráfico es visible y las de seguimiento de clic al hacer clic. Quita el cue al terminar la ventana o con `destroy()`.
@@ -127,7 +127,7 @@ const ads = attachAds({ session, video, plan, linear: 'ima', adContainer });
 playButton.addEventListener('click', () => { ads.start(); video.play(); });
 ```
 
-La página que aloja el reproductor debe servirse por https: IMA pide sus propios marcos con el esquema de la página. Con reglas de anuncios (VMAP), un corte que IMA no puede pedir o que vuelve vacío (`AD_BREAK_FETCH_ERROR`, o un `LOG` con `adError`) emite `break_error` con su corte una sola vez.
+La página que aloja el reproductor debe servirse por https: IMA pide sus propios marcos con el esquema de la página. Con reglas de anuncios (VMAP), un corte que IMA no puede pedir o que vuelve vacío (`AD_BREAK_FETCH_ERROR`, o un `LOG` con `adError`) emite `break_error` con su corte una sola vez. Si el evento no trae el anuncio, el corte es el preroll mientras el contenido no empezó; si no, el último corte ya vencido, o el próximo, entre los posteriores al último corte que empezó o falló (IMA pide cada corte unos segundos antes).
 
 Llamá a `attachAds` antes del gesto de reproducción del espectador, para que `start()` pueda inicializar IMA dentro de ese gesto. Si IMA llega cuando el video ya pasó su primer segundo, se salta el preroll (los midrolls se mantienen); si `ima3.js` no cargó 8 segundos después de `start()`, el módulo renuncia a IMA en esa reproducción (`break_error`) y el contenido sigue. Un corte que no termina en 120 segundos se trata como error y el contenido se reanuda.
 

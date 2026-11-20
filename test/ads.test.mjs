@@ -921,7 +921,7 @@ test('GPT uses setConfig when it has it and the old calls only without it', asyn
 });
 
 test('nothing is requested before the viewer starts playback', async () => {
-  const h = harness({ start: 40 });
+  const h = harness({ plan: makePlan({ windows: [{ id: 'early', start_ms: 3000, end_ms: 15000 }] }) });
   await flush();
   h.video.dispatchEvent(new Event('timeupdate'));
   await flush();
@@ -931,7 +931,7 @@ test('nothing is requested before the viewer starts playback', async () => {
   await flush();
   assert.equal(h.requests.length, 1);
   h.ads.destroy();
-  const r = overlayRig({ start: 40 });
+  const r = overlayRig({ windows: [{ id: 'early', start_ms: 3000, end_ms: 15000 }] });
   await flush();
   assert.deepEqual(r.scripts, []);
   r.ads.destroy();
@@ -984,4 +984,123 @@ test('a mid-roll fetch failure after playback names the mid-roll', async () => {
   manager.fire('log', { getAdData: () => ({ adError: {} }) });
   assert.deepEqual(events.map((e) => [e.type, e.cut]), [['break_error', 'mid-1']]);
   ads.destroy();
+});
+
+const cutsAt = (...times) => makePlan({ cuts: times.map((at) => ({ id: 'c' + at, at, position: at ? 'midroll' : 'preroll', tag_url: TAG })) });
+async function attributionRig(times) {
+  const made = fakeIma();
+  const rig = breakRig({ linear: 'ima', plan: cutsAt(...times) });
+  await flush();
+  rig.ads.start();
+  const manager = made.load();
+  const at = (seconds) => {
+    rig.video.currentTime = seconds;
+    rig.video.paused = false;
+    rig.video.dispatchEvent(new Event('timeupdate'));
+  };
+  const playBreak = (offset) => {
+    manager.fire('pause', { getAd: () => ({ getAdPodInfo: () => ({ getTimeOffset: () => offset }) }) });
+    manager.fire('resume', {});
+  };
+  const errors = () => rig.events.filter((e) => e.type === 'break_error').map((e) => e.cut);
+  return { ...rig, manager, at, playBreak, errors };
+}
+
+test('a mid-roll prefetch failure after a played pre-roll names the mid-roll', async () => {
+  const r = await attributionRig([0, 30]);
+  r.playBreak(0);
+  r.at(25);
+  r.manager.fire('fetchError', {});
+  assert.deepEqual(r.errors(), ['c30']);
+  r.ads.destroy();
+});
+
+test('a mid-roll prefetch failure after a failed pre-roll is still emitted for the mid-roll', async () => {
+  const r = await attributionRig([0, 30]);
+  r.manager.fire('fetchError', {});
+  r.at(25);
+  r.manager.fire('fetchError', {});
+  assert.deepEqual(r.errors(), ['c0', 'c30']);
+  r.ads.destroy();
+});
+
+test('after a seek past an unplayed break, failures go to the due break then the next one', async () => {
+  const r = await attributionRig([30, 60]);
+  r.at(50);
+  r.manager.fire('fetchError', {});
+  assert.deepEqual(r.errors(), ['c30']);
+  r.at(55);
+  r.manager.fire('log', { getAdData: () => ({ adError: {} }) });
+  assert.deepEqual(r.errors(), ['c30', 'c60']);
+  r.ads.destroy();
+});
+
+test('breaks before the latest started one are no longer candidates', async () => {
+  const r = await attributionRig([30, 60, 120]);
+  r.at(100);
+  r.playBreak(60);
+  r.at(115);
+  r.manager.fire('fetchError', {});
+  assert.deepEqual(r.errors(), ['c120']);
+  r.ads.destroy();
+});
+
+test('a stray failure after every break played emits nothing', async () => {
+  const r = await attributionRig([0, 30]);
+  r.playBreak(0);
+  r.at(31);
+  r.playBreak(30);
+  r.at(40);
+  r.manager.fire('fetchError', {});
+  r.manager.fire('adError', {});
+  assert.deepEqual(r.errors(), []);
+  r.ads.destroy();
+});
+
+test('attaching to a video that already played counts as played; a resume position does not', async () => {
+  for (const [extra, expected] of [[{ played: { length: 1 } }, 1], [{ currentTime: 5, played: { length: 0 } }, 0]]) {
+    const video = new EventTarget();
+    Object.assign(video, { currentTime: 0, paused: true }, extra);
+    const requests = [];
+    const ads = attachAds({ session: { addCue: () => true, removeCue() {} }, video, plan: makePlan({ cuts: [] }),
+      fetchImpl: async (url) => { requests.push(url); return { ok: true, text: async () => '<VAST version="3.0"/>' }; } });
+    video.currentTime = 40;
+    video.dispatchEvent(new Event('seeked'));
+    await flush();
+    assert.equal(requests.length, expected);
+    ads.destroy();
+  }
+});
+
+test('an ad playing in the content video does not count as content playback', async () => {
+  const made = fakeIma();
+  const plan = makePlan({ windows: [{ id: 'w', start_ms: 3000, end_ms: 15000 }] });
+  const requests = [];
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true, pause() { this.paused = true; }, play() { return Promise.resolve(); } });
+  const ads = attachAds({ session: { addCue: () => true, removeCue() {}, setLinearAd() {} }, video, plan, linear: 'ima', adContainer: {},
+    loadScript: async () => {}, fetchImpl: async (url) => { requests.push(url); return { ok: true, text: async () => '<VAST version="3.0"/>' }; } });
+  await flush();
+  ads.start();
+  const manager = made.load();
+  manager.fire('pause', {});
+  video.paused = false;
+  video.dispatchEvent(new Event('playing'));
+  manager.fire('resume', {});
+  video.paused = true;
+  video.dispatchEvent(new Event('timeupdate'));
+  await flush();
+  assert.equal(requests.length, 0);
+  ads.destroy();
+});
+
+test('initial load is read from isInitialLoadDisabled when getConfig has no boolean answer', async () => {
+  for (const answer of [null, undefined, {}]) {
+    const r = overlayRig({ gptOptions: { hostReady: true, hostInitialLoadOff: true } });
+    globalThis.googletag.getConfig = () => answer;
+    await r.at(42);
+    assert.equal(r.gpt.service.fetches, 1);
+    assert.equal(r.gpt.service.refreshed.length, 1);
+    r.ads.destroy();
+  }
 });
