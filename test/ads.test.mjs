@@ -1057,8 +1057,8 @@ test('a stray failure after every break played emits nothing', async () => {
   r.ads.destroy();
 });
 
-test('attaching to a video that already played counts as played', async () => {
-  for (const extra of [{ currentTime: 5 }, { played: { length: 1 } }]) {
+test('attaching to a video that already played counts as played; a resume position does not', async () => {
+  for (const [extra, expected] of [[{ played: { length: 1 } }, 1], [{ currentTime: 5, played: { length: 0 } }, 0]]) {
     const video = new EventTarget();
     Object.assign(video, { currentTime: 0, paused: true }, extra);
     const requests = [];
@@ -1067,7 +1067,7 @@ test('attaching to a video that already played counts as played', async () => {
     video.currentTime = 40;
     video.dispatchEvent(new Event('seeked'));
     await flush();
-    assert.equal(requests.length, 1);
+    assert.equal(requests.length, expected);
     ads.destroy();
   }
 });

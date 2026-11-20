@@ -279,8 +279,8 @@ export function attachAds({
   const servableNow = () => overlayServable && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1]
     ? formats : graphics;
   let hostBreak = false;
-  // Re-attaching to a video that already played keeps the latch.
-  let played = (Number(video.played?.length) || 0) > 0 || (Number(video.currentTime) || 0) > 0;
+  // Re-attaching to a video that already played keeps the latch. A resume position alone is not playback.
+  let played = (Number(video.played?.length) || 0) > 0;
   const failedCuts = new Set();
   const startedCuts = new Set();
   const breakOn = () => inBreak || hostBreak;
