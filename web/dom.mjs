@@ -1,4 +1,4 @@
-import { commerceSurface } from './commerce.mjs';
+import { commerceSurface, withinHold } from './commerce.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
@@ -152,7 +152,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
     hide,
     update: scenes.update,
     applyAudioPermissions: scenes.applyAudioPermissions,
-    holding: cue => commerce.isOpen(cue),
+    holding: cue => commerce.isOpen(cue) && withinHold(cue, options.clock(), commerce.lastAction(cue)),
     visible: cue => cue.scene ? scenes.visible() :
       layer?.style.visibility === 'visible' && images.length > 0 && images.every(imageVisible),
   };
@@ -170,7 +170,7 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     ? () => Math.round(video.currentTime * 1000)
     : () => nativeProgramTime(video));
   const pausing = video && source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
-  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing);
+  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing, clock);
   const allowVideo = source.secondaryVideo ?? !avplay;
   const allowAudio = allowVideo && source.secondaryVideoAudio === true;
   const window = stage.ownerDocument.defaultView;
@@ -178,6 +178,10 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     ...source,
     playing,
     presenting,
+    // A card with a Buy button survives a hidden page (another tab): it is not visible, so nothing is counted,
+    // and the viewer finds it as they left it.
+    presentingCard: avplay ? presenting
+      : () => !video.ended && !video.seeking && video.readyState >= 2,
     scenes: sceneSupported(window),
     sceneFeatures: sceneFeatures(window, allowVideo, allowAudio),
     clock,

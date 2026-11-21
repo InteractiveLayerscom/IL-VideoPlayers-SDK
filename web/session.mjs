@@ -6,6 +6,7 @@ export function createSession({
   playing,
   presenting = playing,
   presentingSpot = presenting,
+  presentingCard = presenting,
   scenes = false,
   sceneFeatures = [],
   renderer,
@@ -115,7 +116,8 @@ export function createSession({
       if (cue.format === 'midroll') return inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot();
       // A card with a Buy button, like an interactive scene, stays while the viewer pauses to look at it;
       // a plain graphic shows only during playback.
-      return !inBreak && contentKnown() && (cue.scene || cue.commerce ? presenting() : playing());
+      if (cue.commerce && !cue.scene) return !inBreak && contentKnown() && presentingCard();
+      return !inBreak && contentKnown() && (cue.scene ? presenting() : playing());
     }
     const due = cue => (cue.start <= time && time < cue.end) || holding(cue);
     let active = null;

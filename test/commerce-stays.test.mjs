@@ -25,6 +25,9 @@ const plan = (extra = {}) => ({
     windows: [{ id: 'm1', start_ms: 1000, end_ms: 8000 }] },
   ...extra,
 });
+const TAG = 'https://pubads.g.doubleclick.net/gampad/ads?iu=/1/s&output=vast';
+const VAST = '<VAST version="3.0"><Ad id="a"><InLine><AdTitle>S</AdTitle><Impression>https://pixel.invalid/i</Impression><Creatives><Creative><NonLinearAds><NonLinear width="720" height="108"><StaticResource creativeType="image/png">https://cdn.example/super.png</StaticResource></NonLinear></NonLinearAds></Creative></Creatives></InLine></Ad></VAST>';
+const PACING = { min_seconds: 1.5, max_seconds: null, gap_after_seconds: 0, max_per_video: null, cut_clearance_seconds: 0 };
 const flush = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
 function player({ pauseOnOpen = false, handoff = () => ({ status: 201, body: { continueUrl: 'https://shop.example/checkout' } }),
@@ -47,13 +50,21 @@ function player({ pauseOnOpen = false, handoff = () => ({ status: 201, body: { c
   const fetchImpl = async (input, init = {}) => {
     const url = String(input);
     calls.push({ url, method: init.method ?? 'GET' });
-    if (url.startsWith(ROUTE)) return { status: 200, ok: true, json: async () => card(id) };
+    if (url.startsWith(ROUTE)) {
+      const windowId = new URL(url).searchParams.get('window');
+      const base = card(windowId === 'm1' ? id : id + '_' + windowId);
+      const span = planned.commerce.windows.find((w) => w.id === windowId);
+      return { status: 200, ok: true, json: async () => ({ ...base, window: windowId, start: span.start_ms, end: span.end_ms }) };
+    }
+    if (url.includes('/gampad/ads')) return { ok: true, text: async () => VAST };
     if (url.includes('/commerce/offer/')) {
       const reply = handoff();
       return { status: reply.status, ok: reply.status < 300, json: async () => reply.body };
     }
     return { ok: true };
   };
+  let hidden = false;
+  Object.defineProperty(window.document, 'hidden', { get: () => hidden, configurable: true });
   const session = attachHtmlVideo({ video, stage, timeline: 'media', interval: false, fetchImpl,
     commerce: { locale: 'en', ...(pauseOnOpen ? { pauseOnOpen: true } : {}) } });
   const ads = attachAds({ session, video, plan: planned, fetchImpl, planOrigin: 'https://console.example' });
@@ -82,7 +93,8 @@ function player({ pauseOnOpen = false, handoff = () => ({ status: 201, body: { c
   const play = async () => { await video.play(); await tick(); };
   const pause = async () => { video.pause(); await tick(); };
   const count = (part, method = 'GET') => calls.filter((c) => c.url.includes(part) && c.method === method).length;
-  return { window, stage, video, state, session, ads, at, tick, play, pause, button, count, calls,
+  const setHidden = async (value) => { hidden = value; await tick(); };
+  return { window, stage, video, state, session, ads, at, tick, play, pause, button, count, calls, setHidden,
     close() { ads.destroy(); session.destroy(); window.close(); } };
 }
 
@@ -292,4 +304,72 @@ test('a plain Super still leaves on pause and comes back on play, as before', as
   assert.ok(stage.querySelector('img'));
   session.destroy();
   window.close();
+});
+
+test('an open detail left idle while the video plays is released 60 s of content after the window, then the next windows are served', async () => {
+  const planned = plan({
+    scenes: { formats: ['super'], pacing: PACING, graphics: [{ format: 'super', tag_url: TAG }],
+      windows: [{ id: 'g', start_ms: 60000, end_ms: 75000 }] },
+  });
+  planned.commerce.windows.push({ id: 'm2', start_ms: 100000, end_ms: 110000 });
+  const p = player({ id: 'dlv_idle', planned });
+  await cardOnScreen(p, 6);
+  p.button('View product').click();
+  for (let t = 8; t <= 67; t += 1) await p.at(t);
+  assert.ok(p.button('Buy'), 'still held 59 s after the window');
+  assert.equal(p.count('/gampad/ads'), 0, 'no graphic asked for while the held card would hide it');
+  await p.at(68.5);
+  assert.equal(p.stage.querySelector('.il-commerce'), null, 'released past 60 s');
+  await p.at(69);
+  assert.equal(p.count('/gampad/ads'), 1, 'the graphic window is served after the release');
+  for (let t = 96; t <= 101; t += 1) await p.at(t);
+  assert.equal(p.count('window=m2'), 1, 'and the next product window is asked');
+  p.close();
+});
+
+test('an action inside the card extends the hold; a paused viewer keeps it as long as they like', async () => {
+  const p = player({ id: 'dlv_act' });
+  await cardOnScreen(p, 6);
+  p.button('View product').click();
+  await p.at(40);
+  p.button('White').click();
+  await p.at(95);
+  assert.ok(p.button('Buy'), 'held 55 s after the last action');
+  await p.at(101);
+  assert.equal(p.stage.querySelector('.il-commerce'), null, 'released 60 s after the last action');
+  p.close();
+
+  const still = player({ id: 'dlv_still' });
+  await cardOnScreen(still, 6);
+  still.button('View product').click();
+  await still.at(30);
+  await still.pause();
+  for (let i = 0; i < 20; i++) await still.tick();
+  assert.ok(still.button('Buy'), 'paused: content time stands still, the card stays');
+  still.close();
+});
+
+test('a hidden page keeps the open card with its choice, counts nothing while hidden, and gives it back', async () => {
+  const p = player({ id: 'dlv_tab', pauseOnOpen: true });
+  await p.play();
+  await p.setHidden(true);
+  await p.at(2);
+  assert.equal(p.count('/events/dlv_tab/impression'), 0, 'nothing counted while the page is hidden');
+  await p.setHidden(false);
+  assert.equal(p.count('/events/dlv_tab/impression'), 1);
+  p.button('View product').click();
+  p.button('White').click();
+  await p.tick();
+  assert.equal(p.state.paused, true);
+  await p.setHidden(true);
+  await p.at(2);
+  await p.setHidden(false);
+  assert.ok(p.button('Buy'), 'still open after the other tab');
+  assert.equal(p.button('White').getAttribute('aria-pressed'), 'true');
+  assert.equal(p.state.paused, true, 'still paused by the SDK; closing resumes');
+  p.stage.querySelector('.il-commerce-close').click();
+  await p.tick();
+  assert.equal(p.state.paused, false);
+  assert.equal(p.count('/events/dlv_tab/impression'), 1);
+  p.close();
 });

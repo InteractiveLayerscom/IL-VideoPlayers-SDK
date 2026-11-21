@@ -1,4 +1,4 @@
-import { commerceSurface } from './commerce.mjs';
+import { commerceSurface, withinHold } from './commerce.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
@@ -75,7 +75,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     muted = null;
   }
   const sceneStage = stage ?? clientContainer;
-  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl);
+  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl, {}, () => clock());
   const clock = programTime ?? (() => {
     if (video.readyState < 2) return null;
     if (datedPlaylist) return player.getPlayheadTimeAsDate()?.getTime();
@@ -133,7 +133,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     },
     update: scenes.update,
     applyAudioPermissions: scenes.applyAudioPermissions,
-    holding: cue => commerce.isOpen(cue),
+    holding: cue => commerce.isOpen(cue) && withinHold(cue, clock(), commerce.lastAction(cue)),
     visible(cue) {
       if (cue.scene) return scenes.visible();
       const visible = ownsCurrent(cue) && imageVisible(matchImage(cue.imageUrl));

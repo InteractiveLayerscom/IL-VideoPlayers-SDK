@@ -767,8 +767,10 @@ export function attachAds({
         window.end - Math.max(window.start, time) >= ms(shop.pacing.min_seconds) && pacingAllows(window, committed(), shop.pacing));
       if (product) void requestProduct(product);
     }
-    // The single overlay slot is not reused while it still holds a creative.
+    // The single overlay slot is not reused while it still holds a creative. While a product card is held past
+    // its window (the viewer is choosing), a graphic could not be shown: none is asked for.
     if (controller || overlay.live || !servableNow().length) return;
+    if ([...cues].some(([id, cue]) => cue.product && time >= cue.end && session.holding?.(id))) return;
     // A window with a product waits for its answer; a product (200) wins over the graphics in that window.
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&

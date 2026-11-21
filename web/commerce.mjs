@@ -71,6 +71,14 @@ export function normalizeBrand(value) {
 }
 
 
+// Past its window an open card is held for at most HOLD_MS of content time since the later of the window's end
+// and the viewer's last action in it; a paused video does not move the clock, so a paused viewer keeps it.
+export const HOLD_MS = 60000;
+export function withinHold(cue, time, actedAt) {
+  if (!Number.isSafeInteger(time) || time < cue.end) return true;
+  return time - Math.max(cue.end, Number.isSafeInteger(actedAt) ? actedAt : cue.end) <= HOLD_MS;
+}
+
 const copy = {
   en: ['View product', 'Product', 'Variant', 'Buy', 'Scan with your phone', 'Continue to Shopify',
     'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.', 'This offer is no longer available.'],
@@ -83,8 +91,14 @@ const copy = {
 // `hooks` lets the adapter follow the viewer: opened() when the detail opens, closed(byViewer) when it closes
 // (byViewer false when the card is taken away, by a break or the end of its time) and checkout() once the
 // purchase page or its QR is handed over.
-export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}) {
+export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}, clock = () => null) {
   const doc = stage.ownerDocument;
+  // Content time of the viewer's last action in the open card (a click or key on it, a result appearing).
+  let actedAt = null;
+  const act = () => {
+    const time = clock();
+    actedAt = Number.isSafeInteger(time) ? time : actedAt;
+  };
   const embedded = () => {
     try {
       return doc.defaultView.self !== doc.defaultView.top;
@@ -112,6 +126,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
 
   // The detail of this cue is open: the session keeps the card while the viewer is choosing.
   const isOpen = cue => !!root && root.cue.id === cue.id && root.isOpen();
+  const lastAction = cue => (isOpen(cue) ? actedAt : null);
 
   function show(cue, isActive) {
     if (!options || !cue.commerce || root?.cue === cue) return;
@@ -151,6 +166,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       if (!isActive() || flow) return;
       opener.hidden = true;
       trackView(cue, offer);
+      act();
       notify('opened');
       flow = openTVShop(stage, {
         offer: { ...offer, imageUrl: offer.imageUrl ?? offer.images?.[0] ?? (cue.format !== 'midroll' ? cue.imageUrl : undefined) },
@@ -164,13 +180,18 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
           if (!isActive()) throw new Error('Offer expired');
           const reply = await handoff(offer, variant, signal);
           if (!isActive() || !isHttps(reply.qrImageUrl)) throw new Error('Invalid QR');
+          act();
           notify('checkout');
           return reply.qrImageUrl;
         },
       });
     }
+    // Every remote key while the shop is open is the viewer acting in it.
+    const tvKey = () => { if (flow) act(); };
+    stage.addEventListener('keydown', tvKey, true);
     const tvRoot = {cue, isOpen: () => Boolean(flow), dispose() {
       const ownsFocus = doc.activeElement === opener || Boolean(flow);
+      stage.removeEventListener('keydown', tvKey, true);
       flow?.dispose(); opener.remove();
       if (ownsFocus && activeBefore?.isConnected) activeBefore.focus();
     }};
@@ -296,6 +317,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       shell.classList.add('il-commerce--open');
       buttons[offer.variants.indexOf(variant)].focus();
       trackView(cue, offer);
+      act();
       notify('opened');
     }
 
@@ -327,6 +349,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       try {
         const reply = await handoff(offer, variant, current.signal);
         if (request !== current || current.signal.aborted || !isActive()) return;
+        act();
         notify('checkout');
         if (options.navigate) {
           options.navigate(reply.continueUrl);
@@ -351,7 +374,10 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
           link.focus();
         }
       } catch (error) {
-        if (request === current && !current.signal.aborted && isActive()) result.textContent = error?.gone ? goneText : errorText;
+        if (request === current && !current.signal.aborted && isActive()) {
+          result.textContent = error?.gone ? goneText : errorText;
+          act();
+        }
       } finally {
         if (request === current) {
           request = null;
@@ -360,6 +386,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       }
     }
 
+    shell.addEventListener('click', act, true);
+    shell.addEventListener('keydown', act, true);
     shell.addEventListener('keydown', event => {
       if (['Escape', 'Backspace', 'GoBack', 'BrowserBack'].includes(event.key) || event.keyCode === 10009 || event.keyCode === 461) {
         if (panel.hidden) return;
@@ -396,5 +424,5 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     stage.appendChild(shell);
     if (trigger) openPanel();
   }
-  return { show, hide, open: openOffer, isOpen, enabled: Boolean(options) };
+  return { show, hide, open: openOffer, isOpen, lastAction, enabled: Boolean(options) };
 }
