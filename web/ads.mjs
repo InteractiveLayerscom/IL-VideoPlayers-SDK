@@ -14,6 +14,13 @@ const GPT_URL = 'https://securepubads.g.doubleclick.net/tag/js/gpt.js';
 const OVERLAY = 'overlay_300x250';
 const IMA_LOAD_TIMEOUT_MS = 8000;
 const BREAK_WATCHDOG_MS = 120000;
+// Ordered requests per break: how early a mid-roll is asked, how long one attempt may take,
+// how long content may stay paused without an ad, and how much content may play past a due break.
+const WALK_LEAD_MS = 8000;
+const ATTEMPT_MS = 5000;
+const HOLD_MS = 8000;
+const LATE_MS = 2000;
+const MAX_REQUESTS = 3;
 const OVERLAY_UNIT = /^\/\d+(\/[^\s/]+)*$/;
 // Below this the 300x250 box would cover most of the picture.
 const MIN_STAGE = [640, 360];
@@ -21,6 +28,17 @@ const MIN_STAGE = [640, 360];
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, setBreakActive() {}, start() {}, destroy() {} });
+
+// One fresh value per ad request, so ad servers never treat two requests as one page view.
+const correlator = () => String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, '0');
+
+// Kept in memory for one attachAds call only; iADServer groups the requests of a view by it.
+function randomId() {
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === 'function') globalThis.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 
 function reject(reason) {
   throw new Error(reason);
@@ -76,6 +94,19 @@ export function graphicTagAllowed(tagUrl) {
   }
 }
 
+// Video breaks may also go to iADServer; scene graphics stay GAM-only (graphicTagAllowed).
+export function cutRequestAllowed(provider, tagUrl) {
+  if (provider === 'gam') return graphicTagAllowed(tagUrl);
+  if (provider !== 'iadserver') return false;
+  try {
+    const url = new URL(tagUrl);
+    return url.origin === 'https://ads.iadserver.com' && url.pathname === '/gampad/ads' &&
+      !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 // Formats this slice can serve, in plan order, each with its GAM tag.
 export function servableFormats(scenes) {
   const tags = new Map();
@@ -125,7 +156,7 @@ export function graphicTag(tagUrl, format, targeting, pageUrl) {
     params.set(key, Array.isArray(value) ? value.join(',') : String(value));
   params.set('il_format', format);
   url.searchParams.set('cust_params', params.toString());
-  url.searchParams.set('correlator', String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, '0'));
+  url.searchParams.set('correlator', correlator());
   if (pageUrl) {
     url.searchParams.set('url', pageUrl);
     url.searchParams.set('description_url', pageUrl);
@@ -133,18 +164,30 @@ export function graphicTag(tagUrl, format, targeting, pageUrl) {
   return url.href;
 }
 
-// The plan's video breaks with a GAM tag, in time order, for any ad player.
-export function planCuts(cuts, pageUrl) {
+function requestTag(provider, tagUrl, pageUrl, sid) {
+  const url = new URL(tagUrl);
+  if (provider === 'gam' && pageUrl) {
+    url.searchParams.set('url', pageUrl);
+    url.searchParams.set('description_url', pageUrl);
+  }
+  if (provider === 'iadserver' && sid) url.searchParams.set('sid', sid);
+  return url.href;
+}
+
+// The plan's video breaks, in time order, for any ad player. Each keeps its allowed requests in
+// plan order; a plan without `requests` has one GAM request per cut, from `tag_url`.
+export function planCuts(cuts, pageUrl, sid) {
   return (Array.isArray(cuts) ? cuts : [])
-    .filter((cut) => typeof cut?.id === 'string' && isNumber(cut.at) && cut.at >= 0 && graphicTagAllowed(cut.tag_url))
+    .filter((cut) => typeof cut?.id === 'string' && isNumber(cut.at) && cut.at >= 0)
     .map((cut) => {
-      const url = new URL(cut.tag_url);
-      if (pageUrl) {
-        url.searchParams.set('url', pageUrl);
-        url.searchParams.set('description_url', pageUrl);
-      }
-      return { id: cut.id, at: cut.at, position: cut.position, tagUrl: url.href };
+      const source = Array.isArray(cut.requests) ? cut.requests : [{ provider: 'gam', tag_url: cut.tag_url }];
+      const requests = source.filter((entry) => cutRequestAllowed(entry?.provider, entry?.tag_url)).slice(0, MAX_REQUESTS)
+        .map((entry) => Object.freeze({ provider: entry.provider, tagUrl: requestTag(entry.provider, entry.tag_url, pageUrl, sid) }));
+      return requests.length
+        ? { id: cut.id, at: cut.at, position: cut.position, tagUrl: requests[0].tagUrl, requests: Object.freeze(requests) }
+        : null;
     })
+    .filter(Boolean)
     .sort((a, b) => a.at - b.at);
 }
 
@@ -161,7 +204,7 @@ const attribute = (value) => String(value).replaceAll('&', '&amp;').replaceAll('
 export function buildVmap(cuts) {
   const breaks = cuts.map((cut) => {
     const url = new URL(cut.tagUrl);
-    url.searchParams.set('correlator', String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, '0'));
+    url.searchParams.set('correlator', correlator());
     const tag = url.href.replaceAll(']]>', ']]]]><![CDATA[>');
     return `<vmap:AdBreak timeOffset="${timeOffset(cut.at)}" breakType="linear" breakId="${attribute(cut.id)}">` +
       `<vmap:AdSource id="${attribute(cut.id)}" allowMultipleAds="true" followRedirects="true">` +
@@ -261,12 +304,13 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, linear, adContainer, loadScript = loadScriptOnce,
+  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId,
 } = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
   const page = pageUrl ?? valid.page_url;
-  const cuts = Object.freeze(planCuts(valid.cuts, page).map(Object.freeze));
+  const sid = typeof sessionId === 'string' && sessionId ? sessionId : randomId();
+  const cuts = Object.freeze(planCuts(valid.cuts, page, sid).map(Object.freeze));
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
   const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
@@ -296,6 +340,15 @@ export function attachAds({
   let inBreak = false;
   const ima = { sdk: null, display: null, loader: null, manager: null, started: false, running: false, cut: null,
     gaveUp: false, loadTimer: null, watchdog: null, observer: null };
+  // With a cut of several requests the module schedules the breaks and asks them in order;
+  // every other plan keeps IMA's ad rules (one VMAP) exactly as before.
+  const useIma = linear === 'ima' && cuts.length > 0 && !!adContainer;
+  const waterfall = useIma && cuts.some((cut) => cut.requests.length > 1);
+  // token: bumped by every attempt, cancel and settle, so late IMA answers are recognised as stale.
+  const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false,
+    held: false, ownPause: false, adComing: false, holdSpent: false, begun: false,
+    viewerPaused: false };
+  const settledCuts = new Set();
 
   const emit = (type, format, window) => {
     try {
@@ -510,6 +563,7 @@ export function attachAds({
       session.removeCue(id);
     }
     updateOverlay(time);
+    schedule(time / 1000);
     // The single overlay slot is not reused while it still holds a creative.
     if (!played || controller || overlay.live || breakOn() || !servableNow().length) return;
     const next = windows.find((window) => !attempted.has(window.id) &&
@@ -608,7 +662,10 @@ export function attachAds({
   }
   // An ad played in the same <video> also fires `ended`; only the content's end counts.
   const contentEnded = () => {
-    if (!inBreak) ima.loader?.contentComplete?.();
+    if (inBreak) return;
+    ima.loader?.contentComplete?.();
+    // A cut in the last seconds may be dropped here; the backend does not produce post-rolls.
+    if (wf.cut && wf.phase !== 'running') cancelAttempt();
   };
   const resized = () => {
     try {
@@ -626,6 +683,225 @@ export function attachAds({
     ima.manager = null;
   }
 
+  const emitWalk = (type, cut, index) => {
+    try {
+      onEvent?.({ type, cut: cut.id, provider: cut.requests[index].provider, attempt: index + 1 });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  };
+  function clearWalkTimers() {
+    clearTimeout(wf.timer);
+    clearTimeout(wf.holdTimer);
+    wf.timer = wf.holdTimer = null;
+  }
+  // The single exit of a break in the walk: one break_end or break_error, then content resumes.
+  function settle(type) {
+    const cut = wf.cut;
+    if (!cut) return;
+    settledCuts.add(cut.id);
+    clearWalkTimers();
+    wf.token++;
+    wf.cut = null;
+    wf.phase = 'idle';
+    // A pause event of the module's own that never arrived must not swallow the viewer's next pause.
+    wf.ownPause = false;
+    const held = wf.held;
+    wf.held = false;
+    destroyManager();
+    emitBreak(type, cut);
+    // Content resumes only if a break was open or the module itself held it for the pre-roll.
+    const viewerPaused = wf.viewerPaused;
+    wf.viewerPaused = false;
+    // A viewer who paused while the module held the content is not overruled when the break ends.
+    if ((endBreak() && !viewerPaused) || held) resumeWalk(cut);
+  }
+  // The module's resume runs outside a gesture; a refused play() is reported so the host can show its control.
+  function resumeWalk(cut) {
+    const blocked = () => {
+      if (!disposed) emitBreak('resume_blocked', cut);
+    };
+    try {
+      void Promise.resolve(video.play?.()).catch(blocked);
+    } catch {
+      blocked();
+    }
+  }
+  // The 8 s cap is for content held with no ad on its way: an ad IMA is starting keeps its attempt guard,
+  // and a spent budget only ends the break once that ad fails.
+  function armHold(cut) {
+    if (wf.holdTimer) return;
+    wf.holdTimer = setTimeout(() => {
+      if (disposed || wf.cut !== cut || wf.started) return;
+      if (wf.adComing) wf.holdSpent = true;
+      else settle('break_error');
+    }, HOLD_MS);
+  }
+  // The pause the module causes is told apart from the viewer's, which ends the module's hold.
+  function walkPaused() {
+    if (wf.ownPause) wf.ownPause = false;
+    else if (!inBreak && wf.held) {
+      wf.held = false;
+      wf.viewerPaused = true;
+    }
+  }
+  // Every cut already behind the playhead when the view joins is settled without an event.
+  function settleBehind() {
+    const time = Number(video.currentTime) || 0;
+    if (time > 1) for (const cut of cuts) if (cut.at <= time) settledCuts.add(cut.id);
+  }
+  // A host that plays right after start() would run content under the pre-roll's requests.
+  function holdPreroll(cut) {
+    if (video.paused === false) {
+      wf.held = true;
+      wf.viewerPaused = false;
+      wf.ownPause = true;
+      video.pause?.();
+    }
+    if (wf.held) armHold(cut);
+  }
+  // Drops an attempt that has not started playing, without settling its cut.
+  function cancelAttempt() {
+    wf.ownPause = false;
+    const cut = wf.cut;
+    clearWalkTimers();
+    wf.token++;
+    wf.cut = null;
+    wf.phase = 'idle';
+    destroyManager();
+    if (wf.held) {
+      wf.held = false;
+      resumeWalk(cut);
+    }
+  }
+  function ask(cut, index) {
+    const token = ++wf.token;
+    Object.assign(wf, { cut, index, phase: 'asking' });
+    clearTimeout(wf.timer);
+    emitWalk('break_request', cut, index);
+    const request = new ima.sdk.AdsRequest();
+    const url = new URL(cut.requests[index].tagUrl);
+    url.searchParams.set('correlator', correlator());
+    request.adTagUrl = url.href;
+    if (page) request.pageUrl = page;
+    request.vastLoadTimeout = ATTEMPT_MS;
+    request.linearAdSlotWidth = video.clientWidth || 640;
+    request.linearAdSlotHeight = video.clientHeight || 360;
+    request.nonLinearAdSlotWidth = request.linearAdSlotWidth;
+    request.nonLinearAdSlotHeight = 150;
+    wf.timer = setTimeout(() => attemptFailed(token), ATTEMPT_MS);
+    try {
+      ima.loader.requestAds(request, { token });
+    } catch {
+      attemptFailed(token);
+    }
+  }
+  // An empty answer, an error, a hung attempt or a resume before the ad started.
+  function attemptFailed(token) {
+    if (disposed || token !== wf.token || !wf.cut) return;
+    const { cut, index } = wf;
+    if (wf.started || index + 1 >= cut.requests.length) {
+      if (!wf.started) emitWalk('break_no_fill', cut, index);
+      return settle('break_error');
+    }
+    emitWalk('break_no_fill', cut, index);
+    wf.adComing = false;
+    if (wf.holdSpent) return settle('break_error');
+    destroyManager();
+    // Content stays paused if IMA already paused it; the hold timer keeps running.
+    ask(cut, index + 1);
+  }
+  function play() {
+    const token = wf.token;
+    wf.phase = 'running';
+    clearTimeout(wf.timer);
+    wf.timer = setTimeout(() => attemptFailed(token), ATTEMPT_MS);
+    try {
+      ima.manager.init(video.clientWidth || 640, video.clientHeight || 360, ima.sdk.ViewMode.NORMAL);
+      ima.manager.start();
+    } catch {
+      attemptFailed(token);
+    }
+  }
+  function beginBreak(cut) {
+    if (inBreak) return;
+    video.pause?.();
+    inBreak = true;
+    updateOverlay(now());
+    session.setLinearAd(true);
+    emitBreak('break_start', cut);
+    clearTimeout(ima.watchdog);
+    ima.watchdog = setTimeout(() => {
+      if (!disposed && inBreak) settle('break_error');
+    }, BREAK_WATCHDOG_MS);
+  }
+  // Picks the break to ask for: the last unsettled one already due (the pre-roll is due at start()),
+  // otherwise the next one within the lead once content has played.
+  function schedule(time) {
+    if (!waterfall || disposed || !ima.loader || !ima.started || inBreak || wf.phase === 'running') return;
+    const due = cuts.filter((cut) => !settledCuts.has(cut.id) && cut.at <= time);
+    for (const cut of due.slice(0, -1)) settledCuts.add(cut.id);
+    const target = due.at(-1) ??
+      (played ? cuts.find((cut) => !settledCuts.has(cut.id) && cut.at > time && ms(cut.at - time) <= WALK_LEAD_MS) : null) ?? null;
+    if (wf.cut && wf.cut !== target) cancelAttempt();
+    if (!target) return;
+    if (!wf.cut) {
+      Object.assign(wf, { dueAt: null, started: false, adComing: false, holdSpent: false, viewerPaused: false });
+      ask(target, 0);
+    }
+    if (target.at > time) return;
+    wf.dueAt ??= time;
+    if (target.at === 0) holdPreroll(target);
+    if (wf.phase === 'loaded') play();
+    else if (target.at === 0) return;
+    else if (ms(time - wf.dueAt) > LATE_MS) settle('break_error');
+  }
+  function walkLoaded(event) {
+    const token = event.getUserRequestContext?.()?.token;
+    const manager = event.getAdsManager(video);
+    if (disposed || token !== wf.token || wf.phase !== 'asking') {
+      try {
+        manager?.destroy?.();
+      } catch {
+        // A late manager is simply dropped.
+      }
+      return;
+    }
+    destroyManager();
+    ima.manager = manager;
+    const sdk = ima.sdk;
+    const fail = () => attemptFailed(token);
+    manager.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, fail);
+    manager.addEventListener(sdk.AdEvent.Type.CONTENT_PAUSE_REQUESTED, () => {
+      if (disposed || token !== wf.token) return;
+      const cut = wf.cut;
+      beginBreak(cut);
+      if (wf.started) return;
+      // An ad was found and is starting: it gets the attempt guard to STARTED.
+      wf.adComing = true;
+      clearTimeout(wf.timer);
+      wf.timer = setTimeout(() => attemptFailed(token), ATTEMPT_MS);
+      armHold(cut);
+    });
+    manager.addEventListener(sdk.AdEvent.Type.STARTED, () => {
+      if (disposed || token !== wf.token) return;
+      wf.started = true;
+      clearTimeout(wf.timer);
+      clearTimeout(wf.holdTimer);
+    });
+    if (sdk.AdEvent.Type.ALL_ADS_COMPLETED) manager.addEventListener(sdk.AdEvent.Type.ALL_ADS_COMPLETED, () => {
+      if (ima.manager === manager) destroyManager();
+    });
+    manager.addEventListener(sdk.AdEvent.Type.CONTENT_RESUME_REQUESTED, () => {
+      if (disposed || token !== wf.token) return;
+      if (!wf.started) return fail();
+      settle('break_end');
+    });
+    clearTimeout(wf.timer);
+    wf.phase = 'loaded';
+    if (wf.dueAt != null) play();
+  }
+
   async function setUpIma() {
     try {
       await loadScript(IMA_URL);
@@ -640,6 +916,23 @@ export function attachAds({
       ima.display = new sdk.AdDisplayContainer(adContainer, video);
       if (ima.started) ima.display.initialize();
       ima.loader = new sdk.AdsLoader(ima.display);
+      if (waterfall) {
+        // Nothing is requested before start(); the pre-roll of a late join is settled silently.
+        settleBehind();
+        ima.loader.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, (event) => {
+          const context = event?.getUserRequestContext?.();
+          // Without a context the error cannot be matched; the attempt guard covers a lost answer.
+          if (context) attemptFailed(context.token);
+        });
+        ima.loader.addEventListener(sdk.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, walkLoaded);
+        video.addEventListener('ended', contentEnded);
+        if (typeof globalThis.ResizeObserver === 'function') {
+          ima.observer = new globalThis.ResizeObserver(resized);
+          ima.observer.observe(video);
+        }
+        schedule(Number(video.currentTime) || 0);
+        return;
+      }
       ima.loader.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, adError);
       ima.loader.addEventListener(sdk.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, (event) => {
         if (disposed) return;
@@ -703,7 +996,12 @@ export function attachAds({
   }
 
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
-  const useIma = linear === 'ima' && cuts.length > 0 && !!adContainer;
+  if (waterfall) {
+    settleBehind();
+    // `play` comes before `playing`, so the pre-roll hold pauses before any content is heard.
+    video.addEventListener('play', sync);
+    video.addEventListener('pause', walkPaused);
+  }
   if (useIma) void setUpIma();
   sync();
   return {
@@ -736,11 +1034,26 @@ export function attachAds({
       } catch {
         // A failed initialisation surfaces later as an ad error.
       }
-      startManager();
+      if (waterfall) {
+        // Cuts at or behind a resume position set before the first start() are a late join.
+        if (!wf.begun) settleBehind();
+        wf.begun = true;
+        schedule(Number(video.currentTime) || 0);
+      }
+      else startManager();
     },
     destroy() {
       if (disposed) return;
       disposed = true;
+      clearWalkTimers();
+      wf.token++;
+      // The host loses the module: content the module was holding is given back, without an event.
+      if (wf.held) {
+        wf.held = false;
+        resume();
+      }
+      video.removeEventListener('play', sync);
+      video.removeEventListener('pause', walkPaused);
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       video.removeEventListener('ended', contentEnded);
       clearTimeout(ima.loadTimer);

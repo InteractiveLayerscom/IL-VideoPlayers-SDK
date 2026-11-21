@@ -114,13 +114,19 @@ Qué hace:
 
 ### Cortes de video
 
-`ads.cuts` es la lista de cortes del plan en orden, `[{ id, at, position, tagUrl }]`: sólo tags de `https://pubads.g.doubleclick.net/gampad/ads`, con `url` y `description_url` puestos a la URL de la página y sin `correlator`. `ads.vmap()` devuelve un VMAP 1.0 con un `AdBreak` lineal por corte (`timeOffset="start"` para el segundo 0) y un `correlator` nuevo en cada llamada. Sin cortes, o con un plan inválido, `cuts` es `[]` y `vmap()` es un VMAP vacío válido.
+`ads.cuts` es la lista de cortes del plan en orden, `[{ id, at, position, tagUrl, requests: [{ provider, tagUrl }] }]`. `requests` son las solicitudes del corte en el orden en que se piden (hasta 3): `provider` es `gam` (tags de `https://pubads.g.doubleclick.net/gampad/ads`) o `iadserver` (tags de `https://ads.iadserver.com/gampad/ads`); el módulo descarta cualquier otro proveedor u host, y un corte sin solicitudes válidas. `tagUrl` es siempre el de la primera solicitud, así que ya no es necesariamente de Google Ad Manager. Los tags de GAM llevan `url` y `description_url` con la URL de la página; los de iADServer llevan `sid`, el identificador de la vista. Ninguno lleva `correlator`. Un plan anterior, sin `requests`, da una sola solicitud `gam` por corte. Los gráficos de escena siguen aceptando sólo tags de GAM.
+
+`ads.vmap()` devuelve un VMAP 1.0 con un `AdBreak` lineal por corte (`timeOffset="start"` para el segundo 0) y un `correlator` nuevo en cada llamada. Usa sólo la primera solicitud de cada corte: **no tiene respaldo** si esa solicitud vuelve vacía. Sin cortes, o con un plan inválido, `cuts` es `[]` y `vmap()` es un VMAP vacío válido.
+
+`sessionId` (opcional) es el identificador de la vista que se manda a iADServer como `sid`. Si no lo pasás, el módulo genera uno al azar en cada `attachAds` y lo guarda sólo en memoria.
 
 Hay tres maneras de usarlos:
 
-1. **Tu propio reproductor de anuncios**: programá los cortes con `ads.cuts` y pedí cada `tagUrl` (agregando tu `correlator`).
-2. **Tu propio IMA**: pasá `ads.vmap()` como `adsResponse` de tu `AdsRequest`.
+1. **Tu propio reproductor de anuncios**: programá los cortes con `ads.cuts` y recorré las `requests` de cada uno como se explica en [Players de terceros](#players-de-terceros).
+2. **Tu propio IMA**: pasá `ads.vmap()` como `adsResponse` de tu `AdsRequest` (sólo la primera solicitud de cada corte).
 3. **El reproductor del módulo**: con `linear: 'ima'` y un `adContainer` (el elemento sobre el video donde IMA dibuja), el módulo carga `ima3.js` una sola vez, pide el VMAP y deja que IMA programe los cortes. Llamá a `ads.start()` dentro del gesto de reproducción del espectador. Durante un corte pausa el video y llama `session.setLinearAd(true)`; al terminar, o ante un error o un corte vacío, vuelve a `false` y reanuda el contenido. `onEvent({ type, cut })` recibe `break_start`, `break_end` y `break_error`.
+
+Cuando algún corte tiene más de una solicitud, el módulo programa él mismo los cortes en lugar de usar el VMAP: no pide nada antes de `start()`, pide el preroll en `start()` y cada midroll unos 8 segundos antes. Pregunta a la primera solicitud y, si vuelve vacía, falla o no responde en 5 segundos, pasa a la siguiente; el contenido se reanuda cuando un anuncio se reproduce o cuando se acaba la lista. Cada corte emite `break_start` una sola vez y después `break_end` o `break_error`; `break_error` significa que fallaron todas las solicitudes. Si todas vuelven vacías antes del corte, el contenido nunca se pausa: `break_error` puede llegar sin `break_start` y antes del momento del corte, igual que con una sola solicitud cuando el corte vuelve vacío mientras se prepara. Mientras se piden las solicitudes del preroll, el módulo retiene el contenido él mismo: si el video ya se está reproduciendo, o empieza a reproducirse (por ejemplo con `ads.start(); video.play();`), lo pausa y lo reanuda cuando el preroll termina o falla; si nunca lo reprodujiste, o el espectador lo pausó mientras tanto, no lo reanuda. Si `destroy()` llega durante esa retención, devuelve el contenido reanudándolo, sin eventos. Un anuncio que IMA ya está empezando conserva sus 5 segundos aunque se cumplan los 8 de retención. Como esa reanudación ocurre fuera del gesto del espectador, si el navegador rechaza `play()` el módulo emite `{ type: 'resume_blocked', cut }`: mostrá tu control de reproducción. Al entrar con el video ya avanzado, los cortes que quedaron atrás no se piden; un corte que el espectador cruza buscando durante la reproducción sí (sólo el último cruzado). Si un corte no empieza tras 2 segundos de contenido después de su momento, o el contenido queda pausado 8 segundos sin anuncio, se emite `break_error` y el contenido sigue. Para diagnóstico, `onEvent` recibe además `{ type: 'break_request', cut, provider, attempt }` por cada intento y `{ type: 'break_no_fill', cut, provider, attempt }` cuando uno vuelve vacío o falla (`attempt` empieza en 1).
 
 ```js
 const ads = attachAds({ session, video, plan, linear: 'ima', adContainer });
@@ -185,7 +191,17 @@ const vmap = ads.vmap(); // Pasalo como respuesta de anuncios (adsResponse) de l
 //   ads.setBreakActive(true);  ...  ads.setBreakActive(false);
 ```
 
-Cada llamada a `ads.vmap()` trae un `correlator` nuevo: pedilo una vez por reproducción. Al cerrar el player, `ads.destroy()`.
+Cada llamada a `ads.vmap()` trae un `correlator` nuevo: pedilo una vez por reproducción. El VMAP lleva sólo la primera solicitud de cada corte y no tiene respaldo. Al cerrar el player, `ads.destroy()`.
+
+**Un player que programa sus propios cortes** con `ads.cuts` recorre las `requests` de cada corte en orden:
+
+1. Agregá un `correlator` nuevo al `tagUrl` en cada intento (también al repetir una solicitud) y esperá hasta 5 segundos.
+2. Un VAST vacío, un error o el vencimiento del plazo pasan a la solicitud siguiente.
+3. Pará en la primera que empieza a reproducirse; si se acaba la lista, seguí con el contenido.
+
+Usá el mismo `sid` de iADServer durante toda la vista (pasá `sessionId` a `attachAds` si ya tenés un identificador propio). Retené la primera reproducción hasta que el preroll empiece o falle (`break_start` o `break_error` con el reproductor del módulo, que además retiene el contenido por su cuenta). `break_error` puede llegar sin `break_start` y antes del momento del corte.
+
+Google Ad Manager aplica reglas a nivel de stream entre los cortes de una misma reproducción (topes de frecuencia, exclusiones): no reinicies el stream entre cortes. Llamá a `contentComplete` sólo al final real del contenido; el módulo hace lo mismo.
 
 ## Samsung AVPlay
 
