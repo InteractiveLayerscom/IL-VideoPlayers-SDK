@@ -187,6 +187,8 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
   const unlisten = video ? listenToVideo(video, session.tick) : () => {};
   return {
     ...session,
+    // The ads module asks for scene products only when this session renders commerce.
+    commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
       session.destroy();

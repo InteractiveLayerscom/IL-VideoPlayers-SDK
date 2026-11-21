@@ -338,3 +338,45 @@ test('the browser shows Comprar over the confirmed linear spot', () => {
   surface.hide();
   window.close();
 });
+
+test('the hand-off reply is opened only over https: no link for another scheme, no QR image unless https', async () => {
+  const outer = new JSDOM('<iframe></iframe>').window;
+  const window = outer.document.querySelector('iframe').contentWindow;
+  window.document.body.innerHTML = '<main><button>Shop</button></main>';
+  const stage = window.document.querySelector('main');
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const replies = [
+    { continueUrl: 'javascript:alert(1)', qrImageUrl: 'https://ads.example/qr.png', link: false, qr: false },
+    { continueUrl: 'http://shop.example/checkout', qrImageUrl: 'https://ads.example/qr.png', link: false, qr: false },
+    { continueUrl: 'https://shop.example/checkout', qrImageUrl: 'data:image/png;base64,AAAA', link: true, qr: false },
+    { continueUrl: 'https://shop.example/checkout', qrImageUrl: 'https://ads.example/qr.png', link: true, qr: true },
+  ];
+  for (const reply of replies) {
+    const shop = commerceSurface(stage, { locale: 'en' }, async () => ({ ok: true, json: async () => reply }));
+    shop.open(cue, cue.commerce, stage.querySelector('button'), () => true);
+    [...stage.querySelectorAll('button')].find(el => el.textContent === 'Buy').click();
+    await settle();
+    const result = stage.querySelector('.il-commerce-result');
+    assert.equal(!!result.querySelector('a'), reply.link, reply.continueUrl);
+    if (reply.link) assert.equal(result.querySelector('a').href, 'https://shop.example/checkout');
+    else assert.equal(result.textContent, 'Could not prepare the cart. Try again.');
+    assert.equal(!!result.querySelector('img'), reply.qr, reply.qrImageUrl);
+    shop.hide();
+  }
+  outer.close();
+});
+
+test('the viewUrl beacon is a no-cors request a browser actually sends (redirects followed)', () => {
+  // Fetch turns a no-cors request with any redirect mode but "follow" into a network error.
+  const { window } = new JSDOM('<main><button>Shop</button></main>');
+  const stage = window.document.querySelector('main');
+  const sent = [];
+  const shop = commerceSurface(stage, { locale: 'en' }, async (url, init) => { sent.push({ url, init }); return { ok: true }; });
+  shop.open(cue, cue.commerce, stage.querySelector('button'), () => true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, 'https://ads.example/view');
+  assert.equal(sent[0].init.mode, 'no-cors');
+  assert.ok(sent[0].init.redirect == null || sent[0].init.redirect === 'follow');
+  shop.hide();
+  window.close();
+});

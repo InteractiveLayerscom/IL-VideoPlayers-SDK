@@ -118,7 +118,7 @@ Qué hace:
 
 `ads.vmap()` devuelve un VMAP 1.0 con un `AdBreak` lineal por corte (`timeOffset="start"` para el segundo 0) y un `correlator` nuevo en cada llamada. Usa sólo la primera solicitud de cada corte: **no tiene respaldo** si esa solicitud vuelve vacía. Sin cortes, o con un plan inválido, `cuts` es `[]` y `vmap()` es un VMAP vacío válido.
 
-`sessionId` (opcional) es el identificador de la vista que se manda a iADServer como `sid`. Si no lo pasás, el módulo genera uno al azar en cada `attachAds` y lo guarda sólo en memoria.
+`sessionId` (opcional) es el identificador de la vista que se manda a iADServer como `sid`. Si no lo pasás, el módulo genera uno al azar en cada `attachAds` y lo guarda sólo en memoria. Si no lo pasás y el plan trae `commerce.session`, el módulo usa ese valor en lugar de uno al azar ([Producto con botón Comprar en la escena](#producto-con-botón-comprar-en-la-escena)). Un `sessionId` del host siempre se respeta.
 
 Hay tres maneras de usarlos:
 
@@ -159,7 +159,7 @@ import { loadPlan, planUrl } from '@interactivelayers/player-sdk/ads';
 const plan = await loadPlan(planUrl({ origin: 'https://console.interactivelayers.com', project, asset }));
 ```
 
-`planUrl` arma `<origin>/il-player/ad-plan?project=…&asset=…` (el origen debe ser `https:`; si no, lanza `TypeError`, igual que con un `project` o `asset` vacío). `loadPlan` nunca lanza: hace un solo `GET` sin cookies ni redirecciones y devuelve el plan, o `null`. El endpoint sólo responde a los dominios verificados del proyecto. `null` significa «reproducí sin anuncios esta vez»: sin plan todavía (el backend lo prepara en segundo plano), error de red o respuesta inválida. El navegador puede cachear la respuesta unos minutos. `loadPlan(url, { fetchImpl, signal })` acepta un `AbortSignal`.
+`planUrl` arma `<origin>/il-player/ad-plan?project=…&asset=…` (el origen debe ser `https:`; si no, lanza `TypeError`, igual que con un `project` o `asset` vacío). `loadPlan` nunca lanza: acepta una URL absoluta `https:` o una relativa, que resuelve contra la página (sin página, una relativa devuelve `null`); hace un solo `GET` sin cookies ni redirecciones y devuelve el plan, o `null`. El endpoint sólo responde a los dominios verificados del proyecto. `null` significa «reproducí sin anuncios esta vez»: sin plan todavía (el backend lo prepara en segundo plano), error de red o respuesta inválida. El navegador puede cachear la respuesta unos minutos. `loadPlan(url, { fetchImpl, signal })` acepta un `AbortSignal`.
 
 **HTML5 `<video>`.** El SDK reproduce los gráficos y el módulo pide los cortes a IMA.
 
@@ -202,6 +202,32 @@ Cada llamada a `ads.vmap()` trae un `correlator` nuevo: pedilo una vez por repro
 Usá el mismo `sid` de iADServer durante toda la vista (pasá `sessionId` a `attachAds` si ya tenés un identificador propio). Retené la primera reproducción hasta que el preroll empiece o falle (`break_start` o `break_error` con el reproductor del módulo, que además retiene el contenido por su cuenta). `break_error` puede llegar sin `break_start` y antes del momento del corte.
 
 Google Ad Manager aplica reglas a nivel de stream entre los cortes de una misma reproducción (topes de frecuencia, exclusiones): no reinicies el stream entre cortes. Llamá a `contentComplete` sólo al final real del contenido; el módulo hace lo mismo.
+
+### Producto con botón Comprar en la escena
+
+Cuando el plan trae `commerce` (`kind: "scene_product"`), el módulo pide a IL el producto de cada ventana y lo muestra con la misma ficha de compra que el feed de sesión ([Compra con Shopify](#compra-con-shopify)). Para activarlo, el host hace dos cosas:
+
+```js
+const session = attachHtmlVideo({ video, stage, timeline: 'media', commerce: { locale: 'es' } });
+const ads = attachAds({ session, video, stage, plan, planOrigin: 'https://console.interactivelayers.com' });
+```
+
+- `commerce` en el adaptador (`attachHtmlVideo`, `attachVideoJs`, `attachShaka`): las mismas opciones de [Compra con Shopify](#compra-con-shopify) (`locale`, `tv`, `navigate`). Sin ellas la sesión no dibuja la ficha y el módulo no pide productos.
+- `planOrigin` en `attachAds`: el origen del que el host obtuvo el plan, cuando no lo cargó con `loadPlan`. `commerce.url` tiene que estar en el origen del plan: el que usó `loadPlan` (el módulo lo recuerda), o bien el de la propia página o `planOrigin`. Si no, el módulo ignora `commerce` y sigue con el resto del plan. Un plan cargado con `loadPlan` no acepta otro origen aunque se pase `planOrigin`.
+- `sessionId` no hace falta para el producto: la sesión viene en el permiso de `commerce.url`. Para los cortes, un `sessionId` del host sigue siendo el `sid` de los pedidos de iADServer, como siempre (sus topes de frecuencia por espectador). Sin él, el módulo usa `commerce.session` del plan en lugar de uno al azar, así iADServer cuenta cortes y productos en la misma sesión. Una `session` que no cumple `[A-Za-z0-9_.:-]{1,128}` no se usa.
+
+Sin `plan.commerce`, o con un `kind` desconocido, nada cambia. Un plan sólo con `commerce` (sin `scenes` ni `cuts`) es válido.
+
+Qué hace:
+
+- Calcula las ventanas usables con `commerce.pacing` (igual que las de gráficos) y pide `commerce.url` con `window` y `locale` agregados `lead_ms` antes de cada una, o en el acto si un salto cae dentro de la ventana. `commerce.url` es opaca: ya trae el proyecto, el asset y un permiso firmado de corta duración que nombra la sesión, y el módulo sólo le agrega esas dos claves (con `?` o `&` según tenga o no consulta) sin leerla ni reescribirla. `locale` sale de `commerce.locale` del adaptador o del idioma del navegador (`es`, `en` o `pt-BR`). Sin cookies, sin redirecciones, `no-store` y con 6 segundos de límite. Un solo pedido por ventana y reproducción, sin reintentos, y uno a la vez.
+- `200` es la tarjeta: el módulo la recorta a la ventana y la agrega con `session.addCue`. `204`, `429`, cualquier otro estado, una tarjeta inválida (sin `commerce`, de otra ventana) o el vencimiento del plazo no muestran nada y no vuelven a pedir esa ventana.
+- `gap_after_seconds`, `max_per_video` y los 30 segundos entre inicios cuentan productos y gráficos juntos, incluidos los que se están pidiendo.
+- En una ventana que también está en `scenes.windows`, el Súper o la L esperan la respuesta del producto: con `200` gana el producto y no se pide el gráfico; con `204`, `429` o un error la ventana queda libre para el gráfico. El overlay de 300×250 sigue sus propias reglas.
+- La tarjeta se oculta durante cualquier corte (de IMA o `setBreakActive(true)`), cuando el contenido termina (`ended`) y al llegar a su `end`; vuelve si el corte termina antes. Con un reloj de contenido (inserción en servidor) sigue las mismas reglas que los gráficos: nunca sobre un anuncio y con la revisión por cuadro mientras está en pantalla.
+- Mediciones: `impressionUrl` una sola vez, la primera vez que la tarjeta queda visible (aunque vuelva tras un corte, y aunque la página vuelva a llamar a `attachAds` y reciba la misma entrega: el módulo recuerda en la página los `id` ya medidos); `viewUrl` una vez al abrir el detalle (lo envía la ficha); el `POST` a `handoffUrl` con `{ variantId }` al tocar **Comprar** es la intención de compra. `onEvent` recibe `request`, `fill`, `no_fill`, `error`, `impression` y `click` con `format: 'scene_product'`.
+
+**Comprar desde un player embebido.** En web, **Comprar** hace el `POST` y muestra **Continuar a Shopify**, un enlace que abre `continueUrl` en una pestaña nueva con el clic del espectador (los bloqueadores de ventanas emergentes no frenan un enlace que el espectador toca). Si la página corre dentro de un iframe, la ficha agrega además el QR de esa misma compra (`qrImageUrl`), porque un iframe con `sandbox` sin `allow-popups` no abre el enlace: el espectador termina la compra desde el celular. Para que el enlace funcione, el iframe del publisher debe permitir `allow-popups` y `allow-popups-to-escape-sandbox`. Con `commerce.navigate(url)` la app decide cómo abrir el destino. `continueUrl` y `qrImageUrl` se usan sólo si son HTTPS sin usuario ni contraseña: otro `continueUrl` muestra el aviso de error de la ficha y no abre nada, y otro `qrImageUrl` no se dibuja. En TV (`commerce: { tv: true }`) la compra es la de siempre: el QR. La página necesita `connect-src` para la ruta de IL y para `https://ads.iadserver.com`, e `img-src https:` para la tarjeta y el QR.
 
 ### Anuncios insertados en el stream (MediaTailor)
 

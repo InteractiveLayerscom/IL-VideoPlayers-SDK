@@ -42,6 +42,8 @@ Shaka también interpreta su perfil nativo con `CLASS="com.apple.hls.interstitia
 
 Los reproductores que habilitan la oferta comercial agregan `commerce=1` y `locale` al endpoint JSON por sesión. Pueden enviar `country` con el código ISO 3166-1 alfa-2 del mercado. Los idiomas de los controles son `es`, `en` y `pt-BR`. El servicio provee el contenido del producto en el idioma y la moneda disponibles para ese mercado.
 
+En video a demanda el mismo cue llega por otra vía: el plan de anuncios trae `commerce` (`kind: "scene_product"`, la ruta de IL, `lead_ms`, `pacing` y las ventanas) y el player pide la tarjeta de cada ventana a esa ruta, que ya trae el proyecto, el asset y un permiso firmado, agregándole sólo `window` y `locale`; la sesión sale del permiso y el plan la da en `commerce.session` para los pedidos de iADServer de los cortes cuando el host no usa su propio identificador de sesión. La ruta está en el mismo origen que el plan. La respuesta `200` es este mismo cue con `start` y `end` en milisegundos del video, más `window`; `204` o `429` es «sin producto». Detalle para el SDK web en [Producto con botón Comprar en la escena](../web/README.md#producto-con-botón-comprar-en-la-escena).
+
 Un cue comercial puede acompañar una gráfica `l`, `super` u `overlay`, o un spot vinculado con formato `midroll`. La tarjeta `overlay` usa el 30 % del ancho y el 32 % de la altura a partir del 64 % hacia la derecha y el 10 % hacia abajo. El manifiesto HLS puede entregar las gráficas convencionales por su contrato habitual. El catálogo, las variantes y el acceso al carrito se entregan al reproductor en la respuesta de su sesión.
 
 ```json

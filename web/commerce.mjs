@@ -82,6 +82,13 @@ const copy = {
 
 export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
   const doc = stage.ownerDocument;
+  const embedded = () => {
+    try {
+      return doc.defaultView.self !== doc.defaultView.top;
+    } catch {
+      return true;
+    }
+  };
   const viewed = new Set();
   let root;
 
@@ -103,7 +110,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     const key = JSON.stringify([cue.id, offer.id ?? null]);
     if (offer.viewUrl && !viewed.has(key)) {
       viewed.add(key);
-      void fetchImpl(offer.viewUrl, {mode:'no-cors', credentials:'omit', keepalive:true, redirect:'error'}).catch(() => {});
+      void fetchImpl(offer.viewUrl, {mode:'no-cors', credentials:'omit', keepalive:true}).catch(() => {});
     }
   }
   async function handoff(offer, variant, signal) {
@@ -162,7 +169,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     hide();
     const locale = commerceLocale(options.locale ?? offer.locale);
     if (options.tv) return mountTV(cue, offer, isActive, trigger, locale);
-    const [view, productText, variantText, buy, , continueText, closeText, loading, errorText] = copy[locale];
+    const [view, productText, variantText, buy, scanText, continueText, closeText, loading, errorText] = copy[locale];
     const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency });
     const previousFocus = trigger ?? doc.activeElement;
     const shell = doc.createElement('div');
@@ -305,6 +312,16 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
           link.target = '_blank';
           link.rel = 'noopener noreferrer';
           result.replaceChildren(link);
+          // Inside an iframe the page may be sandboxed without allow-popups, where the link opens nothing.
+          // The QR of the same hand-off (the TV path) still lets the viewer finish on a phone.
+          if (embedded() && isHttps(reply.qrImageUrl)) {
+            const qr = doc.createElement('img');
+            qr.src = reply.qrImageUrl;
+            qr.alt = scanText;
+            const caption = doc.createElement('span');
+            caption.textContent = scanText;
+            result.append(qr, caption);
+          }
           link.focus();
         }
       } catch {

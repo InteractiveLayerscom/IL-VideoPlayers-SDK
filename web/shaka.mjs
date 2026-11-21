@@ -173,6 +173,8 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
   const unlisten = listenToVideo(video, sync);
   return {
     ...session,
+    // The ads module asks for scene products only when this session renders commerce.
+    commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
       manager.removeEventListener('ad-started', onStarted);
