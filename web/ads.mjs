@@ -745,10 +745,12 @@ export function attachAds({
     if (!inBreak && time != null && (event?.type === 'playing' || video.paused === false)) played = true;
     for (const [id, cue] of cues) {
       // During a stitched ad every graphic leaves the session at once and comes back with the content.
-      if (time == null || (cue.product && time < cue.end && !productVisible(time))) {
+      // A product whose detail the viewer has open outlasts its window, but never a break.
+      const held = cue.product && !!session.holding?.(id);
+      if (time == null || (cue.product && (time < cue.end || held) && !productVisible(time))) {
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
-      } else if (time >= cue.end) {
+      } else if (time >= cue.end && !held) {
         cues.delete(id);
         if (cue.onScreen) session.removeCue(id);
       } else if (!cue.onScreen) cue.onScreen = session.addCue(cue.item, cue.hooks);

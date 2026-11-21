@@ -73,14 +73,17 @@ export function normalizeBrand(value) {
 
 const copy = {
   en: ['View product', 'Product', 'Variant', 'Buy', 'Scan with your phone', 'Continue to Shopify',
-    'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.'],
+    'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.', 'This offer is no longer available.'],
   es: ['Ver producto', 'Producto', 'Variante', 'Comprar', 'Escaneá el código con tu celular', 'Continuar a Shopify',
-    'Cerrar', 'Preparando tu carrito…', 'No se pudo preparar el carrito. Intentá de nuevo.'],
+    'Cerrar', 'Preparando tu carrito…', 'No se pudo preparar el carrito. Intentá de nuevo.', 'Esta oferta ya no está disponible.'],
   'pt-BR': ['Ver produto', 'Produto', 'Variante', 'Comprar', 'Escaneie com seu celular', 'Continuar para Shopify',
-    'Fechar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho. Tente novamente.'],
+    'Fechar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho. Tente novamente.', 'Esta oferta não está mais disponível.'],
 };
 
-export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
+// `hooks` lets the adapter follow the viewer: opened() when the detail opens, closed(byViewer) when it closes
+// (byViewer false when the card is taken away, by a break or the end of its time) and checkout() once the
+// purchase page or its QR is handed over.
+export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}) {
   const doc = stage.ownerDocument;
   const embedded = () => {
     try {
@@ -92,10 +95,23 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
   const viewed = new Set();
   let root;
 
+  const notify = (name, ...args) => {
+    try {
+      hooks[name]?.(...args);
+    } catch {
+      // The adapter's bookkeeping never breaks the card.
+    }
+  };
+
   function hide() {
-    root?.dispose();
+    const was = root;
     root = null;
+    was?.dispose();
+    if (was?.isOpen()) notify('closed', false);
   }
+
+  // The detail of this cue is open: the session keeps the card while the viewer is choosing.
+  const isOpen = cue => !!root && root.cue.id === cue.id && root.isOpen();
 
   function show(cue, isActive) {
     if (!options || !cue.commerce || root?.cue === cue) return;
@@ -118,7 +134,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({variantId:variant.id}),
       signal, credentials:'omit', cache:'no-store', redirect:'error',
     });
-    if (!response.ok) throw new Error('Cart unavailable');
+    // iADServer answers 404 once the delivery has expired (minutes after it was served) or the variant is gone.
+    if (!response.ok) throw Object.assign(new Error('Cart unavailable'), { gone: response.status === 404 });
     const data = await response.json();
     if (!isHttps(data.continueUrl)) throw new Error('Invalid checkout destination');
     return data;
@@ -134,26 +151,30 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       if (!isActive() || flow) return;
       opener.hidden = true;
       trackView(cue, offer);
+      notify('opened');
       flow = openTVShop(stage, {
         offer: { ...offer, imageUrl: offer.imageUrl ?? offer.images?.[0] ?? (cue.format !== 'midroll' ? cue.imageUrl : undefined) },
         locale, brand:cue.brand,
         onClose() {
-          if (trigger) { hide(); if (isActive() && trigger.isConnected) trigger.focus(); }
+          if (trigger) { root = null; tvRoot.dispose(); flow = null; if (isActive() && trigger.isConnected) trigger.focus(); }
           else { flow.dispose(); flow = null; opener.hidden = false; opener.focus(); }
+          notify('closed', true);
         },
         async prepareCheckout(variant, signal) {
           if (!isActive()) throw new Error('Offer expired');
           const reply = await handoff(offer, variant, signal);
           if (!isActive() || !isHttps(reply.qrImageUrl)) throw new Error('Invalid QR');
+          notify('checkout');
           return reply.qrImageUrl;
         },
       });
     }
-    root = {cue, dispose() {
+    const tvRoot = {cue, isOpen: () => Boolean(flow), dispose() {
       const ownsFocus = doc.activeElement === opener || Boolean(flow);
       flow?.dispose(); opener.remove();
       if (ownsFocus && activeBefore?.isConnected) activeBefore.focus();
     }};
+    root = tvRoot;
     if (trigger) launch();
     else {
       opener.addEventListener('click', launch);
@@ -169,7 +190,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     hide();
     const locale = commerceLocale(options.locale ?? offer.locale);
     if (options.tv) return mountTV(cue, offer, isActive, trigger, locale);
-    const [view, productText, variantText, buy, scanText, continueText, closeText, loading, errorText] = copy[locale];
+    const [view, productText, variantText, buy, scanText, continueText, closeText, loading, errorText, goneText] = copy[locale];
     const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency });
     const previousFocus = trigger ?? doc.activeElement;
     const shell = doc.createElement('div');
@@ -275,11 +296,14 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       shell.classList.add('il-commerce--open');
       buttons[offer.variants.indexOf(variant)].focus();
       trackView(cue, offer);
+      notify('opened');
     }
 
     function closePanel() {
       if (trigger) {
-        hide();
+        root = null;
+        shellRoot.dispose();
+        notify('closed', true);
         if (isActive() && trigger.isConnected) trigger.focus();
         return;
       }
@@ -291,6 +315,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       shell.classList.remove('il-commerce--open');
       open.hidden = false;
       open.focus();
+      notify('closed', true);
     }
 
     async function proceed() {
@@ -302,6 +327,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       try {
         const reply = await handoff(offer, variant, current.signal);
         if (request !== current || current.signal.aborted || !isActive()) return;
+        notify('checkout');
         if (options.navigate) {
           options.navigate(reply.continueUrl);
           result.replaceChildren();
@@ -324,8 +350,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
           }
           link.focus();
         }
-      } catch {
-        if (request === current && !current.signal.aborted && isActive()) result.textContent = errorText;
+      } catch (error) {
+        if (request === current && !current.signal.aborted && isActive()) result.textContent = error?.gone ? goneText : errorText;
       } finally {
         if (request === current) {
           request = null;
@@ -359,15 +385,16 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       event.preventDefault();
       event.stopPropagation();
     });
-    root = { cue, dispose() {
+    const shellRoot = { cue, isOpen: () => !panel.hidden, dispose() {
       request?.abort();
       const restoreFocus = shell.contains(doc.activeElement);
       shell.remove();
       if (restoreFocus && previousFocus?.isConnected) previousFocus.focus();
     } };
+    root = shellRoot;
     updateChoice();
     stage.appendChild(shell);
     if (trigger) openPanel();
   }
-  return { show, hide, open: openOffer, enabled: Boolean(options) };
+  return { show, hide, open: openOffer, isOpen, enabled: Boolean(options) };
 }

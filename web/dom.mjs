@@ -152,6 +152,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
     hide,
     update: scenes.update,
     applyAudioPermissions: scenes.applyAudioPermissions,
+    holding: cue => commerce.isOpen(cue),
     visible: cue => cue.scene ? scenes.visible() :
       layer?.style.visibility === 'visible' && images.length > 0 && images.every(imageVisible),
   };
@@ -168,7 +169,8 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
   const clock = programTime ?? (source.timeline === 'media' && video
     ? () => Math.round(video.currentTime * 1000)
     : () => nativeProgramTime(video));
-  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl);
+  const pausing = video && source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
+  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing);
   const allowVideo = source.secondaryVideo ?? !avplay;
   const allowAudio = allowVideo && source.secondaryVideoAudio === true;
   const window = stage.ownerDocument.defaultView;
@@ -191,7 +193,50 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
+      pausing?.dispose();
       session.destroy();
+    },
+  };
+}
+
+// commerce.pauseOnOpen: opening a product's detail pauses the video, so nothing (a break included) moves under a
+// viewer who is choosing. Closing it resumes only a pause the SDK made, if no one played or paused since; once the
+// purchase page or QR is handed over the video stays paused.
+function pauseOnOpen(video) {
+  let ours = false;
+  let expected = false;
+  const changed = () => {
+    if (expected) expected = false;
+    else ours = false;
+  };
+  video.addEventListener('play', changed);
+  video.addEventListener('pause', changed);
+  return {
+    opened() {
+      if (video.paused !== false) return;
+      ours = true;
+      expected = true;
+      video.pause?.();
+      // A pause that fires no event (already pausing) must not swallow the viewer's next one.
+      if (video.paused !== true) expected = false;
+    },
+    closed(byViewer) {
+      const resume = ours && byViewer && video.paused === true && !video.ended;
+      ours = false;
+      if (!resume) return;
+      expected = true;
+      try {
+        void Promise.resolve(video.play?.()).catch(() => { expected = false; });
+      } catch {
+        expected = false;
+      }
+    },
+    checkout() {
+      ours = false;
+    },
+    dispose() {
+      video.removeEventListener('play', changed);
+      video.removeEventListener('pause', changed);
     },
   };
 }

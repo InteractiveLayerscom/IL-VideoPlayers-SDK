@@ -106,19 +106,25 @@ export function createSession({
     }
   }
 
+  // The viewer has this card's detail open: it outlasts its window until they close it.
+  const holding = cue => !!cue.commerce && current?.id === cue.id && !!renderer.holding?.(cue);
+
   function render(time) {
     function canShow(cue) {
       if (!Number.isSafeInteger(time)) return false;
       if (cue.format === 'midroll') return inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot();
-      return !inBreak && contentKnown() && (cue.scene ? presenting() : playing());
+      // A card with a Buy button, like an interactive scene, stays while the viewer pauses to look at it;
+      // a plain graphic shows only during playback.
+      return !inBreak && contentKnown() && (cue.scene || cue.commerce ? presenting() : playing());
     }
+    const due = cue => (cue.start <= time && time < cue.end) || holding(cue);
     let active = null;
     for (const { cue } of pinned.values()) {
-      if (!active && canShow(cue) && cue.start <= time && time < cue.end) active = cue;
+      if (!active && canShow(cue) && due(cue)) active = cue;
     }
     for (const [id, cue] of cues) {
-      if (Number.isFinite(time) && cue.end < time - 120000) cues.delete(id);
-      else if (!active && canShow(cue) && cue.start <= time && time < cue.end) active = cue;
+      if (Number.isFinite(time) && cue.end < time - 120000 && !holding(cue)) cues.delete(id);
+      else if (!active && canShow(cue) && due(cue)) active = cue;
     }
     const hooks = active && pinned.get(active.id)?.cue === active ? pinned.get(active.id).hooks : null;
     if (active?.id !== current?.id) {
@@ -133,8 +139,7 @@ export function createSession({
             canShow(active) &&
             current?.id === active.id &&
             Number.isSafeInteger(now) &&
-            active.start <= now &&
-            now < active.end
+            ((active.start <= now && now < active.end) || holding(active))
           );
         }, hooks?.onClick);
     } else if (active && current !== active) {
@@ -184,6 +189,8 @@ export function createSession({
     tick,
     // The clock the cues are rendered from; the ads module checks a stitched plan uses the same one.
     clock,
+    // Whether the card with this id is on screen with its detail open.
+    holding: id => !!current && current.id === id && holding(current),
     addCue(item, { onVisible, onHidden, onClick } = {}) {
       const cue = normalizeCue(item);
       if (!cue || disposed) return false;
