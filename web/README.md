@@ -203,6 +203,32 @@ Usá el mismo `sid` de iADServer durante toda la vista (pasá `sessionId` a `att
 
 Google Ad Manager aplica reglas a nivel de stream entre los cortes de una misma reproducción (topes de frecuencia, exclusiones): no reinicies el stream entre cortes. Llamá a `contentComplete` sólo al final real del contenido; el módulo hace lo mismo.
 
+### Producto con botón Comprar en la escena
+
+Cuando el plan trae `commerce` (`kind: "scene_product"`), el módulo pide a IL el producto de cada ventana y lo muestra con la misma ficha de compra que el feed de sesión ([Compra con Shopify](#compra-con-shopify)). Para activarlo, el host hace dos cosas:
+
+```js
+const session = attachHtmlVideo({ video, stage, timeline: 'media', commerce: { locale: 'es' } });
+const ads = attachAds({ session, video, stage, plan, project, sessionId });
+```
+
+- `commerce` en el adaptador (`attachHtmlVideo`, `attachVideoJs`, `attachShaka`): las mismas opciones de [Compra con Shopify](#compra-con-shopify) (`locale`, `tv`, `navigate`). Sin ellas la sesión no dibuja la ficha y el módulo no pide productos.
+- `project` en `attachAds`: el identificador del proyecto, el mismo que se pasó a `planUrl`. Si el plan trae `project_id`, gana el del plan.
+- `sessionId` (opcional): el identificador de la vista. Es el `sid` del pedido de producto y de los pedidos de iADServer de los cortes; sin él, el módulo genera uno por `attachAds`. Debe cumplir `[A-Za-z0-9_.:-]{1,128}`; si no, no se piden productos.
+
+Sin `plan.commerce`, o con un `kind` desconocido, nada cambia. Un plan sólo con `commerce` (sin `scenes` ni `cuts`) es válido.
+
+Qué hace:
+
+- Calcula las ventanas usables con `commerce.pacing` (igual que las de gráficos) y pide `GET <commerce.url>?project&asset&window&sid&locale` `lead_ms` antes de cada una, o en el acto si un salto cae dentro de la ventana. `locale` sale de `commerce.locale` del adaptador o del idioma del navegador (`es`, `en` o `pt-BR`). Sin cookies, sin redirecciones, `no-store` y con 6 segundos de límite. Un solo pedido por ventana y reproducción, sin reintentos, y uno a la vez.
+- `200` es la tarjeta: el módulo la recorta a la ventana y la agrega con `session.addCue`. `204`, `429`, cualquier otro estado, una tarjeta inválida (sin `commerce`, de otra ventana) o el vencimiento del plazo no muestran nada y no vuelven a pedir esa ventana.
+- `gap_after_seconds`, `max_per_video` y los 30 segundos entre inicios cuentan productos y gráficos juntos, incluidos los que se están pidiendo.
+- En una ventana que también está en `scenes.windows`, el Súper o la L esperan la respuesta del producto: con `200` gana el producto y no se pide el gráfico; con `204`, `429` o un error la ventana queda libre para el gráfico. El overlay de 300×250 sigue sus propias reglas.
+- La tarjeta se oculta durante cualquier corte (de IMA o `setBreakActive(true)`), cuando el contenido termina (`ended`) y al llegar a su `end`; vuelve si el corte termina antes. Con un reloj de contenido (inserción en servidor) sigue las mismas reglas que los gráficos: nunca sobre un anuncio y con la revisión por cuadro mientras está en pantalla.
+- Mediciones: `impressionUrl` una sola vez, la primera vez que la tarjeta queda visible (aunque vuelva tras un corte); `viewUrl` una vez al abrir el detalle (lo envía la ficha); el `POST` a `handoffUrl` con `{ variantId }` al tocar **Comprar** es la intención de compra. `onEvent` recibe `request`, `fill`, `no_fill`, `error`, `impression` y `click` con `format: 'scene_product'`.
+
+**Comprar desde un player embebido.** En web, **Comprar** hace el `POST` y muestra **Continuar a Shopify**, un enlace que abre `continueUrl` en una pestaña nueva con el clic del espectador (los bloqueadores de ventanas emergentes no frenan un enlace que el espectador toca). Si la página corre dentro de un iframe, la ficha agrega además el QR de esa misma compra (`qrImageUrl`), porque un iframe con `sandbox` sin `allow-popups` no abre el enlace: el espectador termina la compra desde el celular. Para que el enlace funcione, el iframe del publisher debe permitir `allow-popups` y `allow-popups-to-escape-sandbox`. Con `commerce.navigate(url)` la app decide cómo abrir el destino. En TV (`commerce: { tv: true }`) la compra es la de siempre: el QR. La página necesita `connect-src` para la ruta de IL y para `https://ads.iadserver.com`, e `img-src https:` para la tarjeta y el QR.
+
 ### Anuncios insertados en el stream (MediaTailor)
 
 Con la entrega por inserción en el servidor, AWS Elemental MediaTailor cose los anuncios de video dentro del HLS y el player del publisher sólo dibuja los gráficos de escena con el SDK. En ese stream `video.currentTime` es tiempo de stream (contenido más anuncios), así que el módulo programa las escenas con un **reloj de contenido**: en cada momento responde los segundos de contenido que se están viendo, o `null` cuando hay un anuncio en pantalla o no se puede saber la posición.

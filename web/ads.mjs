@@ -1,6 +1,8 @@
 // Optional ads module. Hosts import it only when the backend returned an ad plan,
 // so a player without a plan never loads ad-server code.
 import { videoClock } from './content-clock.mjs';
+import { commerceLocale } from './commerce.mjs';
+import { normalizeCue } from './cues.mjs';
 
 export { hlsContentClock, videoClock } from './content-clock.mjs';
 
@@ -27,6 +29,10 @@ const MAX_REQUESTS = 3;
 const OVERLAY_UNIT = /^\/\d+(\/[^\s/]+)*$/;
 // Below this the 300x250 box would cover most of the picture.
 const MIN_STAGE = [640, 360];
+const PRODUCT = 'scene_product';
+// IL's route waits up to 4 s for iADServer; the rest is the network.
+const PRODUCT_TIMEOUT_MS = 6000;
+const SID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -68,24 +74,33 @@ function loadScriptOnce(src) {
   return scripts.get(src);
 }
 
+const pacingValid = (pacing) => isNumber(pacing?.min_seconds) &&
+  (pacing.max_seconds == null || isNumber(pacing.max_seconds)) &&
+  (pacing.gap_after_seconds == null || isNumber(pacing.gap_after_seconds)) &&
+  (pacing.cut_clearance_seconds == null || isNumber(pacing.cut_clearance_seconds)) &&
+  (pacing.max_per_video == null || Number.isInteger(pacing.max_per_video));
+
+// The scene product. A `commerce` part this module cannot read is ignored, not the whole plan.
+function readCommerce(commerce) {
+  if (commerce?.kind !== PRODUCT || !Number.isSafeInteger(commerce.lead_ms) || commerce.lead_ms < 0 ||
+      !pacingValid(commerce.pacing) || !Array.isArray(commerce.windows)) return null;
+  try {
+    const url = new URL(commerce.url);
+    if (url.protocol !== 'https:' || url.username || url.password) return null;
+  } catch {
+    return null;
+  }
+  return commerce;
+}
+
 function readPlan(plan, now) {
   const scenes = plan?.scenes;
-  const pacing = scenes?.pacing;
   const expires = typeof plan?.expires_at === 'string' ? Date.parse(plan.expires_at) : NaN;
   if (plan?.version !== 1 || !(expires > now)) return null;
   // A timeline this module does not know could put graphics over ads: no plan rather than a wrong one.
   if (plan.timeline != null && !stitchedTimeline(plan.timeline)) return null;
-  if (scenes == null) return Array.isArray(plan.cuts) ? plan : null;
-  if (
-    !Array.isArray(scenes?.formats) ||
-    !Array.isArray(scenes.windows) ||
-    !isNumber(pacing?.min_seconds) ||
-    (pacing.max_seconds != null && !isNumber(pacing.max_seconds)) ||
-    (pacing.gap_after_seconds != null && !isNumber(pacing.gap_after_seconds)) ||
-    (pacing.cut_clearance_seconds != null && !isNumber(pacing.cut_clearance_seconds)) ||
-    (pacing.max_per_video != null && !Number.isInteger(pacing.max_per_video))
-  )
-    return null;
+  if (scenes == null) return Array.isArray(plan.cuts) || readCommerce(plan.commerce) ? plan : null;
+  if (!Array.isArray(scenes?.formats) || !Array.isArray(scenes.windows) || !pacingValid(scenes.pacing)) return null;
   return plan;
 }
 
@@ -131,8 +146,8 @@ export function servableFormats(scenes) {
 }
 
 // The part of each window where a graphic may show, clear of ad breaks.
-export function usableWindows(plan) {
-  const { pacing, windows } = plan.scenes;
+export function usableWindows(plan, part = plan.scenes) {
+  const { pacing, windows } = part;
   const clearance = ms(pacing.cut_clearance_seconds ?? 0);
   const stitched = plan.timeline?.kind === 'stitched';
   const breaks = (stitched ? (plan.timeline.breaks ?? []).map((at) => ({ at })) : Array.isArray(plan.cuts) ? plan.cuts : [])
@@ -318,7 +333,7 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock,
+  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock, project,
 } = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
@@ -360,6 +375,21 @@ export function attachAds({
   const breakOn = () => inBreak || hostBreak || now() == null;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
+  // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })), the project and
+  // a sid IL accepts; without them nothing about it is requested.
+  const shop = readCommerce(valid.commerce);
+  const projectId = typeof valid.project_id === 'string' && valid.project_id ? valid.project_id
+    : typeof project === 'string' && project ? project : null;
+  const shopOn = !!shop && !!session.commerce && !!projectId && typeof valid.asset_id === 'string' && !!valid.asset_id &&
+    SID.test(sid);
+  const shopWindows = shopOn ? usableWindows(valid, shop) : [];
+  const shopIds = new Set(shopOn ? shop.windows.map((window) => window?.id) : []);
+  // Per window: 'pending', 'filled' or 'empty' (204, 429, error or timeout: free for a graphic).
+  const products = new Map();
+  let productController = null;
+  const pendingWindows = new Set();
+  // Pacing counts graphics and products shown, and the ones being asked for.
+  const committed = () => [...shown, ...pendingWindows];
   const pacing = scenes?.pacing;
   const minMs = scenes ? ms(pacing.min_seconds) : 0;
   const attempted = new Set();
@@ -569,6 +599,15 @@ export function attachAds({
 
   async function request(window) {
     attempted.add(window.id);
+    pendingWindows.add(window);
+    try {
+      await requestGraphic(window);
+    } finally {
+      pendingWindows.delete(window);
+    }
+  }
+
+  async function requestGraphic(window) {
     const list = servableNow();
     const { format, tagUrl } = list[shown.length % list.length];
     if (format === OVERLAY) return requestOverlay(window);
@@ -595,6 +634,81 @@ export function attachAds({
     }
   }
 
+  // Until the product of a window is settled the graphic waits, unless no product request can come any more.
+  function productAwaited(window, time) {
+    if (products.has(window.id)) return products.get(window.id) !== 'empty';
+    const product = shopWindows.find((entry) => entry.id === window.id);
+    return !!product && time < product.end && product.end - Math.max(product.start, time) >= ms(shop.pacing.min_seconds) &&
+      pacingAllows(product, committed(), shop.pacing);
+  }
+
+  async function requestProduct(window) {
+    products.set(window.id, 'pending');
+    pendingWindows.add(window);
+    const abort = new AbortController();
+    productController = abort;
+    const timeout = setTimeout(() => abort.abort(), PRODUCT_TIMEOUT_MS);
+    let outcome = 'empty';
+    try {
+      const url = new URL(shop.url);
+      url.searchParams.set('project', projectId);
+      url.searchParams.set('asset', valid.asset_id);
+      url.searchParams.set('window', window.id);
+      url.searchParams.set('sid', sid);
+      url.searchParams.set('locale', commerceLocale(session.commerce.locale ?? globalThis.navigator?.language));
+      emit('request', PRODUCT, window);
+      const res = await fetchImpl(url.href, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
+      if (disposed || abort.signal.aborted) reject('aborted');
+      // 204 (no product) and 429 (rate limit) are the same answer: nothing in this window.
+      if (res.status !== 200) return emit('no_fill', PRODUCT, window);
+      const card = await res.json();
+      if (disposed || abort.signal.aborted) reject('aborted');
+      const start = Math.max(window.start, Number(card?.start));
+      const end = Math.min(window.end, Number(card?.end));
+      const item = { ...card, start, end };
+      const cue = card && (card.window == null || card.window === window.id) ? normalizeCue(item) : null;
+      if (!cue?.commerce || cue.format === 'midroll') reject('invalid_product');
+      outcome = 'filled';
+      shown.push(window);
+      emit('fill', PRODUCT, window);
+      drawProduct(window, item, cue);
+    } catch {
+      if (!disposed) emit('error', PRODUCT, window);
+    } finally {
+      clearTimeout(timeout);
+      pendingWindows.delete(window);
+      if (productController === abort) productController = null;
+      if (!disposed) {
+        products.set(window.id, outcome);
+        // A window left free for a graphic is looked at again without waiting for the next video event.
+        if (outcome === 'empty') sync();
+      }
+    }
+  }
+
+  // The card goes through the session's commerce rendering (Buy, viewUrl, hand-off); the impression is fired
+  // here, once per card, when the session reports it visible.
+  function drawProduct(window, item, cue) {
+    let measured = false;
+    const hooks = {
+      onVisible() {
+        if (measured || disposed) return;
+        measured = true;
+        if (cue.impressionUrl) beacon(cue.impressionUrl);
+        emit('impression', PRODUCT, window);
+      },
+      onClick() {
+        emit('click', PRODUCT, window);
+      },
+    };
+    const visible = productVisible(now());
+    if (!visible || session.addCue(item, hooks)) cues.set(cue.id, { end: cue.end, item, hooks, onScreen: visible, product: true });
+    watch();
+  }
+  // A product card is off during any video break and once the content has ended; it comes back while its time remains.
+  const productVisible = (time) => time != null && !inBreak && !hostBreak && video.ended !== true;
+  const productLive = () => [...cues.values()].some((cue) => cue.product);
+
   function sync(event) {
     if (disposed) return;
     // No ad server is asked before the viewer has started playback in this session.
@@ -603,7 +717,7 @@ export function attachAds({
     if (!inBreak && time != null && (event?.type === 'playing' || video.paused === false)) played = true;
     for (const [id, cue] of cues) {
       // During a stitched ad every graphic leaves the session at once and comes back with the content.
-      if (time == null) {
+      if (time == null || (cue.product && time < cue.end && !productVisible(time))) {
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
       } else if (time >= cue.end) {
@@ -615,11 +729,21 @@ export function attachAds({
     watch();
     if (time == null) return;
     schedule(time / 1000);
+    if (!played || breakOn()) return;
+    // One product request at a time and one card at a time, asked `lead_ms` ahead.
+    if (shopOn && !productController && !productLive()) {
+      const product = shopWindows.find((window) => !products.has(window.id) &&
+        window.start - shop.lead_ms <= time && time < window.end &&
+        window.end - Math.max(window.start, time) >= ms(shop.pacing.min_seconds) && pacingAllows(window, committed(), shop.pacing));
+      if (product) void requestProduct(product);
+    }
     // The single overlay slot is not reused while it still holds a creative.
-    if (!played || controller || overlay.live || breakOn() || !servableNow().length) return;
+    if (controller || overlay.live || !servableNow().length) return;
+    // A window with a product waits for its answer; a product (200) wins over the graphics in that window.
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
-      window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, shown, pacing));
+      window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, committed(), pacing) &&
+      !(shopIds.has(window.id) && productAwaited(window, time)));
     if (next) void request(next);
   }
 
@@ -1167,6 +1291,8 @@ export function attachAds({
       }
       controller?.abort();
       controller = null;
+      productController?.abort();
+      productController = null;
       for (const [id, cue] of cues) if (cue.onScreen) session.removeCue(id);
       cues.clear();
     },
