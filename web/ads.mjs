@@ -1,5 +1,8 @@
 // Optional ads module. Hosts import it only when the backend returned an ad plan,
 // so a player without a plan never loads ad-server code.
+import { videoClock } from './content-clock.mjs';
+
+export { hlsContentClock, videoClock } from './content-clock.mjs';
 
 export const PREPARE_MS = 4000;
 const REQUEST_TIMEOUT_MS = 4000;
@@ -70,6 +73,8 @@ function readPlan(plan, now) {
   const pacing = scenes?.pacing;
   const expires = typeof plan?.expires_at === 'string' ? Date.parse(plan.expires_at) : NaN;
   if (plan?.version !== 1 || !(expires > now)) return null;
+  // A timeline this module does not know could put graphics over ads: no plan rather than a wrong one.
+  if (plan.timeline != null && !stitchedTimeline(plan.timeline)) return null;
   if (scenes == null) return Array.isArray(plan.cuts) ? plan : null;
   if (
     !Array.isArray(scenes?.formats) ||
@@ -82,6 +87,13 @@ function readPlan(plan, now) {
   )
     return null;
   return plan;
+}
+
+// The stream carries server-stitched ads; scene windows and `breaks` are content seconds.
+function stitchedTimeline(timeline) {
+  return timeline?.kind === 'stitched' && typeof timeline.pdt_origin === 'string' &&
+    Number.isFinite(Date.parse(timeline.pdt_origin)) &&
+    (timeline.breaks == null || (Array.isArray(timeline.breaks) && timeline.breaks.every((at) => isNumber(at) && at >= 0)));
 }
 
 export function graphicTagAllowed(tagUrl) {
@@ -122,7 +134,9 @@ export function servableFormats(scenes) {
 export function usableWindows(plan) {
   const { pacing, windows } = plan.scenes;
   const clearance = ms(pacing.cut_clearance_seconds ?? 0);
-  const breaks = (Array.isArray(plan.cuts) ? plan.cuts : []).map((cut) => cut?.at).filter(isNumber).map(ms);
+  const stitched = plan.timeline?.kind === 'stitched';
+  const breaks = (stitched ? (plan.timeline.breaks ?? []).map((at) => ({ at })) : Array.isArray(plan.cuts) ? plan.cuts : [])
+    .map((cut) => cut?.at).filter(isNumber).map(ms);
   const usable = [];
   for (const window of windows) {
     if (typeof window?.id !== 'string' || !Number.isSafeInteger(window.start_ms) || !Number.isSafeInteger(window.end_ms)) continue;
@@ -304,13 +318,28 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId,
+  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock,
 } = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
+  // Stitched: the ads are already in the stream. Nothing here requests or plays a video break, whatever
+  // the host passed, and without a content clock the video position is stream time: no graphics either.
+  const stitched = valid.timeline?.kind === 'stitched';
+  if (stitched && typeof clock?.time !== 'function') return inert;
+  // Cues are drawn by the session from its own clock: under a stitched plan it must be this clock,
+  // or they would show by stream time. Said once through onEvent, then nothing is drawn.
+  if (stitched && (typeof clock.programTime !== 'function' || session.clock !== clock.programTime)) {
+    try {
+      onEvent?.({ type: 'clock_mismatch' });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+    return inert;
+  }
+  const content = typeof clock?.time === 'function' ? clock : videoClock(video);
   const page = pageUrl ?? valid.page_url;
   const sid = typeof sessionId === 'string' && sessionId ? sessionId : randomId();
-  const cuts = Object.freeze(planCuts(valid.cuts, page, sid).map(Object.freeze));
+  const cuts = Object.freeze(stitched ? [] : planCuts(valid.cuts, page, sid).map(Object.freeze));
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
   const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
@@ -327,7 +356,8 @@ export function attachAds({
   let played = (Number(video.played?.length) || 0) > 0;
   const failedCuts = new Set();
   const startedCuts = new Set();
-  const breakOn = () => inBreak || hostBreak;
+  // A stitched ad on screen (content time unknown) counts as a break.
+  const breakOn = () => inBreak || hostBreak || now() == null;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
   const pacing = scenes?.pacing;
@@ -342,7 +372,7 @@ export function attachAds({
     gaveUp: false, loadTimer: null, watchdog: null, observer: null };
   // With a cut of several requests the module schedules the breaks and asks them in order;
   // every other plan keeps IMA's ad rules (one VMAP) exactly as before.
-  const useIma = linear === 'ima' && cuts.length > 0 && !!adContainer;
+  const useIma = !stitched && linear === 'ima' && cuts.length > 0 && !!adContainer;
   const waterfall = useIma && cuts.some((cut) => cut.requests.length > 1);
   // token: bumped by every attempt, cancel and settle, so late IMA answers are recognised as stale.
   const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false,
@@ -364,12 +394,21 @@ export function attachAds({
       // A failed pixel never affects playback.
     }
   };
-  const now = () => Math.round((Number(video.currentTime) || 0) * 1000);
+  // Content milliseconds, or null while a stitched ad plays (or the position cannot be told).
+  const now = () => {
+    let seconds;
+    try {
+      seconds = content.time();
+    } catch {
+      seconds = null;
+    }
+    return isNumber(seconds) ? ms(seconds) : null;
+  };
 
   function draw(window, format, ad) {
     const id = 'il-ads-' + window.id;
     let measured = false;
-    const added = session.addCue({
+    const item = {
       id,
       format: SDK_FORMATS[format],
       start: window.start,
@@ -377,7 +416,8 @@ export function attachAds({
       imageUrl: ad.imageUrl,
       mimeType: ad.mimeType,
       ...(ad.clickUrl ? { clickUrl: ad.clickUrl } : {}),
-    }, {
+    };
+    const hooks = {
       onVisible() {
         if (measured || disposed) return;
         measured = true;
@@ -388,8 +428,11 @@ export function attachAds({
         for (const url of ad.clickTracking) beacon(url);
         emit('click', format, window);
       },
-    });
-    if (added) cues.set(id, window.end);
+    };
+    // Filled while a stitched ad plays: it waits off the session until content is back.
+    const waiting = now() == null;
+    if (waiting || session.addCue(item, hooks)) cues.set(id, { end: window.end, item, hooks, onScreen: !waiting });
+    watch();
   }
 
   const onRender = (event) => {
@@ -460,8 +503,8 @@ export function attachAds({
   // Visible only during the usable part of its window and never during a video break.
   function updateOverlay(time) {
     if (!overlay.live) return;
-    if (time >= overlay.live.window.end) return dropSlot();
-    overlay.node.style.display = !breakOn() && time >= overlay.live.window.start ? 'block' : 'none';
+    if (time != null && time >= overlay.live.window.end) return dropSlot();
+    overlay.node.style.display = time != null && !breakOn() && time >= overlay.live.window.start ? 'block' : 'none';
   }
 
   async function requestOverlay(window) {
@@ -506,12 +549,13 @@ export function attachAds({
         dropSlot();
         return emit('no_fill', OVERLAY, window);
       }
-      if (now() >= window.end) return dropSlot();
+      if (now() != null && now() >= window.end) return dropSlot();
       shown.push(window);
       overlay.live = { window, slot: overlay.slot };
       overlay.viewed = false;
       emit('fill', OVERLAY, window);
       updateOverlay(now());
+      watch();
     } catch {
       if (disposed) return;
       dropSlot();
@@ -536,10 +580,10 @@ export function attachAds({
       emit('request', format, window);
       const res = await fetchImpl(url, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
       if (!res.ok) reject('graphic_vast_http_error');
-      const ad = parseGraphicVast(await res.text(), format, window.end - Math.max(window.start, now()));
+      const ad = parseGraphicVast(await res.text(), format, window.end - Math.max(window.start, now() ?? window.start));
       if (disposed || abort.signal.aborted) return;
       if (!ad) return emit('no_fill', format, window);
-      if (now() >= window.end) return;
+      if (now() != null && now() >= window.end) return;
       shown.push(window);
       emit('fill', format, window);
       draw(window, format, ad);
@@ -555,14 +599,21 @@ export function attachAds({
     if (disposed) return;
     // No ad server is asked before the viewer has started playback in this session.
     // An ad playing in the content <video> (iOS custom playback) is not content playback.
-    if (!inBreak && (event?.type === 'playing' || video.paused === false)) played = true;
     const time = now();
-    for (const [id, end] of cues) {
-      if (time < end) continue;
-      cues.delete(id);
-      session.removeCue(id);
+    if (!inBreak && time != null && (event?.type === 'playing' || video.paused === false)) played = true;
+    for (const [id, cue] of cues) {
+      // During a stitched ad every graphic leaves the session at once and comes back with the content.
+      if (time == null) {
+        if (cue.onScreen) session.removeCue(id);
+        cue.onScreen = false;
+      } else if (time >= cue.end) {
+        cues.delete(id);
+        if (cue.onScreen) session.removeCue(id);
+      } else if (!cue.onScreen) cue.onScreen = session.addCue(cue.item, cue.hooks);
     }
     updateOverlay(time);
+    watch();
+    if (time == null) return;
     schedule(time / 1000);
     // The single overlay slot is not reused while it still holds a creative.
     if (!played || controller || overlay.live || breakOn() || !servableNow().length) return;
@@ -995,7 +1046,40 @@ export function attachAds({
     }
   }
 
+  // With a stitched clock, while anything the module drew is on screen it is re-checked on every frame
+  // (video frames where the browser reports them), not only on video events, so an ad never shows under it.
+  const frames = { id: null, video: false };
+  const drawing = () => overlay.live || [...cues.values()].some((cue) => cue.onScreen);
+  function guard() {
+    frames.id = null;
+    if (disposed) return;
+    // An ad on screen, or the end of what is showing, is acted on in this frame rather than at the next video event.
+    const time = now();
+    const ends = [...cues.values()].filter((cue) => cue.onScreen).map((cue) => cue.end);
+    if (overlay.live) ends.push(overlay.live.window.end);
+    if (time == null || time >= Math.min(...ends)) sync();
+    watch();
+  }
+  function watch() {
+    if (!stitched || disposed || frames.id != null || !drawing()) return;
+    if (typeof video.requestVideoFrameCallback === 'function' && video.paused === false) {
+      frames.video = true;
+      frames.id = video.requestVideoFrameCallback(guard);
+    } else if (typeof globalThis.requestAnimationFrame === 'function') {
+      frames.video = false;
+      frames.id = globalThis.requestAnimationFrame(guard);
+    }
+  }
+  function unwatchFrames() {
+    if (frames.id == null) return;
+    if (frames.video) video.cancelVideoFrameCallback?.(frames.id);
+    else globalThis.cancelAnimationFrame?.(frames.id);
+    frames.id = null;
+  }
+
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
+  // A clock that knows when the fragment changes (an ad starting while paused, say) re-checks at once.
+  const unwatch = typeof content.onChange === 'function' ? content.onChange(() => sync()) : null;
   if (waterfall) {
     settleBehind();
     // `play` comes before `playing`, so the pre-roll hold pauses before any content is heard.
@@ -1055,6 +1139,8 @@ export function attachAds({
       video.removeEventListener('play', sync);
       video.removeEventListener('pause', walkPaused);
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
+      if (typeof unwatch === 'function') unwatch();
+      unwatchFrames();
       video.removeEventListener('ended', contentEnded);
       clearTimeout(ima.loadTimer);
       ima.observer?.disconnect();
@@ -1081,7 +1167,7 @@ export function attachAds({
       }
       controller?.abort();
       controller = null;
-      for (const id of cues.keys()) session.removeCue(id);
+      for (const [id, cue] of cues) if (cue.onScreen) session.removeCue(id);
       cues.clear();
     },
   };
