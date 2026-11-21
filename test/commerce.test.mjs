@@ -365,3 +365,18 @@ test('the hand-off reply is opened only over https: no link for another scheme, 
   }
   outer.close();
 });
+
+test('the viewUrl beacon is a no-cors request a browser actually sends (redirects followed)', () => {
+  // Fetch turns a no-cors request with any redirect mode but "follow" into a network error.
+  const { window } = new JSDOM('<main><button>Shop</button></main>');
+  const stage = window.document.querySelector('main');
+  const sent = [];
+  const shop = commerceSurface(stage, { locale: 'en' }, async (url, init) => { sent.push({ url, init }); return { ok: true }; });
+  shop.open(cue, cue.commerce, stage.querySelector('button'), () => true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, 'https://ads.example/view');
+  assert.equal(sent[0].init.mode, 'no-cors');
+  assert.ok(sent[0].init.redirect == null || sent[0].init.redirect === 'follow');
+  shop.hide();
+  window.close();
+});

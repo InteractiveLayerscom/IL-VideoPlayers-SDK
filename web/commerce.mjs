@@ -110,7 +110,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     const key = JSON.stringify([cue.id, offer.id ?? null]);
     if (offer.viewUrl && !viewed.has(key)) {
       viewed.add(key);
-      void fetchImpl(offer.viewUrl, {mode:'no-cors', credentials:'omit', keepalive:true, redirect:'error'}).catch(() => {});
+      void fetchImpl(offer.viewUrl, {mode:'no-cors', credentials:'omit', keepalive:true}).catch(() => {});
     }
   }
   async function handoff(offer, variant, signal) {
