@@ -1053,7 +1053,11 @@ export function attachAds({
   function guard() {
     frames.id = null;
     if (disposed) return;
-    if (now() == null) sync();
+    // An ad on screen, or the end of what is showing, is acted on in this frame rather than at the next video event.
+    const time = now();
+    const ends = [...cues.values()].filter((cue) => cue.onScreen).map((cue) => cue.end);
+    if (overlay.live) ends.push(overlay.live.window.end);
+    if (time == null || time >= Math.min(...ends)) sync();
     watch();
   }
   function watch() {

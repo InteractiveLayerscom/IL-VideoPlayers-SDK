@@ -326,7 +326,7 @@ async function playFrames(r, { rate, eventEvery, from = 20, to = 60, onFrame }) 
 
 for (const rate of [1, 1.5, 2]) {
   for (const eventEvery of [15, 60]) {
-    test(`at rate ${rate} with events every ${eventEvery} frames neither the overlay nor a cue is ever on screen in an ad`, async () => {
+    test(`at rate ${rate} with events every ${eventEvery} frames neither the overlay nor a cue is ever on screen in an ad or past its window`, async () => {
       const gpt = fakeGpt();
       const stage = makeStage();
       const plan = stitchedPlan({ windows: [{ id: 'o', start_ms: 20000, end_ms: 35000 }, { id: 's', start_ms: 51000, end_ms: 59000 }] });
@@ -342,6 +342,11 @@ for (const rate of [1, 1.5, 2]) {
         const overlayOn = box?.style.display === 'block';
         overlaySeen ||= overlayOn;
         cueSeen ||= r.onScreen.size > 0;
+        // Each window ends on its frame too, not at the next video event.
+        const content = truth(r.video.currentTime);
+        if (content != null && content >= 35 && content < 51) assert.equal(overlayOn, false, `overlay after its window at content ${content}`);
+        for (const cue of r.onScreen.values())
+          if (content != null) assert.ok(content * 1000 < cue.end, `cue ${cue.id} after its window at content ${content}`);
         if (truth(r.video.currentTime) == null) {
           assert.equal(overlayOn, false, `overlay over an ad at ${r.video.currentTime}`);
           assert.equal(r.onScreen.size, 0, `cue over an ad at ${r.video.currentTime}`);
