@@ -1407,3 +1407,112 @@ test('joining late with the walk settles the pre-roll silently', async () => {
   assert.deepEqual(r.hosts(), ['pubads.g.doubleclick.net']);
   r.ads.destroy();
 });
+
+test('pre-roll hold: start() then play pauses the content during the attempts and resumes it after break_end', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.2, 'playing');
+  assert.equal(r.video.paused, true);
+  r.made.fail();
+  assert.equal(r.video.paused, true);
+  const manager = r.made.load();
+  manager.fire('pause', {});
+  manager.fire('started', {});
+  assert.equal(r.video.paused, true);
+  manager.fire('resume', {});
+  assert.equal(r.video.paused, false);
+  assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_end', 'pre']]);
+  r.ads.destroy();
+});
+
+test('pre-roll hold: start() then play, every request empty, resumes after break_error', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.2, 'playing');
+  assert.equal(r.video.paused, true);
+  r.made.fail();
+  r.at(0.2, 'playing');
+  assert.equal(r.video.paused, true);
+  r.made.fail();
+  assert.deepEqual(r.breaks(), [['break_error', 'pre']]);
+  assert.equal(r.video.paused, false);
+  assert.deepEqual(r.linearStates, []);
+  r.ads.destroy();
+});
+
+test('pre-roll hold: a host that has not played is never resumed by the module', async () => {
+  const r = await waterfallRig();
+  let plays = 0;
+  r.video.play = () => { plays++; return Promise.resolve(); };
+  r.ads.start();
+  r.made.fail();
+  r.made.fail();
+  assert.deepEqual(r.breaks(), [['break_error', 'pre']]);
+  assert.equal(plays, 0);
+  assert.equal(r.video.paused, true);
+  r.ads.destroy();
+});
+
+test('pre-roll hold: start() then play with no answer gives break_error and resumes at 8 seconds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  assert.equal(r.video.paused, true);
+  t.mock.timers.tick(5000);
+  assert.equal(r.made.requests.length, 2);
+  t.mock.timers.tick(2999);
+  assert.deepEqual(r.breaks(), []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(r.breaks(), [['break_error', 'pre']]);
+  assert.equal(r.video.paused, false);
+  r.ads.destroy();
+});
+
+test('late join at 100 s with cuts at 0 and 59: nothing is asked until a later cut', async () => {
+  const plan = waterfallPlan();
+  plan.cuts.push({ id: 'mid-2', at: 120, position: 'midroll', requests: [{ provider: 'gam', tag_url: MID }, { provider: 'iadserver', tag_url: IAD }] });
+  const r = await waterfallRig({ plan, start: 100 });
+  r.ads.start();
+  r.at(100, 'playing');
+  assert.equal(r.made.requests.length, 0);
+  assert.deepEqual(r.breaks(), []);
+  r.at(113);
+  assert.deepEqual(r.events.filter((e) => e.type === 'break_request').map((e) => e.cut), ['mid-2']);
+  r.ads.destroy();
+});
+
+test('a seek across two cuts during playback asks only the later one', async () => {
+  const plan = waterfallPlan();
+  plan.cuts.push({ id: 'mid-2', at: 120, position: 'midroll', requests: [{ provider: 'gam', tag_url: MID }, { provider: 'iadserver', tag_url: IAD }] });
+  const r = await waterfallRig({ plan });
+  r.ads.start();
+  r.playAd(r.made.load());
+  r.at(10, 'playing');
+  r.at(130, 'seeked');
+  assert.deepEqual(r.events.filter((e) => e.type === 'break_request').map((e) => e.cut), ['pre', 'mid-2']);
+  r.playAd(r.made.load());
+  assert.deepEqual(r.breaks().map(([, cut]) => cut), ['pre', 'pre', 'mid-2', 'mid-2']);
+  r.ads.destroy();
+});
+
+test('a loader error without a request context does not fail a newer attempt in flight', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.made.fail();
+  assert.equal(r.made.requests.length, 2);
+  r.made.loaders[0].fire('adError', { getError: () => ({ getErrorCode: () => 303 }) });
+  assert.deepEqual(r.breaks(), []);
+  r.playAd(r.made.load());
+  assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_end', 'pre']]);
+  r.ads.destroy();
+});
+
+test('the manager is destroyed at break_end', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  const manager = r.made.load();
+  r.playAd(manager);
+  assert.equal(manager.destroyed, true);
+  r.ads.destroy();
+});

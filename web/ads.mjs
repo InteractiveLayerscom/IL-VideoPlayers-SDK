@@ -345,7 +345,8 @@ export function attachAds({
   const useIma = linear === 'ima' && cuts.length > 0 && !!adContainer;
   const waterfall = useIma && cuts.some((cut) => cut.requests.length > 1);
   // token: bumped by every attempt, cancel and settle, so late IMA answers are recognised as stale.
-  const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false };
+  const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false,
+    held: false };
   const settledCuts = new Set();
 
   const emit = (type, format, window) => {
@@ -662,6 +663,7 @@ export function attachAds({
   const contentEnded = () => {
     if (inBreak) return;
     ima.loader?.contentComplete?.();
+    // A cut in the last seconds may be dropped here; the backend does not produce post-rolls.
     if (wf.cut && wf.phase !== 'running') cancelAttempt();
   };
   const resized = () => {
@@ -701,9 +703,29 @@ export function attachAds({
     wf.token++;
     wf.cut = null;
     wf.phase = 'idle';
-    if (type === 'break_error') destroyManager();
+    const held = wf.held;
+    wf.held = false;
+    destroyManager();
     emitBreak(type, cut);
-    if (endBreak()) resume();
+    // Content resumes only if a break was open or the module itself held it for the pre-roll.
+    if (endBreak() || held) resume();
+  }
+  // Every cut already behind the playhead when the view joins is settled without an event.
+  function settleBehind() {
+    const time = Number(video.currentTime) || 0;
+    if (time > 1) for (const cut of cuts) if (cut.at <= time) settledCuts.add(cut.id);
+  }
+  // A host that plays right after start() would run content under the pre-roll's requests.
+  function holdPreroll(cut) {
+    if (video.paused === false) {
+      wf.held = true;
+      video.pause?.();
+    }
+    if (wf.held && !wf.holdTimer) {
+      wf.holdTimer = setTimeout(() => {
+        if (!disposed && wf.cut === cut && !wf.started) settle('break_error');
+      }, HOLD_MS);
+    }
   }
   // Drops an attempt that has not started playing, without settling its cut.
   function cancelAttempt() {
@@ -712,6 +734,10 @@ export function attachAds({
     wf.cut = null;
     wf.phase = 'idle';
     destroyManager();
+    if (wf.held) {
+      wf.held = false;
+      resume();
+    }
   }
   function ask(cut, index) {
     const token = ++wf.token;
@@ -788,7 +814,9 @@ export function attachAds({
     }
     if (target.at > time) return;
     wf.dueAt ??= time;
+    if (target.at === 0) holdPreroll(target);
     if (wf.phase === 'loaded') play();
+    else if (target.at === 0) return;
     else if (ms(time - wf.dueAt) > LATE_MS) settle('break_error');
   }
   function walkLoaded(event) {
@@ -853,10 +881,11 @@ export function attachAds({
       ima.loader = new sdk.AdsLoader(ima.display);
       if (waterfall) {
         // Nothing is requested before start(); the pre-roll of a late join is settled silently.
-        if (playable.length < cuts.length) for (const cut of cuts) if (cut.at === 0) settledCuts.add(cut.id);
+        settleBehind();
         ima.loader.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, (event) => {
           const context = event?.getUserRequestContext?.();
-          attemptFailed(context ? context.token : wf.token);
+          // Without a context the error cannot be matched; the attempt guard covers a lost answer.
+          if (context) attemptFailed(context.token);
         });
         ima.loader.addEventListener(sdk.AdsManagerLoadedEvent.Type.ADS_MANAGER_LOADED, walkLoaded);
         video.addEventListener('ended', contentEnded);
@@ -930,6 +959,7 @@ export function attachAds({
   }
 
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
+  if (waterfall) settleBehind();
   if (useIma) void setUpIma();
   sync();
   return {
