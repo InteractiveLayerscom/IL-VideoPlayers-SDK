@@ -333,7 +333,7 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock, project,
+  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock,
 } = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
@@ -375,13 +375,10 @@ export function attachAds({
   const breakOn = () => inBreak || hostBreak || now() == null;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
-  // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })), the project and
-  // a sid IL accepts; without them nothing about it is requested.
+  // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })) and a sid IL accepts;
+  // without them nothing about it is requested.
   const shop = readCommerce(valid.commerce);
-  const projectId = typeof valid.project_id === 'string' && valid.project_id ? valid.project_id
-    : typeof project === 'string' && project ? project : null;
-  const shopOn = !!shop && !!session.commerce && !!projectId && typeof valid.asset_id === 'string' && !!valid.asset_id &&
-    SID.test(sid);
+  const shopOn = !!shop && !!session.commerce && SID.test(sid);
   const shopWindows = shopOn ? usableWindows(valid, shop) : [];
   const shopIds = new Set(shopOn ? shop.windows.map((window) => window?.id) : []);
   // Per window: 'pending', 'filled' or 'empty' (204, 429, error or timeout: free for a graphic).
@@ -650,14 +647,14 @@ export function attachAds({
     const timeout = setTimeout(() => abort.abort(), PRODUCT_TIMEOUT_MS);
     let outcome = 'empty';
     try {
-      const url = new URL(shop.url);
-      url.searchParams.set('project', projectId);
-      url.searchParams.set('asset', valid.asset_id);
-      url.searchParams.set('window', window.id);
-      url.searchParams.set('sid', sid);
-      url.searchParams.set('locale', commerceLocale(session.commerce.locale ?? globalThis.navigator?.language));
+      // commerce.url is opaque (it carries the project, the asset and a signed grant): only our three keys
+      // are appended to it, without parsing or re-encoding what is already there.
+      const extra = new URLSearchParams({ window: window.id, sid,
+        locale: commerceLocale(session.commerce.locale ?? globalThis.navigator?.language) });
+      const [base, fragment] = shop.url.split(/#(.*)/s);
+      const href = base + (!base.includes('?') ? '?' : /[?&]$/.test(base) ? '' : '&') + extra + (fragment != null ? '#' + fragment : '');
       emit('request', PRODUCT, window);
-      const res = await fetchImpl(url.href, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
+      const res = await fetchImpl(href, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
       if (disposed || abort.signal.aborted) reject('aborted');
       // 204 (no product) and 429 (rate limit) are the same answer: nothing in this window.
       if (res.status !== 200) return emit('no_fill', PRODUCT, window);

@@ -7,6 +7,8 @@ import { attachHtmlVideo } from '../web/index.mjs';
 globalThis.DOMParser = new JSDOM('').window.DOMParser;
 
 const ROUTE = 'https://console.example/il-player/scene-product';
+// As the backend signs it: project, asset and a grant the player must pass through untouched.
+const SIGNED = ROUTE + '?project=p1&asset=a&grant=x.y%2Bz~';
 const TAG = 'https://pubads.g.doubleclick.net/gampad/ads?iu=/123/site/graphic&env=vp&output=vast&cust_params=il_format%3Dsuper';
 const IAD = 'https://ads.iadserver.com/gampad/ads?tag=t&output=vast&vid=a&cue_seconds=0';
 const VAST = '<VAST version="3.0"><Ad id="ad"><InLine><AdTitle>C</AdTitle><Impression>https://pixel.invalid/i</Impression><Creatives><Creative><NonLinearAds><NonLinear width="720" height="108"><StaticResource creativeType="image/png">https://creative.invalid/a.png</StaticResource></NonLinear></NonLinearAds></Creative></Creatives></InLine></Ad></VAST>';
@@ -36,7 +38,7 @@ function makePlan({ windows = [{ id: 'm1', start_ms: 50000, end_ms: 58000 }], pa
     expires_at: new Date(Date.now() + 3600000).toISOString(), page_url: 'https://publisher.example/v',
     cuts,
     ...(scenes ? { scenes } : {}),
-    commerce: { kind: 'scene_product', url: ROUTE, lead_ms: 5000, pacing: { ...PACING, ...pacing }, windows, ...commerce },
+    commerce: { kind: 'scene_product', url: SIGNED, lead_ms: 5000, pacing: { ...PACING, ...pacing }, windows, ...commerce },
     ...rest,
   };
 }
@@ -61,7 +63,7 @@ function rig({ plan = makePlan(), answer = () => ({ status: 200, body: card() })
   const fetchImpl = async (url, init) => {
     const text = String(url);
     if (text.startsWith(ROUTE)) {
-      routes.push({ url: new URL(text), init });
+      routes.push({ url: new URL(text), href: text, init });
       const reply = await answer(new URL(text), init);
       return { status: reply.status, ok: reply.status < 300, json: async () => reply.body };
     }
@@ -72,7 +74,7 @@ function rig({ plan = makePlan(), answer = () => ({ status: 200, body: card() })
     pixels.push(text);
     return { ok: true };
   };
-  const ads = attachAds({ session, video, plan, fetchImpl, project: 'p1', onEvent: (e) => events.push(e), ...options });
+  const ads = attachAds({ session, video, plan, fetchImpl, onEvent: (e) => events.push(e), ...options });
   const at = async (seconds, type = 'timeupdate') => {
     video.currentTime = seconds;
     video.dispatchEvent(new Event(type));
@@ -93,19 +95,25 @@ test('asks the route lead_ms before the window with the plan, the window, the si
   assert.equal(url.origin + url.pathname, ROUTE);
   const sid = new URL(r.ads.cuts[0].tagUrl).searchParams.get('sid');
   assert.match(sid, /^[a-f0-9]{32}$/);
-  assert.deepEqual(Object.fromEntries(url.searchParams), { project: 'p1', asset: 'a', window: 'm1', sid, locale: 'es' });
+  assert.equal(r.routes[0].href, `${SIGNED}&window=m1&sid=${sid}&locale=es`);
   assert.deepEqual([init.credentials, init.cache, init.redirect], ['omit', 'no-store', 'error']);
   assert.deepEqual(r.events.slice(0, 2), [{ type: 'request', format: 'scene_product', window: 'm1' },
     { type: 'fill', format: 'scene_product', window: 'm1' }]);
   r.ads.destroy();
 });
 
-test('a host sessionId is the sid, and project_id on the plan wins over the option', async () => {
-  const r = rig({ plan: makePlan({ project_id: 'from-plan' }), sessionId: 'view:42' });
+test('a host sessionId is the sid, and commerce.url is opaque with or without a query string', async () => {
+  const r = rig({ sessionId: 'view:42', project: 'ignored' });
   await r.at(50);
-  assert.equal(r.routes[0].url.searchParams.get('sid'), 'view:42');
-  assert.equal(r.routes[0].url.searchParams.get('project'), 'from-plan');
+  assert.equal(r.routes[0].href, SIGNED + '&window=m1&sid=view%3A42&locale=es');
   r.ads.destroy();
+  for (const [url, expected] of [[ROUTE, ROUTE + '?window=m1&sid=s1&locale=es'], [ROUTE + '?', ROUTE + '?window=m1&sid=s1&locale=es'],
+    [SIGNED + '#frag', SIGNED + '&window=m1&sid=s1&locale=es#frag']]) {
+    const bare = rig({ plan: makePlan({ commerce: { url } }), sessionId: 's1' });
+    await bare.at(50);
+    assert.equal(bare.routes[0].href, expected);
+    bare.ads.destroy();
+  }
 });
 
 test('one request per window, whatever the seeks; a seek into the window asks at once', async () => {
@@ -225,8 +233,8 @@ test('overlapping product windows: one card at a time, and the 30 s spacing betw
   r.ads.destroy();
 });
 
-test('without commerce on the session, a project or a valid sid, nothing about the product is asked', async () => {
-  for (const options of [{ commerce: null }, { project: undefined }, { sessionId: 'has spaces' }]) {
+test('without commerce on the session or a valid sid, nothing about the product is asked', async () => {
+  for (const options of [{ commerce: null }, { sessionId: 'has spaces' }]) {
     const r = rig(options);
     await r.at(50);
     assert.equal(r.routes.length, 0);
@@ -304,7 +312,7 @@ test('in the page, the card fires its impression once, viewUrl once on opening a
     };
     const session = attachHtmlVideo({ video, stage, timeline: 'media', interval: false, commerce: { locale: 'es' }, fetchImpl });
     assert.deepEqual(session.commerce, { locale: 'es' });
-    const ads = attachAds({ session, video, plan: makePlan(), fetchImpl, project: 'p1' });
+    const ads = attachAds({ session, video, plan: makePlan(), fetchImpl });
     time = 45;
     video.dispatchEvent(new window.Event('timeupdate'));
     await flush();

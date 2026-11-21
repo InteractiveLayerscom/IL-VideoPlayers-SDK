@@ -209,18 +209,17 @@ Cuando el plan trae `commerce` (`kind: "scene_product"`), el módulo pide a IL e
 
 ```js
 const session = attachHtmlVideo({ video, stage, timeline: 'media', commerce: { locale: 'es' } });
-const ads = attachAds({ session, video, stage, plan, project, sessionId });
+const ads = attachAds({ session, video, stage, plan, sessionId });
 ```
 
 - `commerce` en el adaptador (`attachHtmlVideo`, `attachVideoJs`, `attachShaka`): las mismas opciones de [Compra con Shopify](#compra-con-shopify) (`locale`, `tv`, `navigate`). Sin ellas la sesión no dibuja la ficha y el módulo no pide productos.
-- `project` en `attachAds`: el identificador del proyecto, el mismo que se pasó a `planUrl`. Si el plan trae `project_id`, gana el del plan.
 - `sessionId` (opcional): el identificador de la vista. Es el `sid` del pedido de producto y de los pedidos de iADServer de los cortes; sin él, el módulo genera uno por `attachAds`. Debe cumplir `[A-Za-z0-9_.:-]{1,128}`; si no, no se piden productos.
 
 Sin `plan.commerce`, o con un `kind` desconocido, nada cambia. Un plan sólo con `commerce` (sin `scenes` ni `cuts`) es válido.
 
 Qué hace:
 
-- Calcula las ventanas usables con `commerce.pacing` (igual que las de gráficos) y pide `GET <commerce.url>?project&asset&window&sid&locale` `lead_ms` antes de cada una, o en el acto si un salto cae dentro de la ventana. `locale` sale de `commerce.locale` del adaptador o del idioma del navegador (`es`, `en` o `pt-BR`). Sin cookies, sin redirecciones, `no-store` y con 6 segundos de límite. Un solo pedido por ventana y reproducción, sin reintentos, y uno a la vez.
+- Calcula las ventanas usables con `commerce.pacing` (igual que las de gráficos) y pide `commerce.url` con `window`, `sid` y `locale` agregados `lead_ms` antes de cada una, o en el acto si un salto cae dentro de la ventana. `commerce.url` es opaca: ya trae el proyecto, el asset y un permiso firmado de corta duración, y el módulo sólo le agrega esas tres claves (con `?` o `&` según tenga o no consulta) sin leerla ni reescribirla. `locale` sale de `commerce.locale` del adaptador o del idioma del navegador (`es`, `en` o `pt-BR`). Sin cookies, sin redirecciones, `no-store` y con 6 segundos de límite. Un solo pedido por ventana y reproducción, sin reintentos, y uno a la vez.
 - `200` es la tarjeta: el módulo la recorta a la ventana y la agrega con `session.addCue`. `204`, `429`, cualquier otro estado, una tarjeta inválida (sin `commerce`, de otra ventana) o el vencimiento del plazo no muestran nada y no vuelven a pedir esa ventana.
 - `gap_after_seconds`, `max_per_video` y los 30 segundos entre inicios cuentan productos y gráficos juntos, incluidos los que se están pidiendo.
 - En una ventana que también está en `scenes.windows`, el Súper o la L esperan la respuesta del producto: con `200` gana el producto y no se pide el gráfico; con `204`, `429` o un error la ventana queda libre para el gráfico. El overlay de 300×250 sigue sus propias reglas.
