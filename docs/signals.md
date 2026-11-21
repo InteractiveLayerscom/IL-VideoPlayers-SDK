@@ -18,6 +18,10 @@ La clase HLS de InteractiveLayers es `com.interactivelayers.overlay`. Se publica
 | `X-IL-IMPRESSION-URI` | `impressionUrl` | URL HTTPS opcional de una impresión. Cada integración debe tener un solo responsable de enviar ese evento. |
 | — | `clickUrl` | URL HTTPS opcional que el reproductor web abre en una pestaña nueva al tocar la gráfica. Otro valor se descarta sin rechazar el cue. |
 
+## Stream con anuncios cosidos por MediaTailor
+
+Para la entrega con anuncios insertados en el servidor, el origen de Interactive Layers escribe `#EXT-X-PROGRAM-DATE-TIME` en cada segmento de contenido como un origen fijo más el inicio del segmento en el contenido, y el plan de anuncios lo declara en `timeline: { kind: "stitched", pdt_origin, breaks }`. MediaTailor conserva esas líneas en el contenido y no escribe ninguna en los segmentos de anuncio, que van entre `#EXT-X-DISCONTINUITY`. Un segmento sin PDT es un anuncio: el player no dibuja gráficos sobre él. Ese PDT es un reloj de contenido, no hora real, así que en este stream no se mezclan cues `com.interactivelayers.overlay` en hora UTC. Detalle del plan y del reloj en [Anuncios insertados en el stream](../web/README.md#anuncios-insertados-en-el-stream-mediatailor).
+
 ## Eventos por sesión
 
 El player consulta el endpoint que le entrega el backend de reproducción con `time` en milisegundos Unix del fotograma actual y `sid` de la sesión. Devuelve `[]` si no hay entrega. Una oportunidad individual puede tener este formato.

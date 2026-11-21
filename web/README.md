@@ -203,6 +203,56 @@ Usá el mismo `sid` de iADServer durante toda la vista (pasá `sessionId` a `att
 
 Google Ad Manager aplica reglas a nivel de stream entre los cortes de una misma reproducción (topes de frecuencia, exclusiones): no reinicies el stream entre cortes. Llamá a `contentComplete` sólo al final real del contenido; el módulo hace lo mismo.
 
+### Anuncios insertados en el stream (MediaTailor)
+
+Con la entrega por inserción en el servidor, AWS Elemental MediaTailor cose los anuncios de video dentro del HLS y el player del publisher sólo dibuja los gráficos de escena con el SDK. En ese stream `video.currentTime` es tiempo de stream (contenido más anuncios), así que el módulo programa las escenas con un **reloj de contenido**: en cada momento responde los segundos de contenido que se están viendo, o `null` cuando hay un anuncio en pantalla o no se puede saber la posición.
+
+El plan de un stream así llega con este campo y sin cortes:
+
+```json
+{
+  "timeline": { "kind": "stitched", "pdt_origin": "2000-01-01T00:00:00.000Z", "breaks": [0, 312.5] },
+  "cuts": []
+}
+```
+
+- `kind`: `"stitched"`. Un `timeline` con otro valor deja el módulo inactivo, para no dibujar sobre anuncios que no sabe ubicar.
+- `pdt_origin`: instante ISO 8601 del segundo 0 del contenido. El origen escribe `#EXT-X-PROGRAM-DATE-TIME` en **cada segmento de contenido** con `pdt_origin` más el inicio del segmento en el contenido (el segundo 12,5 es `2000-01-01T00:00:12.500Z`). MediaTailor conserva esas líneas en los segmentos de contenido de todas las variantes y no escribe ninguna en los de anuncio.
+- `breaks` (opcional): segundos de contenido donde MediaTailor inserta cada corte (el preroll es `0`). Sólo se usan para `cut_clearance_seconds`; el módulo no pide nada con ellos. Sin `breaks`, la distancia a los cortes depende sólo de la detección del anuncio en pantalla: el gráfico se oculta al empezar el anuncio, pero puede verse hasta el último segundo de contenido antes del corte.
+
+Con un plan `stitched` el módulo nunca pide ni programa cortes de video: `ads.cuts` es `[]`, `ads.vmap()` es un VMAP vacío y no se carga IMA aunque el host pase `linear: 'ima'` o el plan traiga `cuts` por error. Sin `clock`, ese plan deja el módulo inactivo, porque la posición del video no es tiempo de contenido.
+
+```js
+import Hls from 'hls.js';
+import { attachHtmlVideo } from '@interactivelayers/player-sdk';
+import { attachAds, hlsContentClock } from '@interactivelayers/player-sdk/ads';
+
+const hls = new Hls();
+hls.attachMedia(video);
+hls.loadSource(playback.mediaTailorUrl);
+const clock = hlsContentClock({ hls, video, plan });
+// La sesión usa el mismo reloj: sus cues se cuentan en milisegundos de contenido y no se ven durante un anuncio.
+const session = attachHtmlVideo({ video, stage, programTime: clock.programTime });
+const ads = attachAds({ session, video, stage, plan, clock });
+// Al cerrar: ads.destroy(); session.destroy(); clock.destroy(); hls.destroy();
+```
+
+`hlsContentClock({ hls, video, plan })` lee el fragmento de hls.js que contiene `video.currentTime` en la lista de la variante actual (o la última recibida con `LEVEL_LOADED`/`LEVEL_UPDATED`), y calcula `rawProgramDateTime − pdt_origin + (currentTime − frag.start)`. Un fragmento sin `rawProgramDateTime` es un anuncio. No usa `frag.programDateTime` ni `hls.playingDate`, porque hls.js los extrapola a través de los anuncios. Como lee la posición en el momento, funciona en los primeros cuadros, después de buscar hacia adelante o hacia atrás y en pausa; `FRAG_CHANGED` sólo hace que el módulo vuelva a revisar en el acto. A menos de 0,25 segundos de un fragmento de anuncio cuenta como anuncio, porque el inicio del fragmento en hls.js puede diferir unos 0,1 segundos de la imagen. Lanza `TypeError` sin `hls`, `video` o un plan `stitched` con `pdt_origin` válido.
+
+Durante un anuncio no empieza ningún gráfico ni ninguna solicitud, y el que está en pantalla se quita de la sesión en el acto (el overlay se oculta). Como el reloj de contenido no avanza durante el anuncio, el gráfico no suma ese tiempo: al volver el contenido reaparece si su ventana sigue abierta y termina en el mismo segundo de contenido que antes. La impresión se envía una sola vez por gráfico y el pacing usa las ventanas en tiempo de contenido. Un gráfico que llega mientras pasa un anuncio espera al contenido.
+
+Otro reloj se puede pasar como `clock`: un objeto con `time()` (segundos de contenido o `null`) y, opcionalmente, `onChange(listener)` que devuelve la función para dejar de escuchar. Sin `clock` el módulo usa `videoClock(video)`, que es `video.currentTime` sin anuncios: las integraciones existentes y ILPlayer no cambian.
+
+Qué players cubre:
+
+| Player | Estado |
+| --- | --- |
+| HTML5 `<video>` con hls.js (probado con 1.5.17 en Chrome) | Cubierto con `hlsContentClock`. |
+| Safari con HLS nativo | No cubierto. Necesita un reloj que lea el PDT del segmento visible (`video.getStartDate()` sólo da el primero) y que distinga los segmentos de anuncio, por ejemplo con los eventos de seguimiento de MediaTailor. |
+| Shaka Player | No cubierto. Necesita un reloj desde su línea de tiempo de segmentos (referencias con su PDT) y los límites de los períodos de anuncio. |
+| Video.js (VHS) | No cubierto. Necesita un reloj desde los segmentos de VHS con su `dateTimeObject`, sin la extrapolación de `convertToProgramTime`. |
+| Adaptadores nativos (Android, Apple, Roku, AVPlay) | No cubiertos. Cada uno necesita el PDT del segmento en reproducción y la marca de anuncio desde su propio motor. |
+
 ## Samsung AVPlay
 
 ```js
