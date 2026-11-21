@@ -33,6 +33,11 @@ const PRODUCT = 'scene_product';
 // IL's route waits up to 4 s for iADServer; the rest is the network.
 const PRODUCT_TIMEOUT_MS = 6000;
 const SID = /^[A-Za-z0-9_.:-]{1,128}$/;
+// Where each plan returned by loadPlan came from, without a visible field on the plan.
+const planOrigins = new WeakMap();
+// Delivery ids whose impression this page already fired: a re-attach or a second attachAds asking the same
+// window with the same sid gets the same delivery back and must not count it twice.
+const measuredDeliveries = new Set();
 
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -325,7 +330,9 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
     const response = await fetchImpl(url, { method: 'GET', credentials: 'omit', redirect: 'error', signal });
     if (response.status !== 200) return null;
     const plan = JSON.parse(await response.text());
-    return plan && typeof plan === 'object' && !Array.isArray(plan) && plan.version === 1 ? plan : null;
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || plan.version !== 1) return null;
+    planOrigins.set(plan, new URL(url).origin);
+    return plan;
   } catch {
     return null;
   }
@@ -333,7 +340,7 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock,
+  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock, planOrigin,
 } = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
@@ -353,11 +360,21 @@ export function attachAds({
   }
   const content = typeof clock?.time === 'function' ? clock : videoClock(video);
   const page = pageUrl ?? valid.page_url;
-  // A plan with the scene product names the view's session: it is the sid of every iADServer request, so the
-  // breaks and the product share frequency caps. It wins over the host's sessionId; without it, as before.
-  const planSession = readCommerce(valid.commerce)?.session;
-  const sid = typeof planSession === 'string' && SID.test(planSession) ? planSession
-    : typeof sessionId === 'string' && sessionId ? sessionId : randomId();
+  // commerce.url must be on the origin the plan came from: the one loadPlan fetched it from or, for a plan the
+  // host obtained itself, the page's origin or the `planOrigin` the host states. Otherwise `commerce` is ignored.
+  const origins = planOrigins.has(plan) ? [planOrigins.get(plan)] : [globalThis.location?.origin, planOrigin];
+  const shop = (() => {
+    const commerce = readCommerce(valid.commerce);
+    try {
+      return commerce && origins.includes(new URL(commerce.url).origin) ? commerce : null;
+    } catch {
+      return null;
+    }
+  })();
+  // A host that keeps its own view id keeps it on the iADServer requests (its frequency caps per viewer);
+  // otherwise the plan's commerce.session is the sid, so breaks and products share one session.
+  const sid = typeof sessionId === 'string' && sessionId ? sessionId
+    : typeof shop?.session === 'string' && SID.test(shop.session) ? shop.session : randomId();
   const cuts = Object.freeze(stitched ? [] : planCuts(valid.cuts, page, sid).map(Object.freeze));
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
@@ -381,7 +398,6 @@ export function attachAds({
   let windows = scenes ? usableWindows(valid) : [];
   // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })); without it nothing
   // about it is requested.
-  const shop = readCommerce(valid.commerce);
   const shopOn = !!shop && !!session.commerce;
   const shopWindows = shopOn ? usableWindows(valid, shop) : [];
   const shopIds = new Set(shopOn ? shop.windows.map((window) => window?.id) : []);
@@ -695,6 +711,8 @@ export function attachAds({
       onVisible() {
         if (measured || disposed) return;
         measured = true;
+        if (measuredDeliveries.has(cue.id)) return;
+        measuredDeliveries.add(cue.id);
         if (cue.impressionUrl) beacon(cue.impressionUrl);
         emit('impression', PRODUCT, window);
       },
@@ -743,7 +761,7 @@ export function attachAds({
     // A window with a product waits for its answer; a product (200) wins over the graphics in that window.
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
-      window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, committed(), pacing) &&
+      window.end - Math.max(window.start, time) >= minMs && pacingAllows(window, shopOn ? committed() : shown, pacing) &&
       !(shopIds.has(window.id) && productAwaited(window, time)));
     if (next) void request(next);
   }

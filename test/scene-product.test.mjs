@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { attachAds, hlsContentClock } from '../web/ads.mjs';
-import { attachHtmlVideo } from '../web/index.mjs';
+import { attachAds, hlsContentClock, loadPlan } from '../web/ads.mjs';
+import { attachHtmlVideo, normalizeCue } from '../web/index.mjs';
 
 globalThis.DOMParser = new JSDOM('').window.DOMParser;
 
@@ -74,7 +74,7 @@ function rig({ plan = makePlan(), answer = () => ({ status: 200, body: card() })
     pixels.push(text);
     return { ok: true };
   };
-  const ads = attachAds({ session, video, plan, fetchImpl, onEvent: (e) => events.push(e), ...options });
+  const ads = attachAds({ session, video, plan, fetchImpl, planOrigin: 'https://console.example', onEvent: (e) => events.push(e), ...options });
   const at = async (seconds, type = 'timeupdate') => {
     video.currentTime = seconds;
     video.dispatchEvent(new Event(type));
@@ -100,22 +100,91 @@ test('asks the opaque route lead_ms before the window with only the window and t
   r.ads.destroy();
 });
 
-test('commerce.session is the sid of the iADServer break requests and wins over the host sessionId', async () => {
+test('the host sessionId stays the break sid; commerce.session replaces only the random one', async () => {
   const cuts = [{ id: 'pre', at: 0, position: 'preroll', requests: [{ provider: 'iadserver', tag_url: IAD }] }];
   const sidOf = (r) => new URL(r.ads.cuts[0].tagUrl).searchParams.get('sid');
   const session = '9f1c0000000000000000000000000abc';
-  const planned = rig({ plan: makePlan({ cuts, commerce: { session } }), sessionId: 'host-view' });
-  assert.equal(sidOf(planned), session);
-  planned.ads.destroy();
-  // Without commerce, or with an unusable session, the host's sessionId (or a random one) stays.
   const plain = makePlan({ cuts });
   delete plain.commerce;
-  for (const [plan, expected] of [[plain, 'host-view'], [makePlan({ cuts, commerce: { session: 'has spaces' } }), 'host-view'],
-    [makePlan({ cuts, commerce: { kind: 'other', session } }), 'host-view']]) {
-    const r = rig({ plan, sessionId: 'host-view' });
-    assert.equal(sidOf(r), expected);
+  for (const [plan, sessionId, expected] of [
+    [makePlan({ cuts, commerce: { session } }), 'host-view', 'host-view'],
+    [makePlan({ cuts, commerce: { session } }), undefined, session],
+    [makePlan({ cuts, commerce: { session: 'has spaces' } }), undefined, /^[a-f0-9]{32}$/],
+    [makePlan({ cuts, commerce: { kind: 'other', session } }), undefined, /^[a-f0-9]{32}$/],
+    [plain, undefined, /^[a-f0-9]{32}$/],
+    [plain, 'host-view', 'host-view']]) {
+    const r = rig({ plan, sessionId });
+    if (typeof expected === 'string') assert.equal(sidOf(r), expected);
+    else assert.match(sidOf(r), expected);
     r.ads.destroy();
   }
+});
+
+test('commerce.url must be on the origin of the plan: loaded, the page\'s own, or the one the host states', async () => {
+  const served = (plan) => async (url) => ({ status: 200, text: async () => JSON.stringify(plan) });
+  const run = async (plan, options = {}) => {
+    const r = rig({ plan, planOrigin: undefined, ...options });
+    await r.at(50);
+    const asked = r.routes.length;
+    r.ads.destroy();
+    return asked;
+  };
+  // Loaded with loadPlan: its own origin only.
+  assert.equal(await run(await loadPlan('https://console.example/il-player/ad-plan?project=p&asset=a', { fetchImpl: served(makePlan()) })), 1);
+  assert.equal(await run(await loadPlan('https://other.example/il-player/ad-plan?project=p&asset=a', { fetchImpl: served(makePlan()) })), 0);
+  // A loaded plan does not take a stated origin instead of the one it came from.
+  assert.equal(await run(await loadPlan('https://other.example/x', { fetchImpl: served(makePlan()) }), { planOrigin: 'https://console.example' }), 0);
+  // Handed in: the stated origin, or the page's own.
+  assert.equal(await run(makePlan(), { planOrigin: 'https://console.example' }), 1);
+  assert.equal(await run(makePlan(), { planOrigin: 'https://elsewhere.example' }), 0);
+  assert.equal(await run(makePlan()), 0);
+  globalThis.location = { origin: 'https://console.example' };
+  try {
+    assert.equal(await run(makePlan()), 1);
+  } finally {
+    delete globalThis.location;
+  }
+  // The plan itself stays: its graphics are still served when commerce is refused.
+  const plan = makePlan({ scenes: graphicScenes([{ id: 'm1', start_ms: 50000, end_ms: 58000 }]) });
+  const r = rig({ plan, planOrigin: undefined });
+  for (const t of [45, 46, 47, 50]) await r.at(t);
+  assert.deepEqual([r.routes.length, r.graphics.length], [0, 1]);
+  r.ads.destroy();
+});
+
+test('a 204 is for its window only: the next window is still asked once (an expired grant degrades quietly)', async () => {
+  const windows = [{ id: 'm1', start_ms: 50000, end_ms: 58000 }, { id: 'm2', start_ms: 100000, end_ms: 108000 }];
+  const r = rig({ plan: makePlan({ windows }), answer: () => ({ status: 204 }) });
+  for (let t = 44; t <= 108; t += 1) await r.at(t);
+  assert.deepEqual(r.routes.map((route) => route.url.searchParams.get('window')), ['m1', 'm2']);
+  r.ads.destroy();
+});
+
+test('a second attachAds, or a re-attach, does not fire the impression of the same delivery again', async () => {
+  const id = 'dlv_twice';
+  const first = rig({ answer: () => ({ status: 200, body: card({ id }) }) });
+  await first.at(51);
+  first.adds[0].hooks.onVisible();
+  first.ads.destroy();
+  const second = rig({ answer: () => ({ status: 200, body: card({ id }) }) });
+  await second.at(51);
+  assert.equal(second.routes.length, 1, 'the window is asked again and gives the same delivery');
+  second.adds[0].hooks.onVisible();
+  assert.deepEqual([first.pixels.length, second.pixels.length], [1, 0]);
+  assert.equal(second.events.filter((e) => e.type === 'impression').length, 0);
+  second.ads.destroy();
+});
+
+test('card images and brand colours are filtered by the SDK itself, whatever the server sends', async () => {
+  const bad = card({ id: 'dlv_filter', brand: { accent: 'red;background:url(x)', background: '#12345', foreground: '#ABCDEF', logoUrl: 'http://cdn.example/l.png' },
+    commerce: { ...card().commerce, imageUrl: 'http://cdn.example/a.jpg', images: ['https://cdn.example/ok.jpg', 'javascript:x', 'http://cdn.example/b.jpg'],
+      variants: [{ ...card().commerce.variants[0], imageUrl: 'data:image/png;base64,AA' }] } });
+  assert.equal(normalizeCue({ ...bad, imageUrl: 'http://cdn.example/apron.jpg' }), null);
+  const cue = normalizeCue(bad);
+  assert.equal(cue.commerce.imageUrl, undefined);
+  assert.deepEqual(cue.commerce.images, ['https://cdn.example/ok.jpg']);
+  assert.equal(cue.commerce.variants[0].imageUrl, undefined);
+  assert.deepEqual(cue.brand, { foreground: '#ABCDEF' });
 });
 
 test('commerce.url is opaque with or without a query string; an old project option is ignored', async () => {
@@ -321,14 +390,14 @@ test('in the page, the card fires its impression once, viewUrl once on opening a
     const fetchImpl = async (input, init = {}) => {
       const url = String(input);
       calls.push({ url, method: init.method ?? 'GET', body: init.body });
-      if (url.startsWith(ROUTE)) return { status: 200, ok: true, json: async () => card() };
+      if (url.startsWith(ROUTE)) return { status: 200, ok: true, json: async () => card({ id: 'dlv_page_' + embedded }) };
       if (url.endsWith('/commerce/offer/dlv_1'))
         return { ok: true, status: 201, json: async () => ({ continueUrl: 'https://shop.example/checkout', qrImageUrl: 'https://ads.iadserver.com/qr.png' }) };
       return { ok: true };
     };
     const session = attachHtmlVideo({ video, stage, timeline: 'media', interval: false, commerce: { locale: 'es' }, fetchImpl });
     assert.deepEqual(session.commerce, { locale: 'es' });
-    const ads = attachAds({ session, video, plan: makePlan(), fetchImpl });
+    const ads = attachAds({ session, video, plan: makePlan(), fetchImpl, planOrigin: 'https://console.example' });
     time = 45;
     video.dispatchEvent(new window.Event('timeupdate'));
     await flush();

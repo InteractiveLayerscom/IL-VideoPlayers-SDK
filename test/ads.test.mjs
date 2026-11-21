@@ -1707,3 +1707,26 @@ test('async pause event: mid-roll break_end resumes the content', async () => {
   assert.equal(r.video.paused, false);
   r.ads.destroy();
 });
+
+test('without a scene product, pacing counts only the graphics shown, as before', async () => {
+  // A no-fill window must not count toward max_per_video or the spacing, even in the instant its request settles.
+  const plan = makePlan({ formats: ['super'], cuts: [], pacing: { max_per_video: 1 },
+    windows: [{ id: 'a', start_ms: 10000, end_ms: 15000 }, { id: 'b', start_ms: 16000, end_ms: 25000 }] });
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 12, paused: false });
+  const requests = [];
+  const ads = attachAds({
+    session: { addCue: () => true, removeCue() {} }, video, plan,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return { ok: true, text: async () => (requests.length === 1 ? '<VAST version="3.0"/>' : inline('super')) };
+    },
+    onEvent: (event) => {
+      if (event.type === 'no_fill') queueMicrotask(() => video.dispatchEvent(new Event('timeupdate')));
+    },
+  });
+  video.dispatchEvent(new Event('playing'));
+  await flush();
+  assert.equal(requests.length, 2, 'window b is asked right after window a came back empty');
+  ads.destroy();
+});
