@@ -704,6 +704,8 @@ export function attachAds({
     wf.token++;
     wf.cut = null;
     wf.phase = 'idle';
+    // A pause event of the module's own that never arrived must not swallow the viewer's next pause.
+    wf.ownPause = false;
     const held = wf.held;
     wf.held = false;
     destroyManager();
@@ -760,6 +762,7 @@ export function attachAds({
   }
   // Drops an attempt that has not started playing, without settling its cut.
   function cancelAttempt() {
+    wf.ownPause = false;
     const cut = wf.cut;
     clearWalkTimers();
     wf.token++;

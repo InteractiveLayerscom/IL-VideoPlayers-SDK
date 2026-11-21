@@ -1340,6 +1340,7 @@ test('a mid-roll is asked 8 seconds ahead, held, and started when due', async ()
   assert.equal(manager.started, true);
   r.playAd(manager);
   assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_end', 'pre'], ['break_start', 'mid-1'], ['break_end', 'mid-1']]);
+  assert.equal(r.video.paused, false);
   r.ads.destroy();
 });
 
@@ -1657,5 +1658,52 @@ test('a rejected resume emits resume_blocked', async () => {
   r.made.fail();
   await ticks();
   assert.deepEqual(r.events.filter((e) => e.type === 'resume_blocked').map((e) => e.cut), ['pre']);
+  r.ads.destroy();
+});
+
+// As in a browser, `pause` arrives after the call that caused it.
+function asyncPause(video) {
+  video.pause = function () {
+    if (this.paused) return;
+    this.paused = true;
+    queueMicrotask(() => this.dispatchEvent(new Event('pause')));
+  };
+}
+
+test('async pause event: pre-roll hold then break_end resumes the content', async () => {
+  const r = await waterfallRig();
+  asyncPause(r.video);
+  r.ads.start();
+  r.at(0.1, 'playing');
+  assert.equal(r.video.paused, true);
+  await ticks();
+  r.made.fail();
+  const manager = r.made.load();
+  manager.fire('pause', {});
+  await ticks();
+  manager.fire('started', {});
+  manager.fire('resume', {});
+  assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_end', 'pre']]);
+  assert.equal(r.video.paused, false);
+  r.ads.destroy();
+});
+
+test('async pause event: mid-roll break_end resumes the content', async () => {
+  const r = await waterfallRig();
+  asyncPause(r.video);
+  r.ads.start();
+  r.playAd(r.made.load());
+  await ticks();
+  r.at(52, 'playing');
+  const manager = r.made.load();
+  r.at(59.1);
+  assert.equal(manager.started, true);
+  manager.fire('pause', {});
+  await ticks();
+  manager.fire('started', {});
+  manager.fire('resume', {});
+  await ticks();
+  assert.deepEqual(r.breaks().slice(2), [['break_start', 'mid-1'], ['break_end', 'mid-1']]);
+  assert.equal(r.video.paused, false);
   r.ads.destroy();
 });
