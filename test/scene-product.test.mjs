@@ -152,6 +152,35 @@ test('commerce.url must be on the origin of the plan: loaded, the page\'s own, o
   r.ads.destroy();
 });
 
+test('loadPlan resolves a relative URL against the page; without a page it refuses it, as on main', async () => {
+  const asked = [];
+  const served = async (url) => {
+    asked.push(url);
+    return { status: 200, text: async () => JSON.stringify(makePlan()) };
+  };
+  // No page: the relative URL is refused before any request, exactly as a241327 did.
+  assert.equal(await loadPlan('/il-player/ad-plan?project=p&asset=a', { fetchImpl: served }), null);
+  assert.deepEqual(asked, []);
+  // On the page: resolved against it, the plan is returned and its commerce.url on the page's origin accepted.
+  globalThis.location = { href: 'https://console.example/embed/x', origin: 'https://console.example' };
+  try {
+    const plan = await loadPlan('/il-player/ad-plan?project=p&asset=a', { fetchImpl: served });
+    assert.equal(asked.at(-1), 'https://console.example/il-player/ad-plan?project=p&asset=a');
+    assert.equal(plan?.version, 1);
+    const r = rig({ plan, planOrigin: undefined });
+    await r.at(50);
+    assert.equal(r.routes.length, 1);
+    r.ads.destroy();
+  } finally {
+    delete globalThis.location;
+  }
+  // An absolute URL is requested exactly as given.
+  const absolute = 'https://console.example/il-player/ad-plan?project=p&asset=a';
+  assert.equal((await loadPlan(absolute, { fetchImpl: served }))?.version, 1);
+  assert.equal(asked.at(-1), absolute);
+  assert.equal(await loadPlan('http://console.example/il-player/ad-plan', { fetchImpl: served }), null);
+});
+
 test('a 204 is for its window only: the next window is still asked once (an expired grant degrades quietly)', async () => {
   const windows = [{ id: 'm1', start_ms: 50000, end_ms: 58000 }, { id: 'm2', start_ms: 100000, end_ms: 108000 }];
   const r = rig({ plan: makePlan({ windows }), answer: () => ({ status: 204 }) });

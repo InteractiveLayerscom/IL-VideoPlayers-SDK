@@ -326,12 +326,21 @@ export function planUrl({ origin, project, asset } = {}) {
 
 export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {}) {
   try {
-    if (new URL(url).protocol !== 'https:' || typeof fetchImpl !== 'function') return null;
-    const response = await fetchImpl(url, { method: 'GET', credentials: 'omit', redirect: 'error', signal });
+    // A relative URL is resolved against the page; without a page it is refused, as before.
+    const resolved = new URL(url, globalThis.location?.href);
+    if (resolved.protocol !== 'https:' || typeof fetchImpl !== 'function') return null;
+    // An absolute URL is requested exactly as given.
+    const target = URL.canParse?.(url) ?? /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : resolved.href;
+    const response = await fetchImpl(target, { method: 'GET', credentials: 'omit', redirect: 'error', signal });
     if (response.status !== 200) return null;
     const plan = JSON.parse(await response.text());
     if (!plan || typeof plan !== 'object' || Array.isArray(plan) || plan.version !== 1) return null;
-    planOrigins.set(plan, new URL(url).origin);
+    // Remembering where it came from never costs the plan: without it the page-origin / planOrigin rule applies.
+    try {
+      planOrigins.set(plan, resolved.origin);
+    } catch {
+      // A plan object a WeakMap refuses keeps the handed-in rule.
+    }
     return plan;
   } catch {
     return null;

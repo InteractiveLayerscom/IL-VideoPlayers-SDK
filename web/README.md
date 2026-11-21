@@ -159,7 +159,7 @@ import { loadPlan, planUrl } from '@interactivelayers/player-sdk/ads';
 const plan = await loadPlan(planUrl({ origin: 'https://console.interactivelayers.com', project, asset }));
 ```
 
-`planUrl` arma `<origin>/il-player/ad-plan?project=…&asset=…` (el origen debe ser `https:`; si no, lanza `TypeError`, igual que con un `project` o `asset` vacío). `loadPlan` nunca lanza: hace un solo `GET` sin cookies ni redirecciones y devuelve el plan, o `null`. El endpoint sólo responde a los dominios verificados del proyecto. `null` significa «reproducí sin anuncios esta vez»: sin plan todavía (el backend lo prepara en segundo plano), error de red o respuesta inválida. El navegador puede cachear la respuesta unos minutos. `loadPlan(url, { fetchImpl, signal })` acepta un `AbortSignal`.
+`planUrl` arma `<origin>/il-player/ad-plan?project=…&asset=…` (el origen debe ser `https:`; si no, lanza `TypeError`, igual que con un `project` o `asset` vacío). `loadPlan` nunca lanza: acepta una URL absoluta `https:` o una relativa, que resuelve contra la página (sin página, una relativa devuelve `null`); hace un solo `GET` sin cookies ni redirecciones y devuelve el plan, o `null`. El endpoint sólo responde a los dominios verificados del proyecto. `null` significa «reproducí sin anuncios esta vez»: sin plan todavía (el backend lo prepara en segundo plano), error de red o respuesta inválida. El navegador puede cachear la respuesta unos minutos. `loadPlan(url, { fetchImpl, signal })` acepta un `AbortSignal`.
 
 **HTML5 `<video>`.** El SDK reproduce los gráficos y el módulo pide los cortes a IMA.
 
