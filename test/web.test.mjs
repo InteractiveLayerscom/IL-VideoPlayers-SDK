@@ -235,3 +235,25 @@ test('a cue with an https clickUrl gets a link over its graphic only', async () 
   sdk.destroy();
   window.close();
 });
+
+test('a null playhead presents nothing, not a time of 0', () => {
+  let now = 5000;
+  const events = [];
+  const session = createSession({
+    clock: () => now, playing: () => true, interval: false,
+    renderer: { show(c) { events.push(c.id); }, hide() { events.push('hide'); }, visible: () => false },
+  });
+  assert.equal(session.clock(), 5000);
+  session.addCue({ id: 'from-zero', format: 'super', start: 0, end: 60000, imageUrl: 'https://cdn.example/a.png' });
+  assert.deepEqual(events, ['from-zero']);
+  for (const value of [null, undefined, NaN]) {
+    now = value;
+    session.tick();
+    session.addCue({ id: 'from-zero', format: 'super', start: 0, end: 60000, imageUrl: 'https://cdn.example/a.png' });
+  }
+  assert.deepEqual(events, ['from-zero', 'hide']);
+  now = 5000;
+  session.tick();
+  assert.deepEqual(events, ['from-zero', 'hide', 'from-zero']);
+  session.destroy();
+});

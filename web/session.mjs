@@ -44,10 +44,13 @@ export function createSession({
     for (const cue of items) if (cue) cues.set(cue.id, cue);
   }
 
+  // Only a linked mid-roll falls back to wall time; for every other cue a non-numeric clock means
+  // «present nothing» (a stitched ad on screen), never a time of 0.
   function playhead() {
     const time = clock();
     return spot && !Number.isSafeInteger(time) ? Date.now() : time;
   }
+  const contentKnown = () => Number.isSafeInteger(clock());
 
   function manifest(text) {
     if (!disposed && !eventsUrl) merge(readDateRanges(text));
@@ -107,7 +110,7 @@ export function createSession({
     function canShow(cue) {
       if (!Number.isSafeInteger(time)) return false;
       if (cue.format === 'midroll') return inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot();
-      return !inBreak && (cue.scene ? presenting() : playing());
+      return !inBreak && contentKnown() && (cue.scene ? presenting() : playing());
     }
     let active = null;
     for (const { cue } of pinned.values()) {
@@ -179,6 +182,8 @@ export function createSession({
   if (interval !== false) timer = setInterval(tick, interval);
   return {
     tick,
+    // The clock the cues are rendered from; the ads module checks a stitched plan uses the same one.
+    clock,
     addCue(item, { onVisible, onHidden, onClick } = {}) {
       const cue = normalizeCue(item);
       if (!cue || disposed) return false;

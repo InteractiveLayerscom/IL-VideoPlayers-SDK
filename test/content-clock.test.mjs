@@ -58,15 +58,18 @@ function stitchedPlan({ windows, pacing = {}, timeline = {}, cuts = [], ...rest 
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-function rig({ plan = stitchedPlan(), withClock = true, ...options } = {}) {
+function rig({ plan = stitchedPlan(), withClock = true, sessionClock, ...options } = {}) {
   const video = new EventTarget();
   video.currentTime = 0;
   video.paused = false;
+  video.playbackRate = 1;
   const hls = fakeHls();
   const clock = withClock ? hlsContentClock({ hls, video, plan }) : undefined;
   const onScreen = new Map();
   const calls = [];
   const session = {
+    // Like attachHtmlVideo: the clock the session renders from.
+    clock: sessionClock ?? clock?.programTime,
     addCue(cue, hooks) { calls.push({ cue, hooks }); onScreen.set(cue.id, cue); return true; },
     removeCue(id) { onScreen.delete(id); return true; },
   };
@@ -104,12 +107,19 @@ test('the hls clock reads content time from the raw program date time, and null 
   };
   // Pre-roll, content, mid-roll, content, read without any fragment event.
   for (const t of [0, 3, 9.9]) assert.equal(read(t), null, `pre-roll ${t}`);
-  for (const t of [10.5, 12, 22.5, 39.5]) assert.ok(Math.abs(read(t) - truth(t)) < 1e-9, `content ${t}`);
+  for (const t of [10.5, 12, 22.5, 39.3]) assert.ok(Math.abs(read(t) - truth(t)) < 1e-9, `content ${t}`);
   for (const t of [40, 44, 49.9]) assert.equal(read(t), null, `mid-roll ${t}`);
   for (const t of [50.5, 66, 79]) assert.ok(Math.abs(read(t) - truth(t)) < 1e-9, `content ${t}`);
   // Within a quarter second of an ad fragment the picture counts as the ad.
   assert.equal(read(10.1), null);
   assert.equal(read(39.8), null);
+  // Ahead of an ad the margin is half a second of wall time, wider at a faster rate.
+  assert.equal(read(39.6), null);
+  assert.ok(read(39.4) != null);
+  video.playbackRate = 2;
+  assert.equal(read(39.1), null);
+  assert.ok(read(38.9) != null);
+  video.playbackRate = 1;
   assert.equal(read(50.2), null);
   assert.equal(clock.programTime(), null);
   video.currentTime = 22.5;
@@ -125,7 +135,7 @@ test('the hls clock follows seeks both ways and a stale fragment event', () => {
     video.currentTime = t;
     const expected = truth(t);
     const got = clock.time();
-    if (expected == null || [10, 40, 50].some((edge) => Math.abs(t - edge) < 0.25)) assert.equal(got, null, `seek ${t}`);
+    if (expected == null || [10, 40, 50].some((edge) => Math.abs(t - edge) < 0.5)) assert.equal(got, null, `seek ${t}`);
     else assert.ok(Math.abs(got - expected) < 1e-9, `seek ${t}: ${got}`);
   }
 });
@@ -250,4 +260,106 @@ test('a stitched plan without a content clock, or an unknown timeline, stays ine
     assert.deepEqual([r.requests, r.scripts, r.calls.length, r.ads.cuts], [[], [], 0, []]);
     r.ads.destroy();
   }
+});
+
+function fakeGpt() {
+  const listeners = new Map();
+  const service = {
+    initialLoadDisabled: false,
+    addEventListener(name, fn) { (listeners.get(name) ?? listeners.set(name, []).get(name)).push(fn); },
+    removeEventListener() {},
+    isInitialLoadDisabled() { return this.initialLoadDisabled; },
+    refresh() {},
+  };
+  const made = { slots: [], rendered: new Set() };
+  globalThis.googletag = {
+    cmd: { push: (fn) => fn() },
+    pubadsReady: false,
+    pubads: () => service,
+    enableServices() {},
+    setConfig(config) { if (config.disableInitialLoad) service.initialLoadDisabled = true; },
+    getConfig: () => ({ disableInitialLoad: service.initialLoadDisabled }),
+    defineSlot(unit, size, id) {
+      const slot = { id, addService() { return this; }, setConfig() {} };
+      made.slots.push(slot);
+      return slot;
+    },
+    display() {},
+    destroySlots() { return true; },
+  };
+  made.renderPending = () => {
+    for (const slot of made.slots) {
+      if (made.rendered.has(slot)) continue;
+      made.rendered.add(slot);
+      for (const fn of listeners.get('slotRenderEnded') ?? []) fn({ slot, isEmpty: false });
+    }
+  };
+  return made;
+}
+
+function makeStage() {
+  const { document } = new JSDOM('<div id="stage"></div>').window;
+  const stage = document.getElementById('stage');
+  Object.defineProperty(stage, 'clientWidth', { value: 960 });
+  Object.defineProperty(stage, 'clientHeight', { value: 540 });
+  return stage;
+}
+
+// Wall time in 60 fps frames: the video advances by its rate, frame callbacks run every frame,
+// and timeupdate arrives only every `eventEvery` frames (a busy main thread when large).
+async function playFrames(r, { rate, eventEvery, from = 20, to = 60, onFrame }) {
+  const frameQueue = [];
+  r.video.requestVideoFrameCallback = (fn) => frameQueue.push(fn);
+  r.video.cancelVideoFrameCallback = () => {};
+  r.video.playbackRate = rate;
+  r.video.currentTime = from;
+  for (let frame = 0; r.video.currentTime < to; frame++) {
+    r.video.currentTime += rate / 60;
+    for (const fn of frameQueue.splice(0)) fn();
+    if (frame % eventEvery === 0) {
+      r.video.dispatchEvent(new Event('timeupdate'));
+      await flush();
+    }
+    onFrame();
+  }
+}
+
+for (const rate of [1, 1.5, 2]) {
+  for (const eventEvery of [15, 60]) {
+    test(`at rate ${rate} with events every ${eventEvery} frames neither the overlay nor a cue is ever on screen in an ad`, async () => {
+      const gpt = fakeGpt();
+      const stage = makeStage();
+      const plan = stitchedPlan({ windows: [{ id: 'o', start_ms: 20000, end_ms: 35000 }, { id: 's', start_ms: 51000, end_ms: 59000 }] });
+      plan.scenes.formats = ['overlay_300x250', 'super'];
+      plan.scenes.overlay = { ad_unit: '/123/site/overlay', size: [300, 250] };
+      plan.scenes.pacing.max_seconds = null;
+      const r = rig({ plan, stage });
+      let overlaySeen = false;
+      let cueSeen = false;
+      await playFrames(r, { rate, eventEvery, from: 5, to: 80, onFrame() {
+        gpt.renderPending();
+        const box = stage.querySelector('[data-il-ads-overlay]');
+        const overlayOn = box?.style.display === 'block';
+        overlaySeen ||= overlayOn;
+        cueSeen ||= r.onScreen.size > 0;
+        if (truth(r.video.currentTime) == null) {
+          assert.equal(overlayOn, false, `overlay over an ad at ${r.video.currentTime}`);
+          assert.equal(r.onScreen.size, 0, `cue over an ad at ${r.video.currentTime}`);
+        }
+      } });
+      assert.ok(overlaySeen, 'the overlay showed on content');
+      assert.ok(cueSeen, 'the super showed on content');
+      r.ads.destroy();
+      delete globalThis.googletag;
+    });
+  }
+}
+
+test('a stitched plan with a session on another clock draws nothing and says why', async () => {
+  const events = [];
+  const r = rig({ sessionClock: () => 0, onEvent: (event) => events.push(event) });
+  for (let t = 0; t < 80; t += 1) await r.at(t);
+  assert.deepEqual([r.requests, r.calls.length], [[], 0]);
+  assert.deepEqual(events, [{ type: 'clock_mismatch' }]);
+  r.ads.destroy();
 });

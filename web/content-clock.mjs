@@ -8,9 +8,12 @@ export function videoClock(video) {
   return Object.freeze({ kind: 'video', time, programTime: () => Math.round(time() * 1000) });
 }
 
-// How far from an ad fragment the picture counts as the ad, in seconds: hls.js fragment starts
-// can be about 0.1 s off the media actually shown, and a graphic over an ad is the worse error.
+// How far from an ad fragment the picture counts as the ad, in seconds of wall time: hls.js fragment
+// starts can be about 0.1 s off the media actually shown, and a graphic over an ad is the worse error.
+// Ahead of an ad the margin is wider and scales with the playback rate, so a late check still hides
+// the graphic before the ad's first frame.
 const AD_EDGE_SECONDS = 0.25;
+const AD_LEAD_SECONDS = 0.5;
 // hls.js event names (Hls.Events.FRAG_CHANGED, LEVEL_LOADED, LEVEL_UPDATED).
 const FRAG_CHANGED = 'hlsFragChanged';
 const LEVEL_EVENTS = ['hlsLevelLoaded', 'hlsLevelUpdated'];
@@ -19,7 +22,7 @@ const LEVEL_EVENTS = ['hlsLevelLoaded', 'hlsLevelUpdated'];
 // segment as `pdt_origin` plus the segment's content start; ad segments carry none. hls.js keeps the
 // written value in `frag.rawProgramDateTime` (null on an ad fragment); `frag.programDateTime` and
 // `hls.playingDate` are extrapolated through ads and are never used here.
-export function hlsContentClock({ hls, video, plan, edge = AD_EDGE_SECONDS } = {}) {
+export function hlsContentClock({ hls, video, plan, edge = AD_EDGE_SECONDS, lead = AD_LEAD_SECONDS } = {}) {
   const origin = Date.parse(plan?.timeline?.pdt_origin);
   if (!hls || typeof hls.on !== 'function' || !video || plan?.timeline?.kind !== 'stitched' || !Number.isFinite(origin))
     throw new TypeError('hlsContentClock needs hls, video and a stitched plan with timeline.pdt_origin');
@@ -73,7 +76,9 @@ export function hlsContentClock({ hls, video, plan, edge = AD_EDGE_SECONDS } = {
     if (!Number.isFinite(t)) return null;
     const frag = fragmentAt(t);
     if (!frag || isAd(frag)) return null;
-    for (const near of [t - edge, t + edge]) {
+    const rate = Number(video.playbackRate);
+    const scale = Number.isFinite(rate) && rate > 1 ? rate : 1;
+    for (const near of [t - edge * scale, t + Math.max(edge, lead) * scale]) {
       const other = near >= 0 ? fragmentAt(near) : null;
       if (other && other !== frag && isAd(other)) return null;
     }

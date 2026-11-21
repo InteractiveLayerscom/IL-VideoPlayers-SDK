@@ -326,6 +326,16 @@ export function attachAds({
   // the host passed, and without a content clock the video position is stream time: no graphics either.
   const stitched = valid.timeline?.kind === 'stitched';
   if (stitched && typeof clock?.time !== 'function') return inert;
+  // Cues are drawn by the session from its own clock: under a stitched plan it must be this clock,
+  // or they would show by stream time. Said once through onEvent, then nothing is drawn.
+  if (stitched && (typeof clock.programTime !== 'function' || session.clock !== clock.programTime)) {
+    try {
+      onEvent?.({ type: 'clock_mismatch' });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+    return inert;
+  }
   const content = typeof clock?.time === 'function' ? clock : videoClock(video);
   const page = pageUrl ?? valid.page_url;
   const sid = typeof sessionId === 'string' && sessionId ? sessionId : randomId();
@@ -422,6 +432,7 @@ export function attachAds({
     // Filled while a stitched ad plays: it waits off the session until content is back.
     const waiting = now() == null;
     if (waiting || session.addCue(item, hooks)) cues.set(id, { end: window.end, item, hooks, onScreen: !waiting });
+    watch();
   }
 
   const onRender = (event) => {
@@ -544,6 +555,7 @@ export function attachAds({
       overlay.viewed = false;
       emit('fill', OVERLAY, window);
       updateOverlay(now());
+      watch();
     } catch {
       if (disposed) return;
       dropSlot();
@@ -600,6 +612,7 @@ export function attachAds({
       } else if (!cue.onScreen) cue.onScreen = session.addCue(cue.item, cue.hooks);
     }
     updateOverlay(time);
+    watch();
     if (time == null) return;
     schedule(time / 1000);
     // The single overlay slot is not reused while it still holds a creative.
@@ -1033,6 +1046,33 @@ export function attachAds({
     }
   }
 
+  // With a stitched clock, while anything the module drew is on screen it is re-checked on every frame
+  // (video frames where the browser reports them), not only on video events, so an ad never shows under it.
+  const frames = { id: null, video: false };
+  const drawing = () => overlay.live || [...cues.values()].some((cue) => cue.onScreen);
+  function guard() {
+    frames.id = null;
+    if (disposed) return;
+    if (now() == null) sync();
+    watch();
+  }
+  function watch() {
+    if (!stitched || disposed || frames.id != null || !drawing()) return;
+    if (typeof video.requestVideoFrameCallback === 'function' && video.paused === false) {
+      frames.video = true;
+      frames.id = video.requestVideoFrameCallback(guard);
+    } else if (typeof globalThis.requestAnimationFrame === 'function') {
+      frames.video = false;
+      frames.id = globalThis.requestAnimationFrame(guard);
+    }
+  }
+  function unwatchFrames() {
+    if (frames.id == null) return;
+    if (frames.video) video.cancelVideoFrameCallback?.(frames.id);
+    else globalThis.cancelAnimationFrame?.(frames.id);
+    frames.id = null;
+  }
+
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
   // A clock that knows when the fragment changes (an ad starting while paused, say) re-checks at once.
   const unwatch = typeof content.onChange === 'function' ? content.onChange(() => sync()) : null;
@@ -1096,6 +1136,7 @@ export function attachAds({
       video.removeEventListener('pause', walkPaused);
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       if (typeof unwatch === 'function') unwatch();
+      unwatchFrames();
       video.removeEventListener('ended', contentEnded);
       clearTimeout(ima.loadTimer);
       ima.observer?.disconnect();
