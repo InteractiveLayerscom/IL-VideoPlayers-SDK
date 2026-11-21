@@ -1,4 +1,4 @@
-import { accentInk, openTVShop } from './tv-shop.mjs';
+import { accentInk, brandSurface, openTVShop } from './tv-shop.mjs';
 
 export function isHttps(value) {
   if (typeof value !== 'string' || value.trim() !== value) return false;
@@ -267,14 +267,16 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     result.className = 'il-commerce-result';
     result.setAttribute('aria-live', 'polite');
     result.tabIndex = -1;
+    // Surface and text are always set together, so no subset of the brand leaves the text unreadable.
+    const surface = brandSurface(cue.brand);
+    shell.style.setProperty('--il-commerce-background', surface.background);
+    shell.style.setProperty('--il-commerce-foreground', surface.foreground);
     if (cue.brand) {
-      const { logoUrl, accent, background, foreground } = cue.brand;
+      const { logoUrl, accent } = cue.brand;
       if (accent) {
         shell.style.setProperty('--il-commerce-accent', accent);
         shell.style.setProperty('--il-commerce-accent-ink', accentInk(accent));
       }
-      if (background) shell.style.setProperty('--il-commerce-background', background);
-      if (foreground) shell.style.setProperty('--il-commerce-foreground', foreground);
       if (logoUrl) {
         const logo = doc.createElement('img');
         logo.className = 'il-commerce-logo';
