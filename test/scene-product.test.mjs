@@ -84,7 +84,7 @@ function rig({ plan = makePlan(), answer = () => ({ status: 200, body: card() })
   return { video, ads, routes, graphics, pixels, events, onScreen, adds, at };
 }
 
-test('asks the route lead_ms before the window with the plan, the window, the sid of the video ads and the locale', async () => {
+test('asks the opaque route lead_ms before the window with only the window and the locale', async () => {
   const plan = makePlan({ cuts: [{ id: 'pre', at: 0, position: 'preroll', requests: [{ provider: 'iadserver', tag_url: IAD }] }] });
   const r = rig({ plan });
   await r.at(44.9);
@@ -93,23 +93,39 @@ test('asks the route lead_ms before the window with the plan, the window, the si
   assert.equal(r.routes.length, 1);
   const { url, init } = r.routes[0];
   assert.equal(url.origin + url.pathname, ROUTE);
-  const sid = new URL(r.ads.cuts[0].tagUrl).searchParams.get('sid');
-  assert.match(sid, /^[a-f0-9]{32}$/);
-  assert.equal(r.routes[0].href, `${SIGNED}&window=m1&sid=${sid}&locale=es`);
+  assert.equal(r.routes[0].href, `${SIGNED}&window=m1&locale=es`);
   assert.deepEqual([init.credentials, init.cache, init.redirect], ['omit', 'no-store', 'error']);
   assert.deepEqual(r.events.slice(0, 2), [{ type: 'request', format: 'scene_product', window: 'm1' },
     { type: 'fill', format: 'scene_product', window: 'm1' }]);
   r.ads.destroy();
 });
 
-test('a host sessionId is the sid, and commerce.url is opaque with or without a query string', async () => {
-  const r = rig({ sessionId: 'view:42', project: 'ignored' });
+test('commerce.session is the sid of the iADServer break requests and wins over the host sessionId', async () => {
+  const cuts = [{ id: 'pre', at: 0, position: 'preroll', requests: [{ provider: 'iadserver', tag_url: IAD }] }];
+  const sidOf = (r) => new URL(r.ads.cuts[0].tagUrl).searchParams.get('sid');
+  const session = '9f1c0000000000000000000000000abc';
+  const planned = rig({ plan: makePlan({ cuts, commerce: { session } }), sessionId: 'host-view' });
+  assert.equal(sidOf(planned), session);
+  planned.ads.destroy();
+  // Without commerce, or with an unusable session, the host's sessionId (or a random one) stays.
+  const plain = makePlan({ cuts });
+  delete plain.commerce;
+  for (const [plan, expected] of [[plain, 'host-view'], [makePlan({ cuts, commerce: { session: 'has spaces' } }), 'host-view'],
+    [makePlan({ cuts, commerce: { kind: 'other', session } }), 'host-view']]) {
+    const r = rig({ plan, sessionId: 'host-view' });
+    assert.equal(sidOf(r), expected);
+    r.ads.destroy();
+  }
+});
+
+test('commerce.url is opaque with or without a query string; an old project option is ignored', async () => {
+  const r = rig({ project: 'ignored' });
   await r.at(50);
-  assert.equal(r.routes[0].href, SIGNED + '&window=m1&sid=view%3A42&locale=es');
+  assert.equal(r.routes[0].href, SIGNED + '&window=m1&locale=es');
   r.ads.destroy();
-  for (const [url, expected] of [[ROUTE, ROUTE + '?window=m1&sid=s1&locale=es'], [ROUTE + '?', ROUTE + '?window=m1&sid=s1&locale=es'],
-    [SIGNED + '#frag', SIGNED + '&window=m1&sid=s1&locale=es#frag']]) {
-    const bare = rig({ plan: makePlan({ commerce: { url } }), sessionId: 's1' });
+  for (const [url, expected] of [[ROUTE, ROUTE + '?window=m1&locale=es'], [ROUTE + '?', ROUTE + '?window=m1&locale=es'],
+    [SIGNED + '#frag', SIGNED + '&window=m1&locale=es#frag']]) {
+    const bare = rig({ plan: makePlan({ commerce: { url } }) });
     await bare.at(50);
     assert.equal(bare.routes[0].href, expected);
     bare.ads.destroy();
@@ -233,8 +249,8 @@ test('overlapping product windows: one card at a time, and the 30 s spacing betw
   r.ads.destroy();
 });
 
-test('without commerce on the session or a valid sid, nothing about the product is asked', async () => {
-  for (const options of [{ commerce: null }, { sessionId: 'has spaces' }]) {
+test('without commerce on the session, nothing about the product is asked', async () => {
+  for (const options of [{ commerce: null }]) {
     const r = rig(options);
     await r.at(50);
     assert.equal(r.routes.length, 0);

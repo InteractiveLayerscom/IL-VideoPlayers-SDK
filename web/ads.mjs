@@ -353,7 +353,11 @@ export function attachAds({
   }
   const content = typeof clock?.time === 'function' ? clock : videoClock(video);
   const page = pageUrl ?? valid.page_url;
-  const sid = typeof sessionId === 'string' && sessionId ? sessionId : randomId();
+  // A plan with the scene product names the view's session: it is the sid of every iADServer request, so the
+  // breaks and the product share frequency caps. It wins over the host's sessionId; without it, as before.
+  const planSession = readCommerce(valid.commerce)?.session;
+  const sid = typeof planSession === 'string' && SID.test(planSession) ? planSession
+    : typeof sessionId === 'string' && sessionId ? sessionId : randomId();
   const cuts = Object.freeze(stitched ? [] : planCuts(valid.cuts, page, sid).map(Object.freeze));
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
@@ -375,10 +379,10 @@ export function attachAds({
   const breakOn = () => inBreak || hostBreak || now() == null;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
   let windows = scenes ? usableWindows(valid) : [];
-  // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })) and a sid IL accepts;
-  // without them nothing about it is requested.
+  // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })); without it nothing
+  // about it is requested.
   const shop = readCommerce(valid.commerce);
-  const shopOn = !!shop && !!session.commerce && SID.test(sid);
+  const shopOn = !!shop && !!session.commerce;
   const shopWindows = shopOn ? usableWindows(valid, shop) : [];
   const shopIds = new Set(shopOn ? shop.windows.map((window) => window?.id) : []);
   // Per window: 'pending', 'filled' or 'empty' (204, 429, error or timeout: free for a graphic).
@@ -647,9 +651,9 @@ export function attachAds({
     const timeout = setTimeout(() => abort.abort(), PRODUCT_TIMEOUT_MS);
     let outcome = 'empty';
     try {
-      // commerce.url is opaque (it carries the project, the asset and a signed grant): only our three keys
-      // are appended to it, without parsing or re-encoding what is already there.
-      const extra = new URLSearchParams({ window: window.id, sid,
+      // commerce.url is opaque (project, asset and a signed grant naming the session): only `window` and `locale`
+      // are appended, without parsing or re-encoding what is already there.
+      const extra = new URLSearchParams({ window: window.id,
         locale: commerceLocale(session.commerce.locale ?? globalThis.navigator?.language) });
       const [base, fragment] = shop.url.split(/#(.*)/s);
       const href = base + (!base.includes('?') ? '?' : /[?&]$/.test(base) ? '' : '&') + extra + (fragment != null ? '#' + fragment : '');
