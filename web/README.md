@@ -247,7 +247,7 @@ Qué players cubre:
 
 | Player | Estado |
 | --- | --- |
-| HTML5 `<video>` con hls.js (probado con 1.5.17 en Chrome) | Cubierto con `hlsContentClock`. |
+| HTML5 `<video>` con hls.js | Cubierto con `hlsContentClock`. Probado en un navegador: sólo el reloj, en Chrome con hls.js 1.5.17 a velocidad 1× y 2× sobre un stream real de MediaTailor (`null` en todos los cuadros de anuncio, tiempo de contenido correcto en el contenido y después de buscar). No se probaron en un navegador la programación del overlay ni de los cues, ni otros navegadores. |
 | Safari con HLS nativo | No cubierto. Necesita un reloj que lea el PDT del segmento visible (`video.getStartDate()` sólo da el primero) y que distinga los segmentos de anuncio, por ejemplo con los eventos de seguimiento de MediaTailor. |
 | Shaka Player | No cubierto. Necesita un reloj desde su línea de tiempo de segmentos (referencias con su PDT) y los límites de los períodos de anuncio. |
 | Video.js (VHS) | No cubierto. Necesita un reloj desde los segmentos de VHS con su `dateTimeObject`, sin la extrapolación de `convertToProgramTime`. |
