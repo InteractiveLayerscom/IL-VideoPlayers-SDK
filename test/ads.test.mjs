@@ -1116,6 +1116,12 @@ const waterfallPlan = (extra = {}) => makePlan({ cuts: [
 async function waterfallRig({ plan = waterfallPlan(), start = 0, ...rest } = {}) {
   const made = fakeIma();
   const rig = breakRig({ linear: 'ima', plan, start, sessionId: 'view-1', ...rest });
+  // Like a browser, pausing a playing video fires `pause`.
+  rig.video.pause = function () {
+    if (this.paused) return;
+    this.paused = true;
+    this.dispatchEvent(new Event('pause'));
+  };
   await ticks();
   const at = (seconds, type = 'timeupdate') => {
     rig.video.currentTime = seconds;
@@ -1514,5 +1520,142 @@ test('the manager is destroyed at break_end', async () => {
   const manager = r.made.load();
   r.playAd(manager);
   assert.equal(manager.destroyed, true);
+  r.ads.destroy();
+});
+
+test('viewer pauses during the pre-roll attempts: not resumed at break_error', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  assert.equal(r.video.paused, true);
+  r.video.play = () => assert.fail('the viewer paused');
+  r.video.dispatchEvent(new Event('pause'));
+  r.made.fail();
+  r.made.fail();
+  assert.deepEqual(r.breaks(), [['break_error', 'pre']]);
+  assert.equal(r.video.paused, true);
+  r.ads.destroy();
+});
+
+test('viewer pauses during the pre-roll attempts: not resumed at break_end', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  r.video.dispatchEvent(new Event('pause'));
+  r.made.fail();
+  let plays = 0;
+  r.video.play = () => { plays++; return Promise.resolve(); };
+  const manager = r.made.load();
+  manager.fire('pause', {});
+  manager.fire('started', {});
+  manager.fire('resume', {});
+  assert.equal(plays, 0);
+  assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_end', 'pre']]);
+  r.ads.destroy();
+});
+
+test('viewer pauses during the pre-roll attempts and the attempt is cancelled: not resumed', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  r.video.dispatchEvent(new Event('pause'));
+  r.video.play = () => assert.fail('the viewer paused');
+  r.video.dispatchEvent(new Event('ended'));
+  r.ads.destroy();
+});
+
+test('host seeks to 600 after IMA loaded, then start(): no request for the 0 and 300 cuts, the next one on time', async () => {
+  const plan = makePlan({ cuts: [0, 300, 900].map((at) => ({ id: 'c' + at, at, position: at ? 'midroll' : 'preroll',
+    requests: [{ provider: 'iadserver', tag_url: IAD }, { provider: 'gam', tag_url: TAG }] })) });
+  const r = await waterfallRig({ plan });
+  r.video.currentTime = 600;
+  r.ads.start();
+  r.at(600, 'playing');
+  assert.equal(r.made.requests.length, 0);
+  r.at(891);
+  assert.equal(r.made.requests.length, 0);
+  r.at(893);
+  assert.deepEqual(r.events.filter((e) => e.type === 'break_request').map((e) => e.cut), ['c900']);
+  r.ads.destroy();
+});
+
+test('an ad whose CONTENT_PAUSE_REQUESTED arrives at 7.5 s and STARTED at 9 s plays', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  t.mock.timers.tick(5000);
+  t.mock.timers.tick(2000);
+  const manager = r.made.load();
+  t.mock.timers.tick(500);
+  manager.fire('pause', {});
+  t.mock.timers.tick(1500);
+  manager.fire('started', {});
+  manager.fire('resume', {});
+  assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_end', 'pre']]);
+  assert.equal(r.video.paused, false);
+  r.ads.destroy();
+});
+
+const threeRequests = () => makePlan({ cuts: [{ id: 'pre', at: 0, position: 'preroll', requests: [
+  { provider: 'iadserver', tag_url: IAD }, { provider: 'gam', tag_url: TAG }, { provider: 'iadserver', tag_url: IAD + '&n=3' }] }] });
+
+test('three requests, the first two take 5 s each: the walk settles at 8 s of hold', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = await waterfallRig({ plan: threeRequests() });
+  r.ads.start();
+  r.at(0.1, 'playing');
+  t.mock.timers.tick(7999);
+  assert.equal(r.made.requests.length, 2);
+  t.mock.timers.tick(1);
+  assert.deepEqual(r.breaks(), [['break_error', 'pre']]);
+  assert.equal(r.video.paused, false);
+  r.ads.destroy();
+});
+
+test('three requests: the pause for an ad before 8 s keeps the break; its failure after 8 s ends it', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = await waterfallRig({ plan: threeRequests() });
+  r.ads.start();
+  r.at(0.1, 'playing');
+  t.mock.timers.tick(5000);
+  r.made.load().fire('pause', {});
+  t.mock.timers.tick(4000);
+  assert.deepEqual(r.breaks(), [['break_start', 'pre']]);
+  r.made.managers.at(-1).fire('adError', {});
+  assert.equal(r.made.requests.length, 2);
+  assert.deepEqual(r.breaks(), [['break_start', 'pre'], ['break_error', 'pre']]);
+  r.ads.destroy();
+});
+
+test('a play event during the attempts pauses at once', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.video.paused = false;
+  r.video.dispatchEvent(new Event('play'));
+  assert.equal(r.video.paused, true);
+  r.ads.destroy();
+});
+
+test('destroy() during the hold resumes without an event', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  assert.equal(r.video.paused, true);
+  const before = r.events.length;
+  r.ads.destroy();
+  assert.equal(r.video.paused, false);
+  assert.equal(r.events.length, before);
+});
+
+test('a rejected resume emits resume_blocked', async () => {
+  const r = await waterfallRig();
+  r.ads.start();
+  r.at(0.1, 'playing');
+  r.video.play = () => Promise.reject(new Error('NotAllowedError'));
+  r.made.fail();
+  r.made.fail();
+  await ticks();
+  assert.deepEqual(r.events.filter((e) => e.type === 'resume_blocked').map((e) => e.cut), ['pre']);
   r.ads.destroy();
 });

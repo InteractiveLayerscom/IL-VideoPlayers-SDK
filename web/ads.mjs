@@ -346,7 +346,8 @@ export function attachAds({
   const waterfall = useIma && cuts.some((cut) => cut.requests.length > 1);
   // token: bumped by every attempt, cancel and settle, so late IMA answers are recognised as stale.
   const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false,
-    held: false };
+    held: false, ownPause: false, adComing: false, holdSpent: false, begun: false,
+    viewerPaused: false };
   const settledCuts = new Set();
 
   const emit = (type, format, window) => {
@@ -708,7 +709,39 @@ export function attachAds({
     destroyManager();
     emitBreak(type, cut);
     // Content resumes only if a break was open or the module itself held it for the pre-roll.
-    if (endBreak() || held) resume();
+    const viewerPaused = wf.viewerPaused;
+    wf.viewerPaused = false;
+    // A viewer who paused while the module held the content is not overruled when the break ends.
+    if ((endBreak() && !viewerPaused) || held) resumeWalk(cut);
+  }
+  // The module's resume runs outside a gesture; a refused play() is reported so the host can show its control.
+  function resumeWalk(cut) {
+    const blocked = () => {
+      if (!disposed) emitBreak('resume_blocked', cut);
+    };
+    try {
+      void Promise.resolve(video.play?.()).catch(blocked);
+    } catch {
+      blocked();
+    }
+  }
+  // The 8 s cap is for content held with no ad on its way: an ad IMA is starting keeps its attempt guard,
+  // and a spent budget only ends the break once that ad fails.
+  function armHold(cut) {
+    if (wf.holdTimer) return;
+    wf.holdTimer = setTimeout(() => {
+      if (disposed || wf.cut !== cut || wf.started) return;
+      if (wf.adComing) wf.holdSpent = true;
+      else settle('break_error');
+    }, HOLD_MS);
+  }
+  // The pause the module causes is told apart from the viewer's, which ends the module's hold.
+  function walkPaused() {
+    if (wf.ownPause) wf.ownPause = false;
+    else if (!inBreak && wf.held) {
+      wf.held = false;
+      wf.viewerPaused = true;
+    }
   }
   // Every cut already behind the playhead when the view joins is settled without an event.
   function settleBehind() {
@@ -719,16 +752,15 @@ export function attachAds({
   function holdPreroll(cut) {
     if (video.paused === false) {
       wf.held = true;
+      wf.viewerPaused = false;
+      wf.ownPause = true;
       video.pause?.();
     }
-    if (wf.held && !wf.holdTimer) {
-      wf.holdTimer = setTimeout(() => {
-        if (!disposed && wf.cut === cut && !wf.started) settle('break_error');
-      }, HOLD_MS);
-    }
+    if (wf.held) armHold(cut);
   }
   // Drops an attempt that has not started playing, without settling its cut.
   function cancelAttempt() {
+    const cut = wf.cut;
     clearWalkTimers();
     wf.token++;
     wf.cut = null;
@@ -736,7 +768,7 @@ export function attachAds({
     destroyManager();
     if (wf.held) {
       wf.held = false;
-      resume();
+      resumeWalk(cut);
     }
   }
   function ask(cut, index) {
@@ -770,6 +802,8 @@ export function attachAds({
       return settle('break_error');
     }
     emitWalk('break_no_fill', cut, index);
+    wf.adComing = false;
+    if (wf.holdSpent) return settle('break_error');
     destroyManager();
     // Content stays paused if IMA already paused it; the hold timer keeps running.
     ask(cut, index + 1);
@@ -809,7 +843,7 @@ export function attachAds({
     if (wf.cut && wf.cut !== target) cancelAttempt();
     if (!target) return;
     if (!wf.cut) {
-      Object.assign(wf, { dueAt: null, started: false });
+      Object.assign(wf, { dueAt: null, started: false, adComing: false, holdSpent: false, viewerPaused: false });
       ask(target, 0);
     }
     if (target.at > time) return;
@@ -837,14 +871,14 @@ export function attachAds({
     manager.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, fail);
     manager.addEventListener(sdk.AdEvent.Type.CONTENT_PAUSE_REQUESTED, () => {
       if (disposed || token !== wf.token) return;
-      clearTimeout(wf.timer);
       const cut = wf.cut;
       beginBreak(cut);
-      if (!wf.started && !wf.holdTimer) {
-        wf.holdTimer = setTimeout(() => {
-          if (!disposed && wf.cut === cut && !wf.started) settle('break_error');
-        }, HOLD_MS);
-      }
+      if (wf.started) return;
+      // An ad was found and is starting: it gets the attempt guard to STARTED.
+      wf.adComing = true;
+      clearTimeout(wf.timer);
+      wf.timer = setTimeout(() => attemptFailed(token), ATTEMPT_MS);
+      armHold(cut);
     });
     manager.addEventListener(sdk.AdEvent.Type.STARTED, () => {
       if (disposed || token !== wf.token) return;
@@ -959,7 +993,12 @@ export function attachAds({
   }
 
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
-  if (waterfall) settleBehind();
+  if (waterfall) {
+    settleBehind();
+    // `play` comes before `playing`, so the pre-roll hold pauses before any content is heard.
+    video.addEventListener('play', sync);
+    video.addEventListener('pause', walkPaused);
+  }
   if (useIma) void setUpIma();
   sync();
   return {
@@ -992,7 +1031,12 @@ export function attachAds({
       } catch {
         // A failed initialisation surfaces later as an ad error.
       }
-      if (waterfall) schedule(Number(video.currentTime) || 0);
+      if (waterfall) {
+        // Cuts at or behind a resume position set before the first start() are a late join.
+        if (!wf.begun) settleBehind();
+        wf.begun = true;
+        schedule(Number(video.currentTime) || 0);
+      }
       else startManager();
     },
     destroy() {
@@ -1000,6 +1044,13 @@ export function attachAds({
       disposed = true;
       clearWalkTimers();
       wf.token++;
+      // The host loses the module: content the module was holding is given back, without an event.
+      if (wf.held) {
+        wf.held = false;
+        resume();
+      }
+      video.removeEventListener('play', sync);
+      video.removeEventListener('pause', walkPaused);
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       video.removeEventListener('ended', contentEnded);
       clearTimeout(ima.loadTimer);
