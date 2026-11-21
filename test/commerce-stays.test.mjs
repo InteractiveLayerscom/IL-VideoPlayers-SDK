@@ -373,3 +373,17 @@ test('a hidden page keeps the open card with its choice, counts nothing while hi
   assert.equal(p.count('/events/dlv_tab/impression'), 1);
   p.close();
 });
+
+test('a seek back before the window releases an open detail; the card returns closed when its window starts', async () => {
+  const p = player({ id: 'dlv_seek_back' });
+  await cardOnScreen(p, 6);
+  p.button('View product').click();
+  await p.at(20);
+  assert.ok(p.button('Buy'), 'held past the window');
+  await p.at(0.5);
+  assert.equal(p.stage.querySelector('.il-commerce'), null, 'never before its window');
+  await p.at(1.5);
+  assert.ok(p.button('View product'), 'back, closed, with its window');
+  assert.equal(p.button('Buy'), undefined);
+  p.close();
+});

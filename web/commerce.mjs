@@ -75,7 +75,10 @@ export function normalizeBrand(value) {
 // and the viewer's last action in it; a paused video does not move the clock, so a paused viewer keeps it.
 export const HOLD_MS = 60000;
 export function withinHold(cue, time, actedAt) {
-  if (!Number.isSafeInteger(time) || time < cue.end) return true;
+  if (!Number.isSafeInteger(time)) return true;
+  // A seek back before the card's start releases it: it then follows its window, closed, like any other.
+  if (time < cue.start) return false;
+  if (time < cue.end) return true;
   return time - Math.max(cue.end, Number.isSafeInteger(actedAt) ? actedAt : cue.end) <= HOLD_MS;
 }
 

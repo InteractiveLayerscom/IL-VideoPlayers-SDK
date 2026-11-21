@@ -1236,6 +1236,14 @@ export function attachAds({
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
   // A clock that knows when the fragment changes (an ad starting while paused, say) re-checks at once.
   const unwatch = typeof content.onChange === 'function' ? content.onChange(() => sync()) : null;
+  // A hidden page gets no frame callbacks, so a stitched ad can start under a card kept on it. visibilitychange is
+  // dispatched in the task that makes the page visible, before its next rendering (and before any frame callback),
+  // so the check run here removes the card before a frame over the ad can be painted.
+  const visibilityTarget = stitched ? video.ownerDocument ?? stage?.ownerDocument ?? globalThis.document : null;
+  const onVisibility = () => {
+    if (!disposed) sync();
+  };
+  visibilityTarget?.addEventListener?.('visibilitychange', onVisibility);
   if (waterfall) {
     settleBehind();
     // `play` comes before `playing`, so the pre-roll hold pauses before any content is heard.
@@ -1297,6 +1305,7 @@ export function attachAds({
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       if (typeof unwatch === 'function') unwatch();
       unwatchFrames();
+      visibilityTarget?.removeEventListener?.('visibilitychange', onVisibility);
       video.removeEventListener('ended', contentEnded);
       clearTimeout(ima.loadTimer);
       ima.observer?.disconnect();
