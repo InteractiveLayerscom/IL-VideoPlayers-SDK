@@ -320,7 +320,16 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       panel.hidden = false;
       open.hidden = true;
       shell.classList.add('il-commerce--open');
-      buttons[offer.variants.indexOf(variant)].focus();
+      // The panel opens at the top, so the viewer sees what they are buying. Focus stays on the chosen variant
+      // when it is in view; in a panel too short for that it starts on Close, and the arrows go down from there.
+      const chosen = buttons[offer.variants.indexOf(variant)];
+      chosen.focus({ preventScroll: true });
+      panel.scrollTop = 0;
+      const row = choices.getBoundingClientRect();
+      const box = chosen.getBoundingClientRect();
+      if (box.left < row.left || box.right > row.right) choices.scrollLeft += box.left - row.left - 4;
+      // A sold-out variant is disabled and cannot take focus, which would leave Escape and the arrows with nothing.
+      if (chosen.disabled || chosen.getBoundingClientRect().bottom > panel.getBoundingClientRect().bottom) close.focus({ preventScroll: true });
       trackView(cue, offer);
       act();
       notify('opened');
