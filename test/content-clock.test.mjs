@@ -368,3 +368,33 @@ test('a stitched plan with a session on another clock draws nothing and says why
   assert.deepEqual(events, [{ type: 'clock_mismatch' }]);
   r.ads.destroy();
 });
+
+test('a stitched ad that starts while the page is hidden is cleared when the page shows, before any frame callback', async () => {
+  // Stream: pre-roll 0-10, content 0-30 at 10-40, mid-roll 40-50. The window is content 20-29 (stream 30-39).
+  const doc = Object.assign(new EventTarget(), { hidden: false });
+  const video = Object.assign(new EventTarget(), { currentTime: 0, paused: false, playbackRate: 1, ownerDocument: doc });
+  const frameCallbacks = [];
+  video.requestVideoFrameCallback = (fn) => frameCallbacks.push(fn);
+  video.cancelVideoFrameCallback = () => {};
+  const plan = stitchedPlan({ windows: [{ id: 'w', start_ms: 20000, end_ms: 29000 }] });
+  const clock = hlsContentClock({ hls: fakeHls(), video, plan });
+  const onScreen = new Set();
+  const session = { clock: clock.programTime, addCue(cue) { onScreen.add(cue.id); return true; }, removeCue(id) { onScreen.delete(id); return true; } };
+  const ads = attachAds({ session, video, plan, clock, fetchImpl: async () => ({ ok: true, text: async () => VAST }) });
+  for (const t of [26, 30, 32]) {
+    video.currentTime = t;
+    video.dispatchEvent(new Event('timeupdate'));
+    await flush();
+  }
+  assert.ok(onScreen.has('il-ads-w'), 'on screen before the page is hidden');
+  doc.hidden = true;
+  // Hidden: no frame callbacks and no events while the stream moves into the mid-roll.
+  video.currentTime = 44;
+  doc.hidden = false;
+  const run = frameCallbacks.length;
+  doc.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(onScreen.size, 0, 'gone in the visibilitychange task itself, before any frame callback runs');
+  assert.ok(frameCallbacks.length >= run);
+  ads.destroy();
+  doc.dispatchEvent(new Event('visibilitychange'));
+});

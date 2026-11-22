@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { commerceSurface } from '../web/commerce.mjs';
-import { productOptions } from '../web/tv-shop.mjs';
+import { brandSurface, contrast, openTVShop, productOptions } from '../web/tv-shop.mjs';
 import { attachHtmlVideo, attachShaka, normalizeCue } from '../web/index.mjs';
 
 const cue = {
@@ -378,5 +378,66 @@ test('the viewUrl beacon is a no-cors request a browser actually sends (redirect
   assert.equal(sent[0].init.mode, 'no-cors');
   assert.ok(sent[0].init.redirect == null || sent[0].init.redirect === 'follow');
   shop.hide();
+  window.close();
+});
+
+
+test('the card surface is derived from any subset of the brand and always reads at 4.5:1', () => {
+  const cases = [
+    [undefined, { background: '#202020', foreground: '#ffffff' }],
+    [{ accent: '#aa2200' }, { background: '#202020', foreground: '#ffffff' }],
+    [{ background: '#ffffff' }, { background: '#ffffff', foreground: '#000' }],
+    [{ background: '#101820' }, { background: '#101820', foreground: '#fff' }],
+    [{ foreground: '#171717' }, { background: '#f7f7f7', foreground: '#171717' }],
+    [{ foreground: '#fafafa' }, { background: '#202020', foreground: '#fafafa' }],
+    [{ background: '#ffffff', foreground: '#eeeeee' }, { background: '#ffffff', foreground: '#000' }],
+    [{ background: '#ffffff', foreground: '#333333' }, { background: '#ffffff', foreground: '#333333' }],
+    [{ background: '#777777' }, { background: '#777777', foreground: '#000' }],
+  ];
+  for (const [brand, expected] of cases) {
+    const surface = brandSurface(brand);
+    assert.deepEqual(surface, expected, JSON.stringify(brand));
+    assert.ok(contrast(surface.foreground, surface.background) >= 4.5, JSON.stringify(brand));
+  }
+  assert.equal(Math.round(contrast('#ffffff', '#000000')), 21);
+});
+
+// The panel's text (title, label, price, captions, result lines) inherits the shell's colour and sits on the
+// panel's background; controls carry their own colours.
+const css = readFileSync(new URL('../web/player.css', import.meta.url), 'utf8');
+test('player.css draws panel text in the brand foreground on the brand background, and nothing overrides it', () => {
+  assert.match(css, /\.il-commerce \{[^}]*color: var\(--il-commerce-foreground/);
+  assert.match(css, /\.il-commerce \.il-commerce-panel \{[^}]*background: var\(--il-commerce-background/);
+  for (const part of ['title', 'price', 'caption', 'header', 'summary', 'result'])
+    assert.doesNotMatch(css, new RegExp(`\\.il-commerce-${part}[^{]*\\{[^}]*(?<!-)color:`), part);
+});
+
+test('for a light, a dark, an accent-only and no brand, title and price read at 4.5:1 on the panel', () => {
+  const brands = { light: { accent: '#aa2200', background: '#ffffff' }, dark: { background: '#101820', foreground: '#f0f0f0' },
+    accent: { accent: '#2255cc' }, none: undefined };
+  for (const [name, brand] of Object.entries(brands)) {
+    const { window } = new JSDOM('<main><button>Shop</button></main>');
+    const stage = window.document.querySelector('main');
+    const shop = commerceSurface(stage, { locale: 'en' });
+    shop.open({ ...cue, brand }, cue.commerce, stage.querySelector('button'), () => true);
+    const shell = stage.querySelector('.il-commerce');
+    const fg = shell.style.getPropertyValue('--il-commerce-foreground');
+    const bg = shell.style.getPropertyValue('--il-commerce-background');
+    assert.ok(stage.querySelector('.il-commerce-title') && stage.querySelector('.il-commerce-price'));
+    assert.ok(contrast(fg, bg) >= 4.5, `${name}: ${fg} on ${bg}`);
+    shop.hide();
+    window.close();
+  }
+});
+
+test('the TV shop gets the same derived surface', () => {
+  const { window } = new JSDOM('<main></main>');
+  const stage = window.document.querySelector('main');
+  const flow = openTVShop(stage, { offer: { ...cue.commerce, imageUrl: 'https://ads.example/p.png' }, brand: { background: '#ffffff' },
+    locale: 'en', onClose() {}, prepareCheckout: async () => 'https://ads.example/qr.png' });
+  const root = stage.querySelector('.il-tv-shop');
+  assert.equal(root.style.getPropertyValue('--shop-background'), '#ffffff');
+  assert.equal(root.style.getPropertyValue('--shop-foreground'), '#000');
+  flow.dispose();
   window.close();
 });

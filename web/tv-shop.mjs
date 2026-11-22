@@ -23,12 +23,44 @@ const labels = {
   },
 };
 
-export function accentInk(hex) {
+// WCAG relative luminance of a #rrggbb colour.
+export function luminance(hex) {
+  if (/^#[0-9a-f]{3}$/i.test(hex)) hex = '#' + [...hex.slice(1)].map(digit => digit + digit).join('');
   const [r, g, b] = [1, 3, 5].map(start => {
     const value = parseInt(hex.slice(start, start + 2), 16) / 255;
     return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
   });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.179 ? '#000' : '#fff';
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+export function contrast(a, b) {
+  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (light + 0.05) / (dark + 0.05);
+}
+
+export function accentInk(hex) {
+  return luminance(hex) > 0.179 ? '#000' : '#fff';
+}
+
+const CARD_BACKGROUND = '#202020';
+const CARD_FOREGROUND = '#ffffff';
+const LIGHT_BACKGROUND = '#f7f7f7';
+const READABLE = 4.5;
+
+// The card's surface and text from any subset of the brand: a missing colour is derived from the other, and a
+// foreground that does not reach 4.5:1 on the background gives way to the ink derived from it.
+export function brandSurface(brand) {
+  const hex = value => (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : null);
+  let background = hex(brand?.background);
+  let foreground = hex(brand?.foreground);
+  if (!background && foreground) {
+    background = contrast(foreground, CARD_BACKGROUND) >= contrast(foreground, LIGHT_BACKGROUND)
+      ? CARD_BACKGROUND : LIGHT_BACKGROUND;
+  }
+  background ??= CARD_BACKGROUND;
+  if (!foreground || contrast(foreground, background) < READABLE)
+    foreground = brand?.foreground || brand?.background ? accentInk(background) : CARD_FOREGROUND;
+  return { background, foreground };
 }
 
 export function productOptions(variants) {
@@ -72,9 +104,8 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   const root = node('div', 'il-tv-shop');
   root.setAttribute('role', 'group');
   root.setAttribute('aria-label', offer.title);
-  for (const key of ['background', 'foreground']) {
-    if (/^#[0-9a-f]{6}$/i.test(brand[key])) root.style.setProperty('--shop-' + key, brand[key]);
-  }
+  const surface = brandSurface(brand);
+  for (const key of ['background', 'foreground']) root.style.setProperty('--shop-' + key, surface[key]);
   stage.appendChild(root);
 
   function node(tag, cls, value) {

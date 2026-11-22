@@ -1,4 +1,4 @@
-import { accentInk, openTVShop } from './tv-shop.mjs';
+import { accentInk, brandSurface, openTVShop } from './tv-shop.mjs';
 
 export function isHttps(value) {
   if (typeof value !== 'string' || value.trim() !== value) return false;
@@ -71,17 +71,37 @@ export function normalizeBrand(value) {
 }
 
 
+// Past its window an open card is held for at most HOLD_MS of content time since the later of the window's end
+// and the viewer's last action in it; a paused video does not move the clock, so a paused viewer keeps it.
+export const HOLD_MS = 60000;
+export function withinHold(cue, time, actedAt) {
+  if (!Number.isSafeInteger(time)) return true;
+  // A seek back before the card's start releases it: it then follows its window, closed, like any other.
+  if (time < cue.start) return false;
+  if (time < cue.end) return true;
+  return time - Math.max(cue.end, Number.isSafeInteger(actedAt) ? actedAt : cue.end) <= HOLD_MS;
+}
+
 const copy = {
   en: ['View product', 'Product', 'Variant', 'Buy', 'Scan with your phone', 'Continue to Shopify',
-    'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.'],
+    'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.', 'This offer is no longer available.'],
   es: ['Ver producto', 'Producto', 'Variante', 'Comprar', 'Escaneá el código con tu celular', 'Continuar a Shopify',
-    'Cerrar', 'Preparando tu carrito…', 'No se pudo preparar el carrito. Intentá de nuevo.'],
+    'Cerrar', 'Preparando tu carrito…', 'No se pudo preparar el carrito. Intentá de nuevo.', 'Esta oferta ya no está disponible.'],
   'pt-BR': ['Ver produto', 'Produto', 'Variante', 'Comprar', 'Escaneie com seu celular', 'Continuar para Shopify',
-    'Fechar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho. Tente novamente.'],
+    'Fechar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho. Tente novamente.', 'Esta oferta não está mais disponível.'],
 };
 
-export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
+// `hooks` lets the adapter follow the viewer: opened() when the detail opens, closed(byViewer) when it closes
+// (byViewer false when the card is taken away, by a break or the end of its time) and checkout() once the
+// purchase page or its QR is handed over.
+export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}, clock = () => null) {
   const doc = stage.ownerDocument;
+  // Content time of the viewer's last action in the open card (a click or key on it, a result appearing).
+  let actedAt = null;
+  const act = () => {
+    const time = clock();
+    actedAt = Number.isSafeInteger(time) ? time : actedAt;
+  };
   const embedded = () => {
     try {
       return doc.defaultView.self !== doc.defaultView.top;
@@ -92,10 +112,24 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
   const viewed = new Set();
   let root;
 
+  const notify = (name, ...args) => {
+    try {
+      hooks[name]?.(...args);
+    } catch {
+      // The adapter's bookkeeping never breaks the card.
+    }
+  };
+
   function hide() {
-    root?.dispose();
+    const was = root;
     root = null;
+    was?.dispose();
+    if (was?.isOpen()) notify('closed', false);
   }
+
+  // The detail of this cue is open: the session keeps the card while the viewer is choosing.
+  const isOpen = cue => !!root && root.cue.id === cue.id && root.isOpen();
+  const lastAction = cue => (isOpen(cue) ? actedAt : null);
 
   function show(cue, isActive) {
     if (!options || !cue.commerce || root?.cue === cue) return;
@@ -118,7 +152,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({variantId:variant.id}),
       signal, credentials:'omit', cache:'no-store', redirect:'error',
     });
-    if (!response.ok) throw new Error('Cart unavailable');
+    // iADServer answers 404 once the delivery has expired (minutes after it was served) or the variant is gone.
+    if (!response.ok) throw Object.assign(new Error('Cart unavailable'), { gone: response.status === 404 });
     const data = await response.json();
     if (!isHttps(data.continueUrl)) throw new Error('Invalid checkout destination');
     return data;
@@ -134,26 +169,36 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       if (!isActive() || flow) return;
       opener.hidden = true;
       trackView(cue, offer);
+      act();
+      notify('opened');
       flow = openTVShop(stage, {
         offer: { ...offer, imageUrl: offer.imageUrl ?? offer.images?.[0] ?? (cue.format !== 'midroll' ? cue.imageUrl : undefined) },
         locale, brand:cue.brand,
         onClose() {
-          if (trigger) { hide(); if (isActive() && trigger.isConnected) trigger.focus(); }
+          if (trigger) { root = null; tvRoot.dispose(); flow = null; if (isActive() && trigger.isConnected) trigger.focus(); }
           else { flow.dispose(); flow = null; opener.hidden = false; opener.focus(); }
+          notify('closed', true);
         },
         async prepareCheckout(variant, signal) {
           if (!isActive()) throw new Error('Offer expired');
           const reply = await handoff(offer, variant, signal);
           if (!isActive() || !isHttps(reply.qrImageUrl)) throw new Error('Invalid QR');
+          act();
+          notify('checkout');
           return reply.qrImageUrl;
         },
       });
     }
-    root = {cue, dispose() {
+    // Every remote key while the shop is open is the viewer acting in it.
+    const tvKey = () => { if (flow) act(); };
+    stage.addEventListener('keydown', tvKey, true);
+    const tvRoot = {cue, isOpen: () => Boolean(flow), dispose() {
       const ownsFocus = doc.activeElement === opener || Boolean(flow);
+      stage.removeEventListener('keydown', tvKey, true);
       flow?.dispose(); opener.remove();
       if (ownsFocus && activeBefore?.isConnected) activeBefore.focus();
     }};
+    root = tvRoot;
     if (trigger) launch();
     else {
       opener.addEventListener('click', launch);
@@ -169,7 +214,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     hide();
     const locale = commerceLocale(options.locale ?? offer.locale);
     if (options.tv) return mountTV(cue, offer, isActive, trigger, locale);
-    const [view, productText, variantText, buy, scanText, continueText, closeText, loading, errorText] = copy[locale];
+    const [view, productText, variantText, buy, scanText, continueText, closeText, loading, errorText, goneText] = copy[locale];
     const money = new Intl.NumberFormat(locale, { style: 'currency', currency: offer.currency });
     const previousFocus = trigger ?? doc.activeElement;
     const shell = doc.createElement('div');
@@ -222,14 +267,16 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
     result.className = 'il-commerce-result';
     result.setAttribute('aria-live', 'polite');
     result.tabIndex = -1;
+    // Surface and text are always set together, so no subset of the brand leaves the text unreadable.
+    const surface = brandSurface(cue.brand);
+    shell.style.setProperty('--il-commerce-background', surface.background);
+    shell.style.setProperty('--il-commerce-foreground', surface.foreground);
     if (cue.brand) {
-      const { logoUrl, accent, background, foreground } = cue.brand;
+      const { logoUrl, accent } = cue.brand;
       if (accent) {
         shell.style.setProperty('--il-commerce-accent', accent);
         shell.style.setProperty('--il-commerce-accent-ink', accentInk(accent));
       }
-      if (background) shell.style.setProperty('--il-commerce-background', background);
-      if (foreground) shell.style.setProperty('--il-commerce-foreground', foreground);
       if (logoUrl) {
         const logo = doc.createElement('img');
         logo.className = 'il-commerce-logo';
@@ -275,22 +322,34 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       shell.classList.add('il-commerce--open');
       buttons[offer.variants.indexOf(variant)].focus();
       trackView(cue, offer);
+      act();
+      notify('opened');
+    }
+
+    // The result is the last thing in the panel: when the panel scrolls, it is brought into view inside it
+    // (never the page around the player).
+    function reveal() {
+      panel.scrollTop = panel.scrollHeight;
     }
 
     function closePanel() {
       if (trigger) {
-        hide();
+        root = null;
+        shellRoot.dispose();
+        notify('closed', true);
         if (isActive() && trigger.isConnected) trigger.focus();
         return;
       }
       request?.abort();
       request = null;
       result.replaceChildren();
+      shell.classList.remove('il-commerce--done');
       updateChoice();
       panel.hidden = true;
       shell.classList.remove('il-commerce--open');
       open.hidden = false;
       open.focus();
+      notify('closed', true);
     }
 
     async function proceed() {
@@ -302,6 +361,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       try {
         const reply = await handoff(offer, variant, current.signal);
         if (request !== current || current.signal.aborted || !isActive()) return;
+        act();
+        notify('checkout');
         if (options.navigate) {
           options.navigate(reply.continueUrl);
           result.replaceChildren();
@@ -311,21 +372,36 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
           link.textContent = continueText;
           link.target = '_blank';
           link.rel = 'noopener noreferrer';
-          result.replaceChildren(link);
+          // Once the purchase is handed over, the choice gives way to one line, so the link and the whole QR fit.
+          const chosen = doc.createElement('span');
+          chosen.className = 'il-commerce-chosen';
+          chosen.textContent = `${variant.label} · ${money.format(Number(variant.price))}`;
+          result.replaceChildren(chosen, link);
           // Inside an iframe the page may be sandboxed without allow-popups, where the link opens nothing.
           // The QR of the same hand-off (the TV path) still lets the viewer finish on a phone.
           if (embedded() && isHttps(reply.qrImageUrl)) {
+            const box = doc.createElement('span');
+            box.className = 'il-commerce-qr';
             const qr = doc.createElement('img');
+            // The image arrives after the panel was scrolled: bring the result into view again when it does.
+            qr.addEventListener('load', () => reveal());
             qr.src = reply.qrImageUrl;
             qr.alt = scanText;
             const caption = doc.createElement('span');
             caption.textContent = scanText;
-            result.append(qr, caption);
+            box.append(qr, caption);
+            result.append(box);
           }
-          link.focus();
+          shell.classList.add('il-commerce--done');
+          link.focus({ preventScroll: true });
+          reveal();
         }
-      } catch {
-        if (request === current && !current.signal.aborted && isActive()) result.textContent = errorText;
+      } catch (error) {
+        if (request === current && !current.signal.aborted && isActive()) {
+          result.textContent = error?.gone ? goneText : errorText;
+          reveal();
+          act();
+        }
       } finally {
         if (request === current) {
           request = null;
@@ -334,6 +410,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       }
     }
 
+    shell.addEventListener('click', act, true);
+    shell.addEventListener('keydown', act, true);
     shell.addEventListener('keydown', event => {
       if (['Escape', 'Backspace', 'GoBack', 'BrowserBack'].includes(event.key) || event.keyCode === 10009 || event.keyCode === 461) {
         if (panel.hidden) return;
@@ -359,15 +437,16 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch) {
       event.preventDefault();
       event.stopPropagation();
     });
-    root = { cue, dispose() {
+    const shellRoot = { cue, isOpen: () => !panel.hidden, dispose() {
       request?.abort();
       const restoreFocus = shell.contains(doc.activeElement);
       shell.remove();
       if (restoreFocus && previousFocus?.isConnected) previousFocus.focus();
     } };
+    root = shellRoot;
     updateChoice();
     stage.appendChild(shell);
     if (trigger) openPanel();
   }
-  return { show, hide, open: openOffer, enabled: Boolean(options) };
+  return { show, hide, open: openOffer, isOpen, lastAction, enabled: Boolean(options) };
 }

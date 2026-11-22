@@ -745,10 +745,12 @@ export function attachAds({
     if (!inBreak && time != null && (event?.type === 'playing' || video.paused === false)) played = true;
     for (const [id, cue] of cues) {
       // During a stitched ad every graphic leaves the session at once and comes back with the content.
-      if (time == null || (cue.product && time < cue.end && !productVisible(time))) {
+      // A product whose detail the viewer has open outlasts its window, but never a break.
+      const held = cue.product && !!session.holding?.(id);
+      if (time == null || (cue.product && (time < cue.end || held) && !productVisible(time))) {
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
-      } else if (time >= cue.end) {
+      } else if (time >= cue.end && !held) {
         cues.delete(id);
         if (cue.onScreen) session.removeCue(id);
       } else if (!cue.onScreen) cue.onScreen = session.addCue(cue.item, cue.hooks);
@@ -765,8 +767,10 @@ export function attachAds({
         window.end - Math.max(window.start, time) >= ms(shop.pacing.min_seconds) && pacingAllows(window, committed(), shop.pacing));
       if (product) void requestProduct(product);
     }
-    // The single overlay slot is not reused while it still holds a creative.
+    // The single overlay slot is not reused while it still holds a creative. While a product card is held past
+    // its window (the viewer is choosing), a graphic could not be shown: none is asked for.
     if (controller || overlay.live || !servableNow().length) return;
+    if ([...cues].some(([id, cue]) => cue.product && time >= cue.end && session.holding?.(id))) return;
     // A window with a product waits for its answer; a product (200) wins over the graphics in that window.
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
@@ -1232,6 +1236,14 @@ export function attachAds({
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
   // A clock that knows when the fragment changes (an ad starting while paused, say) re-checks at once.
   const unwatch = typeof content.onChange === 'function' ? content.onChange(() => sync()) : null;
+  // A hidden page gets no frame callbacks, so a stitched ad can start under a card kept on it. visibilitychange is
+  // dispatched in the task that makes the page visible, before its next rendering (and before any frame callback),
+  // so the check run here removes the card before a frame over the ad can be painted.
+  const visibilityTarget = stitched ? video.ownerDocument ?? stage?.ownerDocument ?? globalThis.document : null;
+  const onVisibility = () => {
+    if (!disposed) sync();
+  };
+  visibilityTarget?.addEventListener?.('visibilitychange', onVisibility);
   if (waterfall) {
     settleBehind();
     // `play` comes before `playing`, so the pre-roll hold pauses before any content is heard.
@@ -1293,6 +1305,7 @@ export function attachAds({
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       if (typeof unwatch === 'function') unwatch();
       unwatchFrames();
+      visibilityTarget?.removeEventListener?.('visibilitychange', onVisibility);
       video.removeEventListener('ended', contentEnded);
       clearTimeout(ima.loadTimer);
       ima.observer?.disconnect();

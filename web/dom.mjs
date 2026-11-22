@@ -1,4 +1,4 @@
-import { commerceSurface } from './commerce.mjs';
+import { commerceSurface, withinHold } from './commerce.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
@@ -152,6 +152,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
     hide,
     update: scenes.update,
     applyAudioPermissions: scenes.applyAudioPermissions,
+    holding: cue => commerce.isOpen(cue) && withinHold(cue, options.clock(), commerce.lastAction(cue)),
     visible: cue => cue.scene ? scenes.visible() :
       layer?.style.visibility === 'visible' && images.length > 0 && images.every(imageVisible),
   };
@@ -168,7 +169,8 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
   const clock = programTime ?? (source.timeline === 'media' && video
     ? () => Math.round(video.currentTime * 1000)
     : () => nativeProgramTime(video));
-  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl);
+  const pausing = video && source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
+  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing, clock);
   const allowVideo = source.secondaryVideo ?? !avplay;
   const allowAudio = allowVideo && source.secondaryVideoAudio === true;
   const window = stage.ownerDocument.defaultView;
@@ -176,6 +178,10 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     ...source,
     playing,
     presenting,
+    // A card with a Buy button survives a hidden page (another tab): it is not visible, so nothing is counted,
+    // and the viewer finds it as they left it.
+    presentingCard: avplay ? presenting
+      : () => !video.ended && !video.seeking && video.readyState >= 2,
     scenes: sceneSupported(window),
     sceneFeatures: sceneFeatures(window, allowVideo, allowAudio),
     clock,
@@ -184,14 +190,61 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
       allowVideo, allowAudio, animate: source.interval !== false,
     }),
   });
-  const unlisten = video ? listenToVideo(video, session.tick) : () => {};
+  // listenToVideo also ticks on visibilitychange, so a page shown again re-reads the clock before it is painted.
+  // AVPlay has no <video>: the same tick is wired to the document here.
+  const doc = stage.ownerDocument;
+  const unlisten = video ? listenToVideo(video, session.tick) : () => doc.removeEventListener('visibilitychange', session.tick);
+  if (!video) doc.addEventListener('visibilitychange', session.tick);
   return {
     ...session,
     // The ads module asks for scene products only when this session renders commerce.
     commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
+      pausing?.dispose();
       session.destroy();
+    },
+  };
+}
+
+// commerce.pauseOnOpen: opening a product's detail pauses the video, so nothing (a break included) moves under a
+// viewer who is choosing. Closing it resumes only a pause the SDK made, if no one played or paused since; once the
+// purchase page or QR is handed over the video stays paused.
+function pauseOnOpen(video) {
+  let ours = false;
+  let expected = false;
+  const changed = () => {
+    if (expected) expected = false;
+    else ours = false;
+  };
+  video.addEventListener('play', changed);
+  video.addEventListener('pause', changed);
+  return {
+    opened() {
+      if (video.paused !== false) return;
+      ours = true;
+      expected = true;
+      video.pause?.();
+      // A pause that fires no event (already pausing) must not swallow the viewer's next one.
+      if (video.paused !== true) expected = false;
+    },
+    closed(byViewer) {
+      const resume = ours && byViewer && video.paused === true && !video.ended;
+      ours = false;
+      if (!resume) return;
+      expected = true;
+      try {
+        void Promise.resolve(video.play?.()).catch(() => { expected = false; });
+      } catch {
+        expected = false;
+      }
+    },
+    checkout() {
+      ours = false;
+    },
+    dispose() {
+      video.removeEventListener('play', changed);
+      video.removeEventListener('pause', changed);
     },
   };
 }
