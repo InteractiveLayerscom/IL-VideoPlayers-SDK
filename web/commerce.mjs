@@ -328,7 +328,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       const row = choices.getBoundingClientRect();
       const box = chosen.getBoundingClientRect();
       if (box.left < row.left || box.right > row.right) choices.scrollLeft += box.left - row.left - 4;
-      if (chosen.getBoundingClientRect().bottom > panel.getBoundingClientRect().bottom) close.focus({ preventScroll: true });
+      // A sold-out variant is disabled and cannot take focus, which would leave Escape and the arrows with nothing.
+      if (chosen.disabled || chosen.getBoundingClientRect().bottom > panel.getBoundingClientRect().bottom) close.focus({ preventScroll: true });
       trackView(cue, offer);
       act();
       notify('opened');

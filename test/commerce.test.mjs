@@ -441,3 +441,19 @@ test('the TV shop gets the same derived surface', () => {
   flow.dispose();
   window.close();
 });
+
+
+test('with every variant sold out the detail focuses Close, and Escape closes it', () => {
+  const { window } = new JSDOM('<main></main>');
+  const stage = window.document.querySelector('main');
+  const shop = commerceSurface(stage, { locale: 'en' });
+  const soldOut = { ...cue.commerce, variants: cue.commerce.variants.map(v => ({ ...v, availableForSale: false })) };
+  shop.show({ ...cue, commerce: soldOut }, () => true);
+  [...stage.querySelectorAll('button')].find(el => el.textContent === 'View product').click();
+  const close = stage.querySelector('.il-commerce-close');
+  assert.equal(window.document.activeElement, close);
+  close.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(stage.querySelector('.il-commerce-panel').hidden, true);
+  shop.hide();
+  window.close();
+});
