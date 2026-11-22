@@ -190,7 +190,11 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
       allowVideo, allowAudio, animate: source.interval !== false,
     }),
   });
-  const unlisten = video ? listenToVideo(video, session.tick) : () => {};
+  // listenToVideo also ticks on visibilitychange, so a page shown again re-reads the clock before it is painted.
+  // AVPlay has no <video>: the same tick is wired to the document here.
+  const doc = stage.ownerDocument;
+  const unlisten = video ? listenToVideo(video, session.tick) : () => doc.removeEventListener('visibilitychange', session.tick);
+  if (!video) doc.addEventListener('visibilitychange', session.tick);
   return {
     ...session,
     // The ads module asks for scene products only when this session renders commerce.

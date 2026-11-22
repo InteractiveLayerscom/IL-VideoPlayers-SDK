@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { attachAds } from '../web/ads.mjs';
-import { attachHtmlVideo } from '../web/index.mjs';
+import { attachAvPlay, attachHtmlVideo } from '../web/index.mjs';
 
 // A product card at the pace of a person: pauses, an open detail, a window that ends while choosing.
 
@@ -386,4 +386,53 @@ test('a seek back before the window releases an open detail; the card returns cl
   assert.ok(p.button('View product'), 'back, closed, with its window');
   assert.equal(p.button('Buy'), undefined);
   p.close();
+});
+
+test('HTML5: a session on a stitched host clock, with no ads module, clears a card when the page shows over an ad', async () => {
+  const { window } = new JSDOM('<main><video></video></main>', { pretendToBeVisual: true });
+  const stage = window.document.querySelector('main');
+  const video = stage.querySelector('video');
+  let hidden = false;
+  let inAd = false;
+  Object.defineProperty(window.document, 'hidden', { get: () => hidden, configurable: true });
+  Object.defineProperties(video, { readyState: { get: () => 4 }, paused: { get: () => false } });
+  // The host's clock: content milliseconds, null while a stitched ad plays.
+  const session = attachHtmlVideo({ video, stage, interval: false, programTime: () => (inAd ? null : 2000), commerce: { locale: 'en' } });
+  const added = session.addCue({ ...card('dlv_feed'), start: 1000, end: 8000 });
+  assert.equal(added, true);
+  for (const img of stage.querySelectorAll('img')) img.dispatchEvent(new window.Event('load'));
+  session.tick();
+  assert.ok(stage.querySelector('.il-commerce'), 'the card is on screen');
+  hidden = true;
+  inAd = true; // no tick runs while the page is hidden
+  hidden = false;
+  window.document.dispatchEvent(new window.Event('visibilitychange'));
+  assert.equal(stage.querySelector('.il-commerce'), null, 'gone in the visibilitychange task itself');
+  assert.equal(stage.querySelector('img'), null);
+  session.destroy();
+  window.close();
+});
+
+test('AVPlay (no <video>): the session also clears a card in the visibilitychange task when the page shows over an ad', async () => {
+  const { window } = new JSDOM('<main><object type="application/avplayer"></object></main>', { pretendToBeVisual: true });
+  const stage = window.document.querySelector('main');
+  const surface = stage.querySelector('object');
+  let hidden = false;
+  let inAd = false;
+  Object.defineProperty(window.document, 'hidden', { get: () => hidden, configurable: true });
+  const session = attachAvPlay({ stage, surface, interval: false, commerce: { locale: 'en' },
+    avplay: { getState: () => 'PLAYING', setDisplayRect() {} },
+    getDisplayRect: () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    programTime: () => (inAd ? null : 2000) });
+  assert.equal(session.addCue({ ...card('dlv_avplay'), start: 1000, end: 8000 }), true);
+  for (const img of stage.querySelectorAll('img')) img.dispatchEvent(new window.Event('load'));
+  session.tick();
+  assert.ok(stage.querySelector('.il-tv-shop-trigger'), 'the card is on screen');
+  hidden = true;
+  inAd = true;
+  hidden = false;
+  window.document.dispatchEvent(new window.Event('visibilitychange'));
+  assert.equal(stage.querySelector('.il-tv-shop-trigger'), null, 'gone in the visibilitychange task itself');
+  session.destroy();
+  window.close();
 });
