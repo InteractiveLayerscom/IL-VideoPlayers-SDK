@@ -118,7 +118,8 @@
 .il-commerce--done .il-commerce-buy { display: none; }
 .il-commerce--done .il-commerce-result { margin-top: .4em; align-items: center; }
 .il-commerce-chosen { flex-basis: 100%; font-weight: 600; }
-.il-commerce-qr { display: inline-flex; flex-direction: column; align-items: center; gap: .3em; font-size: .86em; text-align: center; }
+.il-commerce-qr { display: inline-flex; flex-direction: column; align-items: center; gap: .3em; font-size: .86em; text-align: center;
+  max-width: max(84px, 8em); }
 .il-commerce-qr img { width: clamp(84px, 7em, 100%); max-width: 100%; height: auto; background: #fff; }
 .il-scene-action { cursor: pointer; }
 .il-scene-action:focus { box-shadow: inset 0 0 0 3px #fff; outline: none; }
