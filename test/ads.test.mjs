@@ -1730,3 +1730,59 @@ test('without a scene product, pacing counts only the graphics shown, as before'
   assert.equal(requests.length, 2, 'window b is asked right after window a came back empty');
   ads.destroy();
 });
+
+
+// A product must never cost a video ad: with a card on screen over the cut, the mid-roll still starts when due.
+const SHOP_ROUTE = 'https://console.example/il-player/scene-product?grant=g';
+function withProduct(plan) {
+  return { ...plan, commerce: { kind: 'scene_product', url: SHOP_ROUTE, session: '9f1c0000000000000000000000000abc', lead_ms: 5000,
+    pacing: { min_seconds: 1.5, max_seconds: null, gap_after_seconds: 0, max_per_video: null, cut_clearance_seconds: 0 },
+    windows: [{ id: 's3', start_ms: 40000, end_ms: 64000 }] } };
+}
+function productSession(linearStates, shown) {
+  return { commerce: { locale: 'en' }, holding: () => false, setLinearAd(value) { linearStates.push(value); },
+    addCue(cue) { shown.add(cue.id); return true; }, removeCue(id) { shown.delete(id); return true; } };
+}
+const productFetch = async (url) => (String(url).startsWith(SHOP_ROUTE)
+  ? { status: 200, ok: true, json: async () => ({ id: 'dlv_s3', format: 'super', start: 40000, end: 64000, window: 's3',
+    imageUrl: 'https://cdn.example/p.png', mimeType: 'image/png',
+    commerce: { title: 'P', price: '1.00', currency: 'USD', variants: [{ id: 'v', label: 'V' }], handoffUrl: 'https://ads.iadserver.com/commerce/offer/dlv_s3' } }) }
+  : { ok: true, text: async () => '<VAST version="3.0"/>' });
+
+test('the ordered-requests walk starts a mid-roll on time while a product card is on screen', async () => {
+  const shown = new Set();
+  const linear = [];
+  const r = await waterfallRig({ plan: withProduct(waterfallPlan()), session: productSession(linear, shown), fetchImpl: productFetch,
+    planOrigin: 'https://console.example' });
+  r.ads.start();
+  r.playAd(r.made.load());
+  for (let t = 30; t <= 51; t += 1) { r.at(t, t === 30 ? 'playing' : 'timeupdate'); await ticks(); }
+  assert.ok(shown.has('dlv_s3'), 'the product card is on screen');
+  const manager = r.made.load();
+  r.at(58.9);
+  assert.equal(manager.started, undefined);
+  r.at(59.1);
+  assert.equal(manager.started, true, 'the mid-roll starts at its cut');
+  manager.fire('pause', {});
+  assert.deepEqual(r.breaks().at(-1), ['break_start', 'mid-1']);
+  assert.equal(linear.at(-1), true, 'the session is in the break, so the card is off');
+  r.ads.destroy();
+});
+
+test('with IMA ad rules (one request per cut) the product changes nothing in the VMAP IMA plays', async () => {
+  const made = fakeIma();
+  const shown = new Set();
+  const linear = [];
+  const plain = breakRig({ linear: 'ima' });
+  await ticks();
+  plain.ads.start();
+  const withCard = breakRig({ linear: 'ima', plan: withProduct(breakPlan()), session: productSession(linear, shown), fetchImpl: productFetch,
+    planOrigin: 'https://console.example' });
+  await ticks();
+  withCard.ads.start();
+  const strip = (xml) => xml.replace(/correlator=\d+/g, 'correlator=X');
+  assert.equal(made.requests.length, 2);
+  assert.equal(strip(made.requests[1].adsResponse), strip(made.requests[0].adsResponse));
+  plain.ads.destroy();
+  withCard.ads.destroy();
+});
