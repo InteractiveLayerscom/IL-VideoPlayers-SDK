@@ -326,6 +326,12 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       notify('opened');
     }
 
+    // The result is the last thing in the panel: when the panel scrolls, it is brought into view inside it
+    // (never the page around the player).
+    function reveal() {
+      panel.scrollTop = panel.scrollHeight;
+    }
+
     function closePanel() {
       if (trigger) {
         root = null;
@@ -337,6 +343,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       request?.abort();
       request = null;
       result.replaceChildren();
+      shell.classList.remove('il-commerce--done');
       updateChoice();
       panel.hidden = true;
       shell.classList.remove('il-commerce--open');
@@ -365,22 +372,34 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
           link.textContent = continueText;
           link.target = '_blank';
           link.rel = 'noopener noreferrer';
-          result.replaceChildren(link);
+          // Once the purchase is handed over, the choice gives way to one line, so the link and the whole QR fit.
+          const chosen = doc.createElement('span');
+          chosen.className = 'il-commerce-chosen';
+          chosen.textContent = `${variant.label} · ${money.format(Number(variant.price))}`;
+          result.replaceChildren(chosen, link);
           // Inside an iframe the page may be sandboxed without allow-popups, where the link opens nothing.
           // The QR of the same hand-off (the TV path) still lets the viewer finish on a phone.
           if (embedded() && isHttps(reply.qrImageUrl)) {
+            const box = doc.createElement('span');
+            box.className = 'il-commerce-qr';
             const qr = doc.createElement('img');
+            // The image arrives after the panel was scrolled: bring the result into view again when it does.
+            qr.addEventListener('load', () => reveal());
             qr.src = reply.qrImageUrl;
             qr.alt = scanText;
             const caption = doc.createElement('span');
             caption.textContent = scanText;
-            result.append(qr, caption);
+            box.append(qr, caption);
+            result.append(box);
           }
-          link.focus();
+          shell.classList.add('il-commerce--done');
+          link.focus({ preventScroll: true });
+          reveal();
         }
       } catch (error) {
         if (request === current && !current.signal.aborted && isActive()) {
           result.textContent = error?.gone ? goneText : errorText;
+          reveal();
           act();
         }
       } finally {
