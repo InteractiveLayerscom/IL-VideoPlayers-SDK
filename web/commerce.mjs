@@ -328,8 +328,14 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
 
     // The result is the last thing in the panel: when the panel scrolls, it is brought into view inside it
     // (never the page around the player).
+    // After a hand-off the link comes first: as much of the QR below it as fits, but never the link out of view
+    // (on a phone the link is the way to buy).
     function reveal() {
       panel.scrollTop = panel.scrollHeight;
+      const link = result.querySelector('a');
+      if (!link) return;
+      const top = link.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+      if (top < 0) panel.scrollTop += top - 4;
     }
 
     function closePanel() {
