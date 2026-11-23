@@ -76,8 +76,10 @@ final class TVCommercePanel: UIView {
     }
     private var variant: OverlayCommerce.Variant { offer.variants[selection] }
     private var price: String { money.string(from: NSDecimalNumber(decimal: variant.price)) ?? variant.price.description }
-    private var selectionSummary: String {
-        variant.options.isEmpty ? variant.label : variant.options.map(\.value).joined(separator: " · ")
+    /// Nil for a product without options: no variant line in the cart or on the QR step.
+    private var selectionSummary: String? {
+        if offer.defaultVariantOnly { return nil }
+        return variant.options.isEmpty ? variant.label : variant.options.map(\.value).joined(separator: " · ")
     }
     private var selectedPhoto: URL? { variant.imageURL ?? mainPhoto }
     private var gallery: [URL?] {
@@ -262,7 +264,8 @@ final class TVCommercePanel: UIView {
 
     private func hero(_ height: CGFloat, opensViewer: Bool = false) {
         let photos = opensViewer ? gallery : []
-        let title = text("View full size", "Ver en grande", "Ver em tela cheia")
+        // web/tv-shop.mjs:100: "Ampliar foto" for one photo, "Ver fotos" for several.
+        let title = gallery.count > 1 ? text("View photos", "Ver fotos", "Ver fotos") : text("Enlarge photo", "Ampliar foto", "Ampliar foto")
         guard productPhoto.hasPhoto(for: variant) else {
             if !photos.isEmpty {
                 let action = button(title) { [weak self] in self?.openViewer(photos) }
@@ -425,7 +428,8 @@ final class TVCommercePanel: UIView {
                 caption.numberOfLines = 3
                 body.addArrangedSubview(caption)
             }
-            let names: [String?] = offer.optionNames.isEmpty ? [nil] : offer.optionNames.map(Optional.some)
+            // web/tv-shop.mjs:196: Shopify's lone "Default Title" variant gets no option row.
+            let names: [String?] = offer.defaultVariantOnly ? [] : offer.optionNames.isEmpty ? [nil] : offer.optionNames.map(Optional.some)
             for name in names {
                 body.addArrangedSubview(label(name ?? text("Variant", "Variante", "Variante"), 16, bold: true))
                 let rail = TVOptionRail(choices: offer.choices(for: name, selected: selection), ink: ink, accent: focusAccent, scale: scale) { [weak self] index in
@@ -453,7 +457,8 @@ final class TVCommercePanel: UIView {
                 thumb.heightAnchor.constraint(equalToConstant: 60 * scale).isActive = true
                 row.addArrangedSubview(thumb)
             }
-            let lines = UIStackView(arrangedSubviews: [label(offer.title, 17, bold: true), label(selectionSummary, 15)])
+            let lines = UIStackView(arrangedSubviews: [label(offer.title, 17, bold: true)]
+                + (selectionSummary.map { [label($0, 15)] } ?? []))
             lines.axis = .vertical
             row.addArrangedSubview(lines)
             row.addArrangedSubview(label(text("1 unit", "1 unidad", "1 unidade"), 13))
@@ -467,7 +472,7 @@ final class TVCommercePanel: UIView {
         case .qr:
             hero(135)
             body.addArrangedSubview(label(offer.title, 18, bold: true))
-            body.addArrangedSubview(label(price + "   " + selectionSummary, 16))
+            body.addArrangedSubview(label([price, selectionSummary].compactMap { $0 }.joined(separator: "   "), 16))
             if let qr {
                 let image = UIImageView(image: qr)
                 image.contentMode = .scaleAspectFit

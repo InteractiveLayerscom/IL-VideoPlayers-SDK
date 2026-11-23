@@ -380,7 +380,7 @@ final class UIKitSurfaceTests: XCTestCase {
                 try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == "View details" })
                     .sendActions(for: .primaryActionTriggered)
             }
-            let opener = try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.accessibilityLabel == "View full size" })
+            let opener = try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.accessibilityLabel == "Enlarge photo" })
             opener.sendActions(for: .primaryActionTriggered)
             panel.frame = panel.presentationFrame(in: viewport)
             XCTAssertEqual(panel.frame, viewport)
@@ -395,6 +395,44 @@ final class UIKitSurfaceTests: XCTestCase {
             XCTAssertEqual(panel.presentationFrame(in: viewport), sheet)
             XCTAssertTrue(panel.preferredFocusEnvironments.first === opener)
         }
+    }
+
+    // web/tv-shop.mjs:196, :304: Shopify's lone "Default Title" variant is never shown.
+    @MainActor
+    func testProductWithoutOptionsShowsNoDefaultTitle() throws {
+        let json = """
+        {"title":"Pouch","price":"12","currency":"USD","variants":[{"id":"d","label":"Default Title",
+         "selectedOptions":[{"name":"Title","value":"Default Title"}]}],"handoffUrl":"https://checkout-fixture.invalid/tv"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        func shown(_ root: UIView) -> [String] {
+            descendants(of: root, type: UILabel.self).filter { label in
+                var view: UIView? = label
+                while let current = view { if current.isHidden { return false }; view = current.superview }
+                return true
+            }.compactMap(\.text)
+        }
+        let tv = TVCommercePanel(offer, photo: try bitmap(.blue), checkoutURL: nil, closed: {}) {}
+        defer { tv.dispose() }
+        tv.frame = tv.presentationFrame(in: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        tv.layoutIfNeeded()
+        XCTAssertTrue(shown(tv).contains("Enlarge photo"))
+        try XCTUnwrap(descendants(of: tv, type: UIButton.self).first { $0.configuration?.title == "View details" })
+            .sendActions(for: .primaryActionTriggered)
+        XCTAssertFalse(shown(tv).contains("Default Title"), "\(shown(tv))")
+        XCTAssertFalse(shown(tv).contains("Variant"))
+        try XCTUnwrap(descendants(of: tv, type: UIButton.self).first { $0.configuration?.title == "Add to cart" })
+            .sendActions(for: .primaryActionTriggered)
+        XCTAssertFalse(shown(tv).contains("Default Title"), "\(shown(tv))")
+        try XCTUnwrap(descendants(of: tv, type: UIButton.self).first { $0.configuration?.title == "Continue to QR" })
+            .sendActions(for: .primaryActionTriggered)
+        let qrStep = shown(tv)
+        XCTAssertTrue(qrStep.contains("$12.00"), "\(qrStep)")
+        XCTAssertFalse(qrStep.contains { $0.contains("Default Title") || $0.hasSuffix(" ") }, "\(qrStep)")
+
+        let phone = CommercePanel(offer, photo: nil, checkoutURL: nil, closed: {}) {}
+        XCTAssertFalse(shown(phone).contains("Default Title"))
+        XCTAssertFalse(shown(phone).contains("Variant"))
     }
 
     @MainActor
@@ -437,7 +475,7 @@ final class UIKitSurfaceTests: XCTestCase {
         XCTAssertFalse(coverLabels.contains { $0.text?.contains("60.00") == true })
         try tap("Choose options")
         XCTAssertTrue(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("60.00") == true })
-        try tap("View full size")
+        try tap("View photos")
         XCTAssertEqual(panel.presentationFrame(in: screen), screen)
         XCTAssertTrue(descendants(of: panel, type: UIImageView.self).contains { $0.accessibilityLabel == "Photo 1/2" })
         try tap("Next photo", inGallery: true)
@@ -447,7 +485,7 @@ final class UIKitSurfaceTests: XCTestCase {
         rail.delegate?.collectionView?(rail, didSelectItemAt: IndexPath(item: 1, section: 0))
         await waitForPhoto(blue, in: panel)
         XCTAssertFalse(descendants(of: panel, type: UILabel.self).contains { $0.text?.contains("60.00") == true })
-        try tap("View full size")
+        try tap("View photos")
         let selected = try XCTUnwrap(descendants(of: panel, type: UIImageView.self).first { $0.accessibilityLabel == "Photo 3/3" })
         XCTAssertTrue(selected.image?.cgImage === blue)
         try tap("Previous photo", inGallery: true)
@@ -503,6 +541,33 @@ final class UIKitSurfaceTests: XCTestCase {
         try XCTUnwrap(buttons.first { $0.configuration?.title == "Buy" }).sendActions(for: .primaryActionTriggered)
         await fulfillment(of: [received], timeout: 3)
         panel.dispose()
+    }
+
+    // With the variant row hidden, the lone "Default Title" variant is still the selection that Buy sends.
+    @MainActor
+    func testPhoneBuySendsTheHiddenDefaultVariant() async throws {
+        let json = """
+        {"title":"Pouch","locale":"en","price":"12","currency":"USD","variants":[{"id":"d","label":"Default Title"}],
+         "handoffUrl":"https://checkout-fixture.invalid/handoff"}
+        """
+        let offer = try JSONDecoder().decode(OverlayCommerce.self, from: Data(json.utf8))
+        let received = expectation(description: "Buy sent the hidden default variant")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ShopifyFixture.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let panel = CommercePanel(offer, photo: nil, handoff: OverlayCheckout(session: session), checkoutURL: { url in
+            XCTAssertEqual(url.absoluteString, "https://store.example/cart/d")
+            received.fulfill()
+        }, closed: {}) {}
+        try XCTUnwrap(descendants(of: panel, type: UIButton.self).first { $0.configuration?.title == "Buy" })
+            .sendActions(for: .primaryActionTriggered)
+        await fulfillment(of: [received], timeout: 3)
+        panel.dispose()
+
+        // The panel never receives a product without variants: the decoder rejects it.
+        let empty = #"{"title":"Pouch","price":"12","currency":"USD","variants":[],"handoffUrl":"https://checkout-fixture.invalid/handoff"}"#
+        XCTAssertThrowsError(try JSONDecoder().decode(OverlayCommerce.self, from: Data(empty.utf8)))
     }
     #endif
 

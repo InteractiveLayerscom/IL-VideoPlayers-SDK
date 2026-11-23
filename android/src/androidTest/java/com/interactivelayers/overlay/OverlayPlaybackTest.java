@@ -357,7 +357,7 @@ public final class OverlayPlaybackTest {
             for (String stageAction : new String[]{"View details", "Add to cart"}) {
                 activity.onActivity(a -> {
                     if (stageAction.equals("Add to cart")) clickButton("View details");
-                    clickButton("View photos");
+                    clickButton("Enlarge photo");
                 });
                 await(() -> panel[0].getWidth() == view.getWidth() && shopImageHasColor(panel[0], Color.MAGENTA));
                 activity.onActivity(a -> {
@@ -373,7 +373,7 @@ public final class OverlayPlaybackTest {
                 remote.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
                 await(() -> panel[0].getWidth() == Math.round(view.getWidth() * .42f));
                 activity.onActivity(a -> {
-                    assertEquals(buttons("View photos").get(0), view.findFocus());
+                    assertEquals(buttons("Enlarge photo").get(0), view.findFocus());
                     assertEquals(1, buttons(stageAction).size());
                 });
             }

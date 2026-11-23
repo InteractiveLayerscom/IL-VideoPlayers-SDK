@@ -147,6 +147,12 @@ final class OverlayCommerce {
         return OverlayCue.isHttps(fallback) ? fallback : null;
     }
 
+    /** Shopify's single "Default Title" variant of a product without options is not shown (web/tv-shop.mjs:196, :304). */
+    boolean defaultVariantOnly() { return variants.size() == 1 && "Default Title".equals(variants.get(0).label); }
+
+    /** Available variants with different prices: the cover shows "From" the lowest one (web/tv-shop.mjs:95-97, :276). */
+    boolean hasPriceRange() { return availableCount > 1 && maximumPrice.compareTo(minimumPrice) > 0; }
+
     List<String> photos(int selected, String fallback) {
         Set<String> photos = new LinkedHashSet<>();
         String primary = productPhoto(selected, fallback);

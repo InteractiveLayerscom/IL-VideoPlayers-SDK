@@ -125,8 +125,12 @@ final class CommercePanel: UIView {
         qr.isAccessibilityElement = true
         body.addArrangedSubview(qr)
 
-        body.addArrangedSubview(label(labels.variant, size: 14, weight: .medium))
+        let variantHeading = label(labels.variant, size: 14, weight: .medium)
+        body.addArrangedSubview(variantHeading)
         body.addArrangedSubview(choices)
+        // web/tv-shop.mjs:196: a product without options shows no variant row and goes straight to Buy.
+        variantHeading.isHidden = offer.defaultVariantOnly
+        choices.isHidden = offer.defaultVariantOnly
         choicesHeight = choices.heightAnchor.constraint(equalToConstant: 0)
         choicesHeight.isActive = true
         selection = offer.variants.firstIndex(where: \.available) ?? 0
