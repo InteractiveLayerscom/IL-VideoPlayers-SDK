@@ -16,9 +16,11 @@ const planWith = (commerce = {}) => ({ version: 1, asset_id: 'a', duration: 60, 
 const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
 const adEvent = (id, creative = 'cr1') => ({ getAd: () => ({ getAdId: () => id, getCreativeId: () => creative }) });
 
-async function rig({ plan = planWith(), answer, sessionId } = {}) {
+async function rig({ plan = planWith(), answer, sessionId, muted = false, volume = 0.6, customPlayback = false } = {}) {
   const listeners = {};
-  const manager = { addEventListener(type, fn) { (listeners[type] ??= []).push(fn); }, init() {}, start() {}, destroy() {}, resize() {} };
+  const volumes = [];
+  const manager = { addEventListener(type, fn) { (listeners[type] ??= []).push(fn); }, init() {}, start() { volumes.push('start'); }, destroy() {}, resize() {},
+    setVolume(value) { volumes.push(value); }, isCustomPlaybackUsed: () => customPlayback };
   const Type = Object.fromEntries(['CONTENT_PAUSE_REQUESTED', 'CONTENT_RESUME_REQUESTED', 'STARTED', 'COMPLETE', 'SKIPPED', 'USER_CLOSE',
     'ALL_ADS_COMPLETED'].map((name) => [name, name]));
   const previous = globalThis.google;
@@ -30,7 +32,7 @@ async function rig({ plan = planWith(), answer, sessionId } = {}) {
     AdsRequest: class {},
   } };
   const video = new EventTarget();
-  Object.assign(video, { currentTime: 3, paused: false, ended: false, clientWidth: 640, clientHeight: 360, pause() {}, play: async () => {} });
+  Object.assign(video, { muted, volume, currentTime: 3, paused: false, ended: false, clientWidth: 640, clientHeight: 360, pause() {}, play: async () => {} });
   const linear = [], adds = [], removed = [], asked = [];
   const session = { commerce: { locale: 'es' }, sceneFeatures: [],
     setLinearAd(value, identity) { linear.push([value, identity]); },
@@ -47,7 +49,7 @@ async function rig({ plan = planWith(), answer, sessionId } = {}) {
   await flush();
   const fire = async (type, event = {}) => { for (const fn of listeners[type] ?? []) fn(event); await flush(); };
   await fire('CONTENT_PAUSE_REQUESTED');
-  return { ads, fire, linear, adds, removed, asked, done() { ads.destroy(); globalThis.google = previous; } };
+  return { ads, fire, linear, adds, removed, asked, video, volumes, done() { ads.destroy(); globalThis.google = previous; } };
 }
 
 test('a shop-linked ad asks IL once with its identity, shows the card and takes it away when it ends', async () => {
@@ -154,6 +156,31 @@ test('gap_after_seconds counts from the end of a banner longer than its window',
   await at(24);   // 2 s after the banner ended, 12 s after its window: the 5 s gap has not passed
   assert.deepEqual(asked, ['m1']);
   ads.destroy();
+});
+
+test('the ad follows the content volume from before it starts, while it plays, and stops following on destroy', async () => {
+  const r = await rig({ muted: true });
+  assert.deepEqual(r.volumes.slice(0, 2), [0, 'start']);
+  r.video.muted = false;
+  r.video.dispatchEvent(new Event('volumechange'));
+  assert.equal(r.volumes.at(-1), 0.6);
+  r.video.volume = 0.25;
+  r.video.dispatchEvent(new Event('volumechange'));
+  assert.equal(r.volumes.at(-1), 0.25);
+  r.video.muted = true;
+  r.video.dispatchEvent(new Event('volumechange'));
+  assert.equal(r.volumes.at(-1), 0);
+  const count = r.volumes.length;
+  r.done();
+  r.video.dispatchEvent(new Event('volumechange'));
+  assert.equal(r.volumes.length, count);
+});
+
+test('with custom playback the shared element keeps the viewer volume', async () => {
+  const r = await rig({ muted: true, customPlayback: true });
+  r.video.dispatchEvent(new Event('volumechange'));
+  assert.deepEqual(r.volumes, ['start']);
+  r.done();
 });
 
 test('normalizeCue keeps a valid holdUntil only', () => {
