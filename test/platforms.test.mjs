@@ -19,7 +19,7 @@ const start = Date.parse('2026-11-19T12:00:00Z');
 for (const kind of ['HTML5', 'Video.js', 'AVPlay'])
   test(kind + ' uses the same surface and restores existing layout and callback state', () => {
     const { window, stage, shell, video } = host();
-    const surface = kind === 'HTML5' ? video : shell;
+    const surface = kind === 'AVPlay' ? shell : video; // Video.js: the picture shrinks, its control bar does not
     surface.style.width = '98%';
     const rectangles = [];
     let now = start;

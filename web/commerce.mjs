@@ -91,11 +91,26 @@ const copy = {
     'Fechar', 'Preparando seu carrinho…', 'Não foi possível preparar o carrinho. Tente novamente.', 'Esta oferta não está mais disponível.'],
 };
 
+// How much of the bottom of the stage the host's controls take. `insets.bottom` wins, then a --il-safe-bottom the host's
+// CSS sets, then what the adapter knows of its own controls.
+export function applySafeArea(stage, insets, known) {
+  const bottom = Number.isFinite(insets?.bottom) && insets.bottom >= 0 ? insets.bottom : null;
+  let declared = '';
+  try {
+    declared = stage.ownerDocument.defaultView.getComputedStyle(stage).getPropertyValue('--il-safe-bottom').trim();
+  } catch {
+    declared = '';
+  }
+  const value = bottom ?? (declared ? null : known());
+  if (value != null) stage.style?.setProperty?.('--il-safe-bottom', value + 'px');
+}
+
 // `hooks` lets the adapter follow the viewer: opened() when the detail opens, closed(byViewer) when it closes
 // (byViewer false when the card is taken away, by a break or the end of its time) and checkout() once the
 // purchase page or its QR is handed over.
 export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}, clock = () => null) {
   const doc = stage.ownerDocument;
+  if (options) stage.classList?.add('il-stage');
   // Content time of the viewer's last action in the open card (a click or key on it, a result appearing).
   let actedAt = null;
   const act = () => {
@@ -162,7 +177,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     const activeBefore = trigger ?? doc.activeElement;
     const opener = doc.createElement('button');
     opener.type = 'button';
-    opener.className = 'il-commerce il-tv-shop-trigger';
+    opener.className = 'il-commerce il-commerce--' + cue.format + ' il-tv-shop-trigger';
     opener.textContent = copy[locale][cue.format === 'midroll' ? 3 : 0];
     let flow;
     function launch() {
@@ -170,7 +185,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       opener.hidden = true;
       trackView(cue, offer);
       act();
-      notify('opened');
+      notify('opened', cue);
       flow = openTVShop(stage, {
         offer: { ...offer, imageUrl: offer.imageUrl ?? offer.images?.[0] ?? (cue.format !== 'midroll' ? cue.imageUrl : undefined) },
         locale, brand:cue.brand,
@@ -332,7 +347,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       if (chosen.disabled || chosen.getBoundingClientRect().bottom > panel.getBoundingClientRect().bottom) close.focus({ preventScroll: true });
       trackView(cue, offer);
       act();
-      notify('opened');
+      notify('opened', cue);
     }
 
     // The result is the last thing in the panel: when the panel scrolls, it is brought into view inside it

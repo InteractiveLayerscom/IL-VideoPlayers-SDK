@@ -1,4 +1,4 @@
-import { commerceSurface, withinHold } from './commerce.mjs';
+import { applySafeArea, commerceSurface, withinHold } from './commerce.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
@@ -158,7 +158,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
   };
 }
 
-function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ...source }) {
+function attach({ stage, surface, squeezed = surface, video, avplay, getDisplayRect, programTime, ...source }) {
   if (!stage || !surface || stage === surface || !stage.contains(surface)) {
     throw new Error('The stage must contain the existing video surface');
   }
@@ -169,6 +169,10 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
   const clock = programTime ?? (source.timeline === 'media' && video
     ? () => Math.round(video.currentTime * 1000)
     : () => nativeProgramTime(video));
+  if (source.commerce) applySafeArea(stage, source.insets, () => {
+    const bar = surface.querySelector?.('.vjs-control-bar');
+    return bar ? Math.round(bar.getBoundingClientRect().height) || 30 : video?.controls ? 48 : 0;
+  });
   const pausing = video && source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
   const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing, clock);
   const allowVideo = source.secondaryVideo ?? !avplay;
@@ -178,6 +182,8 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     ...source,
     playing,
     presenting,
+    // During an ad the content may not have loaded yet (a pre-roll): only the page and the element's state count.
+    presentingSpot: avplay ? presenting : () => !video.ended && !video.seeking && !stage.ownerDocument.hidden,
     // A card with a Buy button survives a hidden page (another tab): it is not visible, so nothing is counted,
     // and the viewer finds it as they left it.
     presentingCard: avplay ? presenting
@@ -185,7 +191,7 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
     scenes: sceneSupported(window),
     sceneFeatures: sceneFeatures(window, allowVideo, allowAudio),
     clock,
-    renderer: renderer(stage, surface, avplay, getDisplayRect, commerce, {
+    renderer: renderer(stage, squeezed, avplay, getDisplayRect, commerce, {
       clock, moving: playing, tv: Boolean(avplay || source.commerce?.tv),
       allowVideo, allowAudio, animate: source.interval !== false,
     }),
@@ -210,7 +216,7 @@ function attach({ stage, surface, video, avplay, getDisplayRect, programTime, ..
 // commerce.pauseOnOpen: opening a product's detail pauses the video, so nothing (a break included) moves under a
 // viewer who is choosing. Closing it resumes only a pause the SDK made, if no one played or paused since; once the
 // purchase page or QR is handed over the video stays paused.
-function pauseOnOpen(video) {
+export function pauseOnOpen(video) {
   let ours = false;
   let expected = false;
   const changed = () => {
@@ -220,8 +226,9 @@ function pauseOnOpen(video) {
   video.addEventListener('play', changed);
   video.addEventListener('pause', changed);
   return {
-    opened() {
-      if (video.paused !== false) return;
+    opened(cue) {
+      // During an ad the player of the ad owns the element (the same one on iOS): it is never paused from here.
+      if (cue?.format === 'midroll' || video.paused !== false) return;
       ours = true;
       expected = true;
       video.pause?.();
@@ -273,6 +280,8 @@ export function attachVideoJs({ player, stage, ...options }) {
     programTime,
     stage: stage ?? surface.parentElement,
     surface,
+    // The L shrinks the picture only: the player's control bar keeps its width.
+    squeezed: video,
     video,
   });
   player.one('dispose', session.destroy);

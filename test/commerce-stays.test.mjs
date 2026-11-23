@@ -8,7 +8,7 @@ import { attachAvPlay, attachHtmlVideo } from '../web/index.mjs';
 
 const ROUTE = 'https://console.example/il-player/scene-product?grant=g';
 const card = (id = 'dlv_h') => ({
-  id, format: 'super', start: 1000, end: 8000, window: 'm1',
+  id, format: 'super', start: 1000, end: 8000, holdUntil: 600000, window: 'm1',
   imageUrl: 'https://cdn.example/apron.png', mimeType: 'image/png',
   impressionUrl: `https://ads.iadserver.com/events/${id}/impression`,
   commerce: {

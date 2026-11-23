@@ -108,7 +108,9 @@ export function createSession({
   }
 
   // The viewer has this card's detail open: it outlasts its window until they close it.
-  const holding = cue => !!cue.commerce && current?.id === cue.id && !!renderer.holding?.(cue);
+  const holding = cue => (!!cue.commerce || !!cue.products?.some(Boolean)) && current?.id === cue.id && !!renderer.holding?.(cue) &&
+    // Past the limit IL verified an open card goes, whatever the viewer does. Paused, content time does not reach it.
+    !(cue.holdUntil != null && clock() >= cue.holdUntil);
 
   function render(time) {
     function canShow(cue) {
@@ -117,7 +119,7 @@ export function createSession({
       // A card with a Buy button, like an interactive scene, stays while the viewer pauses to look at it;
       // a plain graphic shows only during playback.
       if (cue.commerce && !cue.scene) return !inBreak && contentKnown() && presentingCard();
-      return !inBreak && contentKnown() && (cue.scene ? presenting() : playing());
+      return !inBreak && contentKnown() && (cue.scene ? presenting() || (holding(cue) && presentingCard()) : playing());
     }
     const due = cue => (cue.start <= time && time < cue.end) || holding(cue);
     let active = null;
@@ -191,6 +193,8 @@ export function createSession({
     tick,
     // The clock the cues are rendered from; the ads module checks a stitched plan uses the same one.
     clock,
+    // What a designed product banner may use; null when this session cannot draw scenes.
+    sceneFeatures: scenes ? sceneFeatures : null,
     // Whether the card with this id is on screen with its detail open.
     holding: id => !!current && current.id === id && holding(current),
     addCue(item, { onVisible, onHidden, onClick } = {}) {
