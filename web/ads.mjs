@@ -33,6 +33,8 @@ const PRODUCT = 'scene_product';
 // IL's route waits up to 4 s for iADServer; the rest is the network.
 const PRODUCT_TIMEOUT_MS = 6000;
 const SID = /^[A-Za-z0-9_.:-]{1,128}$/;
+// iADServer names a shop-linked ad `il-shop-<position>-<delivery id>` (VAST Ad@id, which IMA exposes).
+const SHOP_AD = /^il-shop-(preroll|midroll)-([A-Za-z0-9_-]{43})$/;
 // Where each plan returned by loadPlan came from, without a visible field on the plan.
 const planOrigins = new WeakMap();
 // Delivery ids whose impression this page already fired: a re-attach or a second attachAds asking the same
@@ -196,6 +198,12 @@ export function graphicTag(tagUrl, format, targeting, pageUrl) {
     url.searchParams.set('description_url', pageUrl);
   }
   return url.href;
+}
+
+// Appends to an opaque signed URL without parsing or re-encoding what is already there.
+function withParams(href, extra) {
+  const [base, fragment] = href.split(/#(.*)/s);
+  return base + (!base.includes('?') ? '?' : /[?&]$/.test(base) ? '' : '&') + extra + (fragment != null ? '#' + fragment : '');
 }
 
 function requestTag(provider, tagUrl, pageUrl, sid) {
@@ -385,6 +393,19 @@ export function attachAds({
   const sid = typeof sessionId === 'string' && sessionId ? sessionId
     : typeof shop?.session === 'string' && SID.test(shop.session) ? shop.session : randomId();
   const cuts = Object.freeze(stitched ? [] : planCuts(valid.cuts, page, sid).map(Object.freeze));
+  // The Buy button during an ad: IL's grant names the view's session, and iADServer ties the delivery to that session,
+  // so a host with its own view id gets the ad without the card.
+  const breakUrl = (() => {
+    if (!shop || !session.commerce || sid !== shop.session || typeof shop.break_url !== 'string') return null;
+    try {
+      const url = new URL(shop.break_url);
+      return url.protocol === 'https:' && !url.username && !url.password && url.origin === new URL(shop.url).origin
+        ? shop.break_url : null;
+    } catch {
+      return null;
+    }
+  })();
+  const breakShop = { token: 0, id: null, abort: null, spot: false };
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
   const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
@@ -517,7 +538,7 @@ export function attachAds({
           const node = stage.ownerDocument.createElement('div');
           node.id = 'il-ads-overlay-' + Math.random().toString(36).slice(2, 10);
           node.dataset.ilAdsOverlay = '';
-          Object.assign(node.style, { position: 'absolute', right: '12px', bottom: '58px', width: '300px', height: '250px', zIndex: '2', display: 'none' });
+          Object.assign(node.style, { position: 'absolute', right: '12px', bottom: 'calc(var(--il-safe-bottom, 46px) + 12px)', width: '300px', height: '250px', zIndex: '2', display: 'none' });
           stage.append(node);
           overlay.node = node;
           if (own) {
@@ -680,8 +701,12 @@ export function attachAds({
       // are appended, without parsing or re-encoding what is already there.
       const extra = new URLSearchParams({ window: window.id,
         locale: commerceLocale(session.commerce.locale ?? globalThis.navigator?.language) });
-      const [base, fragment] = shop.url.split(/#(.*)/s);
-      const href = base + (!base.includes('?') ? '?' : /[?&]$/.test(base) ? '' : '&') + extra + (fragment != null ? '#' + fragment : '');
+      // A session that draws scenes asks for the banner designed in the ad server; IL answers the plain card otherwise.
+      if (session.sceneFeatures) {
+        extra.set('scene', '1');
+        if (session.sceneFeatures.length) extra.set('scene_features', session.sceneFeatures.join(','));
+      }
+      const href = withParams(shop.url, extra);
       emit('request', PRODUCT, window);
       const res = await fetchImpl(href, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
       if (disposed || abort.signal.aborted) reject('aborted');
@@ -690,12 +715,17 @@ export function attachAds({
       const card = await res.json();
       if (disposed || abort.signal.aborted) reject('aborted');
       const start = Math.max(window.start, Number(card?.start));
-      const end = Math.min(window.end, Number(card?.end));
-      const item = { ...card, start, end };
+      // A designed banner lasts what its creative says, up to the end IL verified; a plain card stays in its window.
+      const designed = !!session.sceneFeatures && !!card?.scene;
+      const end = designed ? Number(card?.end) : Math.min(window.end, Number(card?.end));
+      // A plan product without a verified limit is not held past its end.
+      const holdUntil = Number.isSafeInteger(card?.holdUntil) && card.holdUntil >= end ? card.holdUntil : end;
+      const item = { ...card, start, end, holdUntil };
       const cue = card && (card.window == null || card.window === window.id) ? normalizeCue(item) : null;
-      if (!cue?.commerce || cue.format === 'midroll') reject('invalid_product');
+      if (!(cue?.commerce || (designed && cue?.scene && cue.products.some(Boolean))) || cue.format === 'midroll') reject('invalid_product');
       outcome = 'filled';
-      shown.push(window);
+      // The gap after a product counts from the end of what is on screen, a banner longer than its window included.
+      shown.push({ ...window, end: Math.max(window.end, cue.end) });
       emit('fill', PRODUCT, window);
       drawProduct(window, item, cue);
     } catch {
@@ -730,12 +760,14 @@ export function attachAds({
       },
     };
     const visible = productVisible(now());
-    if (!visible || session.addCue(item, hooks)) cues.set(cue.id, { end: cue.end, item, hooks, onScreen: visible, product: true });
+    if (!visible || session.addCue(item, hooks)) cues.set(cue.id, { start: cue.start, end: cue.end, item, hooks, onScreen: visible, product: true, replay: !!cue.scene });
     watch();
   }
   // A product card is off during any video break and once the content has ended; it comes back while its time remains.
   const productVisible = (time) => time != null && !inBreak && !hostBreak && video.ended !== true;
-  const productLive = () => [...cues.values()].some((cue) => cue.product);
+  // A designed banner stays known after its end, so seeking back shows it again without asking or counting twice.
+  const productLive = (time) => [...cues.values()].some((cue) => cue.product &&
+    (!cue.replay || cue.onScreen || (time >= cue.start - shop.lead_ms && time < cue.end)));
 
   function sync(event) {
     if (disposed) return;
@@ -751,8 +783,12 @@ export function attachAds({
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
       } else if (time >= cue.end && !held) {
-        cues.delete(id);
+        if (!cue.replay) cues.delete(id);
         if (cue.onScreen) session.removeCue(id);
+        cue.onScreen = false;
+      } else if (cue.replay && time < cue.start && !held) {
+        if (cue.onScreen) session.removeCue(id);
+        cue.onScreen = false;
       } else if (!cue.onScreen) cue.onScreen = session.addCue(cue.item, cue.hooks);
     }
     updateOverlay(time);
@@ -761,7 +797,7 @@ export function attachAds({
     schedule(time / 1000);
     if (!played || breakOn()) return;
     // One product request at a time and one card at a time, asked `lead_ms` ahead.
-    if (shopOn && !productController && !productLive()) {
+    if (shopOn && !productController && !productLive(time)) {
       const product = shopWindows.find((window) => !products.has(window.id) &&
         window.start - shop.lead_ms <= time && time < window.end &&
         window.end - Math.max(window.start, time) >= ms(shop.pacing.min_seconds) && pacingAllows(window, committed(), shop.pacing));
@@ -771,6 +807,7 @@ export function attachAds({
     // its window (the viewer is choosing), a graphic could not be shown: none is asked for.
     if (controller || overlay.live || !servableNow().length) return;
     if ([...cues].some(([id, cue]) => cue.product && time >= cue.end && session.holding?.(id))) return;
+    if ([...cues.values()].some((cue) => cue.replay && cue.start <= time && time < cue.end)) return;
     // A window with a product waits for its answer; a product (200) wins over the graphics in that window.
     const next = windows.find((window) => !attempted.has(window.id) &&
       window.start - PREPARE_MS <= time && time < window.end &&
@@ -831,7 +868,68 @@ export function attachAds({
     const time = Number(video.currentTime) || 0;
     return candidates.filter((cut) => cut.at <= time + 1).at(-1) ?? candidates[0] ?? null;
   }
+  function clearBreakShop() {
+    breakShop.token++;
+    breakShop.abort?.abort();
+    breakShop.abort = null;
+    if (breakShop.id) session.removeCue(breakShop.id);
+    breakShop.id = null;
+  }
+  // One ad of the break started: the session is told which, and the card of exactly this delivery is asked for.
+  async function shopAdStarted(event, cut, request) {
+    clearBreakShop();
+    if (disposed || !inBreak) return;
+    let identity = null;
+    let tag = null;
+    try {
+      const ad = event?.getAd?.();
+      const match = SHOP_AD.exec(ad?.getAdId?.() ?? '');
+      const creativeId = ad?.getCreativeId?.();
+      tag = request?.provider === 'iadserver' ? new URL(request.tagUrl).searchParams.get('tag') : null;
+      if (breakUrl && match && match[1] === cut?.position && tag && typeof creativeId === 'string' && creativeId)
+        identity = { creativeId, deliveryId: match[2] };
+    } catch {
+      identity = null;
+    }
+    // A spot without a shop changes nothing unless the one before it had one.
+    if (identity || breakShop.spot) session.setLinearAd(true, identity ?? undefined);
+    breakShop.spot = !!identity;
+    if (!identity) return;
+    const token = breakShop.token;
+    const abort = new AbortController();
+    breakShop.abort = abort;
+    const timeout = setTimeout(() => abort.abort(), PRODUCT_TIMEOUT_MS);
+    try {
+      const extra = new URLSearchParams({ cut: cut.id, tag, creative: identity.creativeId, delivery: identity.deliveryId,
+        locale: commerceLocale(session.commerce.locale ?? globalThis.navigator?.language) });
+      const res = await fetchImpl(withParams(breakUrl, extra), { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
+      if (res.status !== 200) return;
+      const card = await res.json();
+      if (disposed || token !== breakShop.token || card?.id !== identity.deliveryId ||
+          card?.linearCreativeId !== identity.creativeId || card?.format !== 'midroll') return;
+      // The ad decides how long it lasts: the card follows it, whatever the clock of the paused content says.
+      if (session.addCue({ ...card, start: 0, end: Number.MAX_SAFE_INTEGER })) breakShop.id = identity.deliveryId;
+    } catch {
+      // Without the card the ad simply plays.
+    } finally {
+      clearTimeout(timeout);
+      if (breakShop.abort === abort) breakShop.abort = null;
+    }
+  }
+  function shopAdEnded() {
+    clearBreakShop();
+    if (!disposed && inBreak && breakShop.spot) session.setLinearAd(true);
+    breakShop.spot = false;
+  }
+  function watchShopAds(manager, sdk, started) {
+    for (const name of ['COMPLETE', 'SKIPPED', 'USER_CLOSE']) {
+      if (sdk.AdEvent.Type[name]) manager.addEventListener(sdk.AdEvent.Type[name], shopAdEnded);
+    }
+    manager.addEventListener(sdk.AdEvent.Type.STARTED, started);
+  }
   function endBreak() {
+    clearBreakShop();
+    breakShop.spot = false;
     clearTimeout(ima.watchdog);
     if (!inBreak) return false;
     inBreak = false;
@@ -1096,6 +1194,9 @@ export function attachAds({
       clearTimeout(wf.timer);
       clearTimeout(wf.holdTimer);
     });
+    watchShopAds(manager, sdk, (event) => {
+      if (!disposed && token === wf.token) void shopAdStarted(event, wf.cut, wf.cut?.requests[wf.index]);
+    });
     if (sdk.AdEvent.Type.ALL_ADS_COMPLETED) manager.addEventListener(sdk.AdEvent.Type.ALL_ADS_COMPLETED, () => {
       if (ima.manager === manager) destroyManager();
     });
@@ -1159,6 +1260,9 @@ export function attachAds({
           ima.watchdog = setTimeout(() => {
             if (!disposed && inBreak) adError();
           }, BREAK_WATCHDOG_MS);
+        });
+        watchShopAds(manager, sdk, (event) => {
+          if (!disposed) void shopAdStarted(event, ima.cut, ima.cut?.requests[0]);
         });
         if (sdk.AdEvent.Type.AD_BREAK_FETCH_ERROR) manager.addEventListener(sdk.AdEvent.Type.AD_BREAK_FETCH_ERROR, breakFailed);
         if (sdk.AdEvent.Type.LOG) manager.addEventListener(sdk.AdEvent.Type.LOG, (e) => {

@@ -590,7 +590,7 @@ test('the overlay defines one 300x250 slot with window targeting, il_format and 
   assert.deepEqual(r.gpt.service.refreshed, [slot]);
   assert.deepEqual(r.events[0], { type: 'request', format: 'overlay_300x250', window: 'p17' });
   const { style } = r.box();
-  assert.deepEqual([style.position, style.right, style.bottom, style.width, style.height], ['absolute', '12px', '58px', '300px', '250px']);
+  assert.deepEqual([style.position, style.right, style.bottom, style.width, style.height], ['absolute', '12px', 'calc(var(--il-safe-bottom, 46px) + 12px)', '300px', '250px']);
   r.ads.destroy();
 });
 

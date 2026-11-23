@@ -204,6 +204,7 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
     current.observer?.disconnect();
     for (const entry of current.entries) entry.media?.dispose();
     current.root.remove();
+    current.floats?.remove();
     if (current.squeezed) squeeze(false);
     if (current.originalFocus?.isConnected && doc.activeElement === doc.body)
       current.originalFocus.focus();
@@ -334,6 +335,36 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
     }
     stage.appendChild(root);
     current = { root, entries, originalFocus: doc.activeElement };
+    // A button under the host's controls could not be pressed: it moves up just enough, with the layers drawn on it.
+    current.liftActions = () => {
+      let safe = 0;
+      try {
+        safe = parseFloat(win.getComputedStyle(stage).getPropertyValue('--il-safe-bottom')) || 0;
+      } catch {
+        safe = 0;
+      }
+      const scale = root.clientHeight / scene.height;
+      for (const entry of entries) {
+        if (!entry.action) continue;
+        const { x, y, width, height } = entry.layer;
+        const lift = safe && scale ? Math.max(0, (y + height) * scale - (root.clientHeight - safe)) : 0;
+        for (const other of entries) {
+          const on = other === entry || (!other.action && other.layer.x >= x && other.layer.y >= y &&
+            other.layer.x + other.layer.width <= x + width && other.layer.y + other.layer.height <= y + height);
+          if (on) other.node.style.translate = lift ? `0 ${-lift}px` : '';
+          // Lifted out of the L's bands, it would be cut by their mask: it moves to an unmasked twin of the scene.
+          if (on && lift && l && other.node.parentNode === root) {
+            if (!current.floats) {
+              current.floats = doc.createElement('div');
+              current.floats.className = 'il-scene-floats';
+              Object.assign(current.floats.style, { position: 'absolute', inset: '0', overflow: 'hidden', pointerEvents: 'none', zIndex: '1' });
+              stage.appendChild(current.floats);
+            }
+            current.floats.appendChild(other.node);
+          }
+        }
+      }
+    };
     if (win.ResizeObserver) {
       current.observer = new win.ResizeObserver(() => update(clock()));
       current.observer.observe(root);
@@ -354,6 +385,7 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
       if (!current || current.root !== root) return;
       const elapsed = Math.min(scene.durationMs, Math.max(0, now - cue.start));
       const movingNow = moving();
+      current.liftActions();
       const fontRatio = root.clientWidth / scene.width;
       let hasArtwork = false;
       for (const entry of entries) {
@@ -409,6 +441,7 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
         current.squeezed = false;
       }
       root.style.display = hasArtwork ? '' : 'none';
+      if (current.floats) current.floats.style.display = root.style.display;
       if (tv && hasArtwork && !current.didFocus) {
         const first = entries.find(entry => entry.action && entry.visible);
         if (first) {

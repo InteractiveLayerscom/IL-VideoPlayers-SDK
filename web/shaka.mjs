@@ -1,4 +1,5 @@
-import { commerceSurface, withinHold } from './commerce.mjs';
+import { applySafeArea, commerceSurface, withinHold } from './commerce.mjs';
+import { pauseOnOpen } from './dom.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
@@ -75,8 +76,11 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     muted = null;
   }
   const sceneStage = stage ?? clientContainer;
-  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl, {}, () => clock());
-  const clock = programTime ?? (() => {
+  if (source.commerce) applySafeArea(sceneStage, source.insets, () => (video.controls ? 48 : 0));
+  const pausing = source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
+  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl, pausing, () => clock());
+  // timeline: 'media' is a video on demand, whose plan and cards are in the video's own time.
+  const clock = programTime ?? (source.timeline === 'media' ? () => Math.round(video.currentTime * 1000) : () => {
     if (video.readyState < 2) return null;
     if (datedPlaylist) return player.getPlayheadTimeAsDate()?.getTime();
     return nativeProgramTime(video);
@@ -148,6 +152,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
   };
   const session = createSession({
     ...source, clock, renderer, playing, presenting,
+    presentingCard: () => !video.ended && !video.seeking && video.readyState >= 2 && !manager.getCurrentAd()?.isLinear(),
     presentingSpot: () => !video.seeking && !video.ended && !video.ownerDocument.hidden,
     scenes: sceneSupported(window),
     sceneFeatures: sceneFeatures(window, allowVideo, allowAudio),
@@ -178,6 +183,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
+      pausing?.dispose();
       manager.removeEventListener('ad-started', onStarted);
       manager.removeEventListener('ad-stopped', unmute);
       network.unregisterResponseFilter(filter);

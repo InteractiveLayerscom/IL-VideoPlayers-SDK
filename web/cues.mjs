@@ -53,6 +53,7 @@ export function normalizeCue(item) {
     ...(commerce ? { commerce } : {}),
     ...(scene ? { scene, products, ...(item.layout === 'overlay' ? { layout: 'overlay' } : {}) } : {}),
     ...(brand ? { brand } : {}),
+    ...(Number.isSafeInteger(item.holdUntil) && item.holdUntil >= item.end ? { holdUntil: item.holdUntil } : {}),
   };
 }
 
