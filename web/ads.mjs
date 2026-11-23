@@ -760,12 +760,14 @@ export function attachAds({
       },
     };
     const visible = productVisible(now());
-    if (!visible || session.addCue(item, hooks)) cues.set(cue.id, { start: cue.start, end: cue.end, item, hooks, onScreen: visible, product: true, replay: !!cue.scene });
+    // Every product, plain card or designed banner, stays known for this view after its end: seeking back shows it
+    // again without asking, without a second delivery and without counting it twice.
+    if (!visible || session.addCue(item, hooks)) cues.set(cue.id, { start: cue.start, end: cue.end, item, hooks, onScreen: visible, product: true, replay: true });
     watch();
   }
   // A product card is off during any video break and once the content has ended; it comes back while its time remains.
   const productVisible = (time) => time != null && !inBreak && !hostBreak && video.ended !== true;
-  // A designed banner stays known after its end, so seeking back shows it again without asking or counting twice.
+  // A product stays known after its end, so seeking back shows it again without asking or counting twice.
   const productLive = (time) => [...cues.values()].some((cue) => cue.product &&
     (!cue.replay || cue.onScreen || (time >= cue.start - shop.lead_ms && time < cue.end)));
 

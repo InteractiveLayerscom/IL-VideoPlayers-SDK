@@ -78,15 +78,24 @@ test('seeking back shows the banner again with one request and one impression', 
   r.ads.destroy();
 });
 
-test('a session without scenes and a plain answer behave as today', async () => {
+test('a session without scenes gets the plain card, and seeking back shows it again with one request and one impression', async () => {
   const r = rig(plain, null);
   r.video.dispatchEvent(new Event('playing'));
   await r.at(50);
   assert.ok(!r.routes[0].searchParams.has('scene'));
   assert.equal(r.adds[0].end, 58000);
+  r.onScreen.get('c').onVisible();
   await r.at(58);
+  assert.ok(!r.onScreen.has('c'));
+  await r.at(45);
+  assert.ok(!r.onScreen.has('c'));    // before its window it stays away
   await r.at(55);
-  assert.equal(r.adds.length, 1);
+  assert.ok(r.onScreen.has('c'));
+  r.onScreen.get('c').onVisible();
+  assert.equal(r.adds.length, 2);
+  assert.equal(r.adds[1].holdUntil, r.adds[0].holdUntil);   // the same card, not a new answer
+  assert.equal(r.routes.length, 1);
+  assert.equal(r.beacons.filter((url) => url.endsWith('/impression')).length, 1);
   r.ads.destroy();
 });
 
