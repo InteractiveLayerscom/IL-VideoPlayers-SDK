@@ -28,7 +28,9 @@ sub readFeed()
         started = transfer.asyncGetToString()
     end if
     if started
-        message = wait(8000, port)
+        limit = 8000
+        if type(request.timeoutMs) = "Integer" or type(request.timeoutMs) = "roInt" or type(request.timeoutMs) = "roInteger" then limit = request.timeoutMs
+        message = wait(limit, port)
         if type(message) = "roUrlEvent"
             response.status = message.getResponseCode()
             if response.status >= 200 and response.status < 300

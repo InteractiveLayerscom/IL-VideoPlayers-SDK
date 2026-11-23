@@ -9,6 +9,7 @@
         sub answer()
             if m.top.control <> "run" then return
             request = m.top.request
+            if request.kind = "plan" then return
             m.top.result = { sessionId: request.sessionId, revision: request.revision, status: 200,
                 body: formatJson({ continueUrl: "https://ads.example/cart",
                     qrImageUrl: request.url + "/qr/" + request.variantId + ".png" }) }

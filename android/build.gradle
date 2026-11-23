@@ -13,6 +13,8 @@ android {
     defaultConfig {
         minSdk 23
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        // R8 in the app must not fail on the optional IMA and Google Mobile Ads classes.
+        consumerProguardFiles 'consumer-rules.pro'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
@@ -39,6 +41,12 @@ tasks.matching { it.name == 'mergeDebugAndroidTestAssets' }.configureEach { depe
 dependencies {
     api 'androidx.media3:media3-ui:1.6.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.6.0'
+    // Optional: an app that wants IMA breaks adds media3-exoplayer-ima at the same version as its other Media3
+    // modules. Without it, breaks play progressive MP4 on the app's player.
+    compileOnly 'androidx.media3:media3-exoplayer-ima:1.6.0'
+    testImplementation 'androidx.media3:media3-exoplayer-ima:1.6.0'
+    // Optional: needs the app's AdMob application ID, and Google Play services on the device.
+    compileOnly 'com.google.android.gms:play-services-ads:23.6.0'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

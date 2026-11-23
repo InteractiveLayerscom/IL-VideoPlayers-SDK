@@ -115,3 +115,7 @@ overlays.setLinearAdActive(false);
 ```
 
 El SDK muestra el acceso de compra si el feed devuelve el mismo creativo y entrega dentro de su ventana. El host controla el video del spot, el salto y la medición VAST. Para cortes convencionales, `setLinearAdActive(true)` continúa suspendiendo las gráficas.
+
+## Plan de anuncios
+
+Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.

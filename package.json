@@ -7,6 +7,7 @@
     ".": "./web/index.mjs",
     "./shaka": "./web/shaka.mjs",
     "./ads": "./web/ads.mjs",
+    "./avplay-ads": "./web/avplay-ads.mjs",
     "./player.css": "./web/player.css"
   },
   "files": [

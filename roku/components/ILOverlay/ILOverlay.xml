@@ -4,6 +4,8 @@
         <function name="attach" />
         <function name="detach" />
         <function name="setTimeline" />
+        <function name="setPlanCues" />
+        <function name="acceptsPlanProduct" />
         <function name="setLinearAd" />
         <function name="setManifest" />
         <function name="setClockAnchor" />
@@ -14,6 +16,7 @@
         <field id="sceneLink" type="assocarray" alwaysNotify="true" />
         <field id="productView" type="assocarray" alwaysNotify="true" />
         <field id="linearBreak" type="boolean" onChange="onLinearBreakChanged" />
+        <field id="planBreak" type="boolean" onChange="refresh" />
         <field id="seeking" type="boolean" onChange="refresh" />
         <field id="impression" type="assocarray" alwaysNotify="true" />
     </interface>
