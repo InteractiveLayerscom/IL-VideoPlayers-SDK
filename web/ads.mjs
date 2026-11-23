@@ -922,6 +922,8 @@ export function attachAds({
     breakShop.spot = false;
   }
   function watchShopAds(manager, sdk, started) {
+    // Each ad of a pod starts at the viewer's current volume.
+    manager.addEventListener(sdk.AdEvent.Type.STARTED, syncAdVolume);
     for (const name of ['COMPLETE', 'SKIPPED', 'USER_CLOSE']) {
       if (sdk.AdEvent.Type[name]) manager.addEventListener(sdk.AdEvent.Type[name], shopAdEnded);
     }
@@ -936,11 +938,21 @@ export function attachAds({
     session.setLinearAd(false);
     return true;
   }
+  // IMA plays in its own element, which does not follow the content's volume. With custom playback the ad uses the
+  // content element itself, whose volume is already the viewer's and must not be overwritten.
+  function syncAdVolume() {
+    try {
+      if (ima.manager && !ima.manager.isCustomPlaybackUsed?.()) ima.manager.setVolume?.(video.muted ? 0 : video.volume);
+    } catch {
+      // A manager that refuses the volume keeps playing.
+    }
+  }
   function startManager() {
     if (!ima.manager || !ima.started || ima.running) return;
     ima.running = true;
     try {
       ima.manager.init(video.clientWidth || 640, video.clientHeight || 360, ima.sdk.ViewMode.NORMAL);
+      syncAdVolume();
       ima.manager.start();
     } catch {
       emitBreak('break_error', null);
@@ -1123,6 +1135,7 @@ export function attachAds({
     wf.timer = setTimeout(() => attemptFailed(token), ATTEMPT_MS);
     try {
       ima.manager.init(video.clientWidth || 640, video.clientHeight || 360, ima.sdk.ViewMode.NORMAL);
+      syncAdVolume();
       ima.manager.start();
     } catch {
       attemptFailed(token);
@@ -1354,6 +1367,7 @@ export function attachAds({
     video.addEventListener('play', sync);
     video.addEventListener('pause', walkPaused);
   }
+  if (useIma) video.addEventListener('volumechange', syncAdVolume);
   if (useIma) void setUpIma();
   sync();
   return {
@@ -1406,6 +1420,7 @@ export function attachAds({
       }
       video.removeEventListener('play', sync);
       video.removeEventListener('pause', walkPaused);
+      video.removeEventListener('volumechange', syncAdVolume);
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       if (typeof unwatch === 'function') unwatch();
       unwatchFrames();
