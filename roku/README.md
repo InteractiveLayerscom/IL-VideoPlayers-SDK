@@ -127,3 +127,7 @@ m.feed.control = "run"
 En cada cambio de spot repetí la vinculación con la identidad del nuevo anuncio. Al cargar el resultado comprobá la sesión y la revisión como en el ejemplo de lectura del endpoint. Conservá el reloj de programa de esa sesión mediante `setClockAnchor` cuando corresponda. El lector agrega `scene=1`, `commerce=1`, `shop_midroll=1` y las dos claves. Un cue `midroll` presenta **Comprar** únicamente durante la entrega vinculada y dentro de su intervalo. El reproductor conserva la reproducción del spot y la medición de VAST.
 
 Al finalizar el corte, incrementá la revisión del lector y llamá a `m.il.callFunc("setLinearAd", false, invalid)`. Para un spot sin identidad de compra podés pasar `true, invalid`: el corte conserva la supresión de gráficas de programa.
+
+## Plan de anuncios
+
+Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.

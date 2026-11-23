@@ -23,3 +23,9 @@ feed_report=$(npm exec --yes --package=@rokucommunity/brs@0.47.6 -- brs --no-col
 }
 printf '%s\n' "$feed_report"
 printf '%s\n' "$feed_report" | grep -Eq '^ROKU_FEED_OK 3$'
+plan_report=$(npm exec --yes --package=@rokucommunity/brs@0.47.6 -- brs --no-color --root . components/ILOverlay/ILAdPlan.brs tests/adplan.brs 2>&1) || {
+    printf '%s\n' "$plan_report" >&2
+    exit 1
+}
+printf '%s\n' "$plan_report"
+printf '%s\n' "$plan_report" | grep -Eq '^ROKU_ADPLAN_OK [1-9][0-9]*$'

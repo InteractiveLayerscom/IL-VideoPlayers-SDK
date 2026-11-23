@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="ILAdPlanPlayer" extends="Group">
+    <interface>
+        <function name="attachPlan" />
+        <function name="startPlan" />
+        <function name="stopPlan" />
+        <function name="planTick" />
+        <function name="receive" />
+        <function name="finishBreak" />
+        <function name="applySpot" />
+        <function name="breakGuardAt" />
+        <field id="event" type="assocarray" alwaysNotify="true" />
+        <field id="linearSpot" type="assocarray" alwaysNotify="true" />
+        <field id="contentReady" type="boolean" alwaysNotify="true" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILAdPlan.brs" />
+    <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILAdPlanPlayer.brs" />
+    <children>
+        <Timer id="ilPlanClock" duration="0.25" repeat="true" />
+        <Timer id="ilBreakGuard" duration="1" repeat="true" />
+    </children>
+</component>

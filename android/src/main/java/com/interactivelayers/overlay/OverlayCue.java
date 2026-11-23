@@ -71,6 +71,10 @@ final class OverlayCue {
                 validFallback ? mimeType : null, impressionUrl, commerce, scene, brand, layout, null);
     }
 
+    static OverlayCue planGraphic(String id, String format, long start, long end, String imageUrl, String mimeType) {
+        return validate(id, format, start, end, imageUrl, mimeType, null, null, null, null, null);
+    }
+
     static boolean isHttps(String value) {
         if (value == null) return false;
         try {
@@ -135,7 +139,7 @@ final class OverlayCue {
     }
 
     // SimpleDateFormat is available on Fire OS and API 23 without core-library desugaring.
-    private static long timestamp(String value) throws ParseException {
+    static long timestamp(String value) throws ParseException {
         Matcher date = TIMESTAMP.matcher(value == null ? "" : value);
         if (!date.matches()) throw new ParseException("Expected ISO date with offset", 0);
         String fraction = date.group(2);

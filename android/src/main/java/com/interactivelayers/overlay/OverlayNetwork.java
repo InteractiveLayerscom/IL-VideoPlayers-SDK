@@ -112,6 +112,11 @@ final class OverlayNetwork {
         }
     }
 
+    /** The body of an HTTPS GET, empty for 204. Any other non-2xx status throws. */
+    String text(String url) throws IOException {
+        return new String(read(url, 512 * 1024), StandardCharsets.UTF_8);
+    }
+
     void impression(String url) throws IOException {
         HttpURLConnection connection = open(url);
         connection.disconnect();

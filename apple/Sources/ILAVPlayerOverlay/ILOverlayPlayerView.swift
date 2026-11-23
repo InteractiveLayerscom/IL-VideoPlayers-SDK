@@ -32,10 +32,30 @@ public final class ILOverlayPlayerView: UIView {
     private var displayed: OverlayCue?
     private var stopped = false
     private var commercePanel: PlayerCommercePanel?
-    private var midrollIdentity: (creative: String, delivery: String)?
+    private(set) var midrollIdentity: (creative: String, delivery: String)?
     private var sceneSurface: SceneSurface?
     private weak var lastProductFocus: UIButton?
     private var sceneArtworkVisible = false
+    private var feedCues: [OverlayCue] = []
+    private var planCues: [OverlayCue] = []
+    private var planVisibility: ((String) -> Void)?
+    private var adContainerVisible = false
+
+    /// Where an ad SDK renders a break: over the video and under the Buy panel.
+    public lazy var adContainer: UIView = {
+        let view = UIView(frame: bounds)
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.layer.zPosition = 2
+        view.isHidden = true
+        addSubview(view)
+        return view
+    }()
+
+    public func setAdContainerVisible(_ visible: Bool) {
+        adContainerVisible = visible
+        adContainer.isHidden = !visible
+        isUserInteractionEnabled = visible || commercePanel != nil || sceneSurface != nil
+    }
 
     /// Leave disabled on devices that cannot sustain two concurrent decoders.
     public var allowsSecondaryVideo = false {
@@ -99,6 +119,7 @@ public final class ILOverlayPlayerView: UIView {
         if let panel = commercePanel {
             if let control = panel.hitTest(panel.convert(point, from: self), with: event) { return control }
         }
+        if adContainerVisible { return adContainer.hitTest(adContainer.convert(point, from: self), with: event) }
         if let sceneSurface { return sceneSurface.hitTest(sceneSurface.convert(point, from: self), with: event) }
         return nil
     }
@@ -181,6 +202,23 @@ public final class ILOverlayPlayerView: UIView {
         replaceSchedule(try OverlayCue.decodeSidecar(json))
     }
 
+    /// With a listener, cues run on content time, the timeline of IL's ad plan. Nil restores program time.
+    func useContentClock(_ visibility: ((String) -> Void)?) {
+        planVisibility = visibility
+        clearArtwork()
+    }
+
+    func setPlanCues(_ cues: [OverlayCue]) {
+        planCues = cues
+        replaceSchedule(feedCues)
+    }
+
+    private func clockDate(_ item: AVPlayerItem) -> Date? {
+        guard planVisibility != nil else { return item.currentDate() }
+        let seconds = player.currentTime().seconds
+        return seconds.isFinite && seconds >= 0 ? Date(timeIntervalSince1970: seconds) : nil
+    }
+
     /// Stops metadata collection and tracking. The existing player keeps rendering at full size.
     public func stop() {
         stopped = true
@@ -218,9 +256,13 @@ public final class ILOverlayPlayerView: UIView {
         guard item !== player.currentItem else { return }
         unbind()
         clearArtwork()
-        impressions = VisibleImpressions()
-        viewed.removeAll()
-        timeline = OverlayTimeline()
+        // An ad break swaps the item under a plan: what was already counted stays counted.
+        if planVisibility == nil {
+            impressions = VisibleImpressions()
+            viewed.removeAll()
+        }
+        feedCues = []
+        timeline = OverlayTimeline(planCues)
         guard let next = player.currentItem else { return }
         item = next
         if source == .hlsDateRanges {
@@ -248,11 +290,13 @@ public final class ILOverlayPlayerView: UIView {
     }
 
     private func replaceSchedule(_ cues: [OverlayCue]) {
-        timeline = OverlayTimeline(commerceEnabled ? cues : cues.filter { $0.commerce == nil || $0.scene != nil })
+        feedCues = cues
+        let all = cues + planCues
+        timeline = OverlayTimeline(commerceEnabled ? all : all.filter { $0.commerce == nil || $0.scene != nil })
         // A revised or withdrawn cue immediately releases the L geometry.
         if let displayed {
             let active = midrollIdentity.map { timeline.midroll(at: item?.currentDate() ?? Date(), creativeID: $0.creative, deliveryID: $0.delivery) }
-                ?? timeline.active(at: item?.currentDate())
+                ?? timeline.active(at: item.flatMap(clockDate))
             if active != displayed { clearArtwork() }
         }
     }
@@ -269,7 +313,7 @@ public final class ILOverlayPlayerView: UIView {
         guard let item, !timeline.isEmpty, moving || player.timeControlStatus == .paused,
               !isPresentationSuspended, !player.isExternalPlaybackActive,
               nativeBreaks?.currentEvent == nil, playerLayer.isReadyForDisplay,
-              let date = item.currentDate(), let visible = visibleBounds else { clearArtwork(); return }
+              let date = clockDate(item), let visible = visibleBounds else { clearArtwork(); return }
 
         let active = timeline.active(at: date)
         if let cue = active, let scene = cue.scene {
@@ -282,7 +326,7 @@ public final class ILOverlayPlayerView: UIView {
         prepare(active ?? timeline.upcoming(after: date))
         guard let cue = active, let bitmap, requested == cue else { hide(); return }
         show(cue, image: bitmap)
-        guard let url = cue.impressionURL else { return }
+        guard cue.impressionURL != nil || planVisibility != nil else { return }
         // Only the two bands of an L can be seen behind the program.
         let hasVisibleArt: Bool
         if cue.format == .l {
@@ -293,9 +337,12 @@ public final class ILOverlayPlayerView: UIView {
             hasVisibleArt = fitted.intersects(visible)
         }
         guard hasVisibleArt else { impressions.hidden(); return }
-        if impressions.presented(cue.id, at: timestamp) {
-            Task { await OverlayArtwork.sendImpression(to: url) }
-        }
+        if impressions.presented(cue.id, at: timestamp) { reportVisible(cue) }
+    }
+
+    private func reportVisible(_ cue: OverlayCue) {
+        planVisibility?(cue.id)
+        if let url = cue.impressionURL { Task { await OverlayArtwork.sendImpression(to: url) } }
     }
 
     func showMidroll(at date: Date) {
@@ -341,10 +388,8 @@ public final class ILOverlayPlayerView: UIView {
     }
 
     private func measureScene(_ cue: OverlayCue, at timestamp: TimeInterval) {
-        guard sceneArtworkVisible, let url = cue.impressionURL else { impressions.hidden(); return }
-        if impressions.presented(cue.id, at: timestamp) {
-            Task { await OverlayArtwork.sendImpression(to: url) }
-        }
+        guard sceneArtworkVisible, cue.impressionURL != nil || planVisibility != nil else { impressions.hidden(); return }
+        if impressions.presented(cue.id, at: timestamp) { reportVisible(cue) }
     }
 
     private func openOffer(_ cue: OverlayCue, offer: SceneOffer, button: UIButton) {
@@ -360,6 +405,7 @@ public final class ILOverlayPlayerView: UIView {
             Task { await OverlayArtwork.sendImpression(to: url) }
         }
         commercePanel = panel
+        panel.layer.zPosition = 3
         addSubview(panel)
         setNeedsLayout()
         setNeedsFocusUpdate()
@@ -385,6 +431,7 @@ public final class ILOverlayPlayerView: UIView {
             Task { await OverlayArtwork.sendImpression(to: url) }
         }
         commercePanel = panel
+        panel.layer.zPosition = 3
         isUserInteractionEnabled = true
         addSubview(panel)
         setNeedsLayout()
@@ -431,7 +478,7 @@ public final class ILOverlayPlayerView: UIView {
         sceneSurface = nil
         sceneArtworkVisible = false
         lastProductFocus = nil
-        isUserInteractionEnabled = false
+        isUserInteractionEnabled = adContainerVisible
         artwork.contents = nil
         artwork.isHidden = true
         layoutLayers()
@@ -441,7 +488,7 @@ public final class ILOverlayPlayerView: UIView {
         guard let commercePanel else { return }
         commercePanel.dispose()
         self.commercePanel = nil
-        isUserInteractionEnabled = sceneSurface != nil
+        isUserInteractionEnabled = sceneSurface != nil || adContainerVisible
         setNeedsFocusUpdate()
     }
 

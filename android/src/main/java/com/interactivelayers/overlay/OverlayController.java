@@ -63,6 +63,11 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private String midrollCreativeId, midrollDeliveryId;
     private boolean secondaryVideo, secondaryVideoAudio;
     private LinearAdDetector adDetector;
+    private final List<OverlayCue> planCues = new java.util.ArrayList<>();
+    private PlanVisibility planVisibility;
+
+    /** Told once per cue when a graphic from the ad plan is drawn on screen. */
+    interface PlanVisibility { void cueVisible(String id); }
 
     /** Reads overlay DATERANGEs from the HLS media playlist already loaded by the player. */
     public static OverlayController attach(PlayerView view) {
@@ -146,6 +151,28 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         update();
     }
 
+    /** With a listener, cues run on content time, the timeline of IL's ad plan. Null restores program time. */
+    void useContentClock(PlanVisibility visibility) {
+        checkMainThread();
+        planVisibility = visibility;
+        update();
+    }
+
+    PlayerView playerView() { return view; }
+
+    void setPlanCues(List<OverlayCue> items) {
+        checkMainThread();
+        planCues.clear();
+        planCues.addAll(items);
+        update();
+    }
+
+    private List<OverlayCue> scheduled() {
+        List<OverlayCue> all = new java.util.ArrayList<>(cues.values());
+        if (!linearAd) all.addAll(planCues);
+        return all;
+    }
+
     /** Enables scene videos on devices with a second available decoder. */
     public void setSceneSecondaryVideoEnabled(boolean enabled) {
         checkMainThread();
@@ -197,6 +224,8 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         viewed.clear();
         lastManifest = null;
         adDetector = null;
+        planCues.clear();
+        planVisibility = null;
         workers.shutdownNow();
     }
 
@@ -236,6 +265,10 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         if (timeline.isEmpty()) return C.TIME_UNSET;
         timeline.getWindow(player.getCurrentMediaItemIndex(), window);
         long position = player.getContentPosition();
+        if (planVisibility != null) {
+            if (midrollCreativeId != null) return System.currentTimeMillis();
+            return position < 0 ? C.TIME_UNSET : position;
+        }
         if (window.windowStartTimeMs == C.TIME_UNSET || position < 0) {
             return midrollCreativeId == null ? C.TIME_UNSET : System.currentTimeMillis();
         }
@@ -251,8 +284,9 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             suspendRendering();
         } else {
             if (sidecar == null) readManifest();
-            else if (player.isPlaying() && polling == null && SystemClock.elapsedRealtime() >= nextPoll) poll(time);
-            OverlayCue cue = OverlayCue.at(cues.values(), time);
+            else if ((planVisibility == null || midrollCreativeId != null) && player.isPlaying() && polling == null
+                    && SystemClock.elapsedRealtime() >= nextPoll) poll(time);
+            OverlayCue cue = OverlayCue.at(scheduled(), time);
             if (!player.isPlaying() && (cue == null || (cue.scene == null && cue.linearCreativeId == null))) {
                 suspendRendering();
             } else {
@@ -387,7 +421,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private boolean currentCueIsActive() {
         if (active == null) return false;
         long time = programTime();
-        OverlayCue selected = time == C.TIME_UNSET ? null : OverlayCue.at(cues.values(), time);
+        OverlayCue selected = time == C.TIME_UNSET ? null : OverlayCue.at(scheduled(), time);
         return selected != null && active.id.equals(selected.id);
     }
 
@@ -426,10 +460,12 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     }
 
     private void measure() {
-        if (active == null || active.impressionUrl == null || measured.contains(active.id)
+        if (active == null || (active.impressionUrl == null && planVisibility == null) || measured.contains(active.id)
                 || !(scene != null ? scene.isDrawnAndVisible() : layer.isDrawnAndVisible()) || !currentCueIsActive()) return;
         String url = active.impressionUrl;
         measured.add(active.id);
+        if (planVisibility != null) planVisibility.cueVisible(active.id);
+        if (url == null) return;
         workers.execute(() -> {
             try { network.impression(url); } catch (IOException ignored) {}
         });

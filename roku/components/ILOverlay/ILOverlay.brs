@@ -9,6 +9,8 @@ sub init()
     initializeCommerce()
     m.polling = false
     m.cues = []
+    m.feedCues = []
+    m.planCues = []
 end sub
 
 function attach(video as Dynamic, sessionId as String) as Boolean
@@ -44,6 +46,8 @@ sub detach()
     setPolling(false)
     clearCreative()
     m.cues = []
+    m.feedCues = []
+    m.planCues = []
     m.anchor = invalid
     m.video = invalid
     m.linearSpot = invalid
@@ -68,10 +72,32 @@ end sub
 
 function setTimeline(sessionId as String, items as Dynamic) as Boolean
     if m.video = invalid or m.sessionId <> sessionId or type(items) <> "roArray" then return false
-    m.cues = normalizeTimeline(items)
+    m.feedCues = normalizeTimeline(items)
+    mergeCues()
     refresh()
     return true
 end function
+
+' Cues from the ad plan live beside the session feed, which replaces only its own list.
+function setPlanCues(sessionId as String, items as Dynamic) as Boolean
+    if m.video = invalid or m.sessionId <> sessionId or type(items) <> "roArray" then return false
+    m.planCues = normalizeTimeline(items)
+    mergeCues()
+    refresh()
+    return true
+end function
+
+function acceptsPlanProduct(item as Dynamic) as Boolean
+    cues = normalizeTimeline([item])
+    if cues.count() <> 1 then return false
+    return cues[0].commerce <> invalid and cues[0].format <> "midroll"
+end function
+
+sub mergeCues()
+    m.cues = []
+    m.cues.append(m.feedCues)
+    m.cues.append(m.planCues)
+end sub
 
 function setManifest(sessionId as String, playlist as String) as Boolean
     if m.video = invalid or m.sessionId <> sessionId then return false
@@ -122,10 +148,11 @@ sub setLinearAd(active as Boolean, identity = invalid as Dynamic)
     end if
     if changed or active <> m.top.linearBreak
         keep = []
-        for each cue in m.cues
+        for each cue in m.feedCues
             if cue.format <> "midroll" then keep.push(cue)
         end for
-        m.cues = keep
+        m.feedCues = keep
+        mergeCues()
         clearCreative()
     end if
     m.linearSpot = nextSpot
@@ -142,6 +169,9 @@ sub refresh()
     if m.video = invalid then return
     playing = m.video.state = "playing"
     presenting = (playing or m.video.state = "paused") and m.video.visible and m.top.visible and m.video.opacity > 0 and m.top.opacity > 0
+    ' During a break of the ad plan the content is stopped and hidden while its ad plays.
+    planBreak = m.top.planBreak and m.top.linearBreak
+    if planBreak then presenting = m.top.visible and m.top.opacity > 0
     enabled = presenting and not m.top.seeking and m.cues.count() > 0
     if m.top.linearBreak then enabled = enabled and m.top.commerceEnabled and m.linearSpot <> invalid
     setPolling(enabled)
@@ -151,6 +181,10 @@ sub refresh()
     end if
 
     nowMs = getProgramTimeMs()
+    if planBreak
+        wall = createObject("roDateTime")
+        nowMs = wall.asSeconds() * 1000# + wall.getMilliseconds()
+    end if
     cue = activeCue(m.cues, nowMs, m.top.linearBreak, m.linearSpot)
     if cue = invalid
         clearCreative()

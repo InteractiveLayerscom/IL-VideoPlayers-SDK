@@ -103,3 +103,7 @@ superficie.setLinearAdBreak(false)
 ```
 
 La superficie muestra **Comprar** durante el intervalo de una entrega cuyo ID y creatividad coinciden con el corte activo. El host sigue reproduciendo el spot y midiendo la impresión VAST. Para los demás cortes seguí usando `isInLinearAdBreak`.
+
+## Plan de anuncios
+
+Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.
