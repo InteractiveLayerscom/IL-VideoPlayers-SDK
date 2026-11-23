@@ -1,4 +1,5 @@
 import { isHttps } from './commerce.mjs';
+import { accentInk } from './tv-shop.mjs';
 
 const types = new Set(['rect', 'ellipse', 'line', 'text', 'image', 'video', 'group', 'product']);
 const properties = ['x', 'y', 'scale', 'rotation', 'opacity'];
@@ -191,6 +192,73 @@ function makeMedia(doc, layer, allowVideo, allowAudio, imageUrl) {
   };
 }
 
+const PAINTED_CTA = /\b(comprar|buy|shop now|ver producto|view product|ver produto)\b/i;
+const CTA_NAME = /\b(cta|bot[oó]n|button|bot[aã]o)\b/i;
+const insideCard = (layer, card) => layer !== card && layer.x >= card.x && layer.y >= card.y &&
+  layer.x + layer.width <= card.x + card.width && layer.y + layer.height <= card.y + card.height;
+
+// A product card whose whole surface is the action shows nothing that says so: it gets a visible Buy control. Not when
+// something inside it is already a button: a layer with its own action, a CTA by name, or painted words like «Comprar».
+function wantsBuyChip(card, scene, products, commerce) {
+  if (!commerce.enabled || card.action !== 'product' || !products[card.productIndex]) return false;
+  const inner = scene.layers.filter(layer => insideCard(layer, card));
+  return inner.length > 0 && !inner.some(layer => layer.action || (!layer.binding && (
+    PAINTED_CTA.test(layer.text ?? '') || CTA_NAME.test(layer.name ?? ''))));
+}
+
+function makeBuyChip(doc, label, brand) {
+  const accent = brand?.accent ?? '#ffffff';
+  const chip = doc.createElement('span');
+  chip.className = 'il-scene-buy';
+  chip.textContent = label;
+  chip.setAttribute('aria-hidden', 'true');
+  Object.assign(chip.style, { position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    boxSizing: 'border-box', pointerEvents: 'none', whiteSpace: 'nowrap', fontWeight: '700', lineHeight: '1', zIndex: '1',
+    fontFamily: 'system-ui, sans-serif', backgroundColor: accent, color: accentInk(accent) });
+  return chip;
+}
+
+// Text that reads as a price, bound or painted: «$100», «USD 10.0», «16,00 US$», «R$ 9,90».
+const PRICE_TEXT = /(?:[$€£¥]|\b(?:USD|EUR|ARS|BRL|MXN|CLP|COP|US\$|R\$))\s?\d|\d[\d.,]*\s?(?:[$€£¥]|\b(?:USD|EUR|ARS|BRL|MXN|CLP|COP)\b|US\$|R\$)/i;
+const CHIP_MIN_WIDTH = 44;
+const CHIP_MIN_FONT = 10;
+
+// Sized from its own label, in a corner of the card where it covers no price, and no other text if it can. It shrinks
+// to fit; when it cannot fit whole without touching the price it is left out, and the whole card stays the button.
+function placeBuyChip(chip, card, texts) {
+  const width = card.clientWidth, height = card.clientHeight;
+  chip.style.display = 'none';
+  if (!width || !height) return;
+  const box = card.getBoundingClientRect();
+  const drawn = texts.map(({ text, price }) => {
+    const range = card.ownerDocument.createRange();
+    range.selectNodeContents(text);
+    const rect = range.getBoundingClientRect();
+    return { price: price || PRICE_TEXT.test(text.textContent), left: rect.left - box.left, right: rect.right - box.left,
+      top: rect.top - box.top, bottom: rect.bottom - box.top };
+  }).filter(rect => rect.right > rect.left);
+  const prices = drawn.filter(rect => rect.price);
+  for (let font = Math.max(CHIP_MIN_FONT, Math.min(18, height * 0.2)); font >= CHIP_MIN_FONT; font -= 2) {
+    Object.assign(chip.style, { display: 'flex', fontSize: font + 'px', width: 'auto', height: 'auto',
+      padding: '0 ' + font * 0.7 + 'px', borderRadius: font * 0.4 + 'px' });
+    const chipWidth = Math.max(CHIP_MIN_WIDTH, Math.ceil(chip.scrollWidth));
+    const chipHeight = Math.ceil(font * 2);
+    const margin = Math.max(2, Math.round(height * 0.06));
+    chip.style.display = 'none';
+    if (chipWidth > width - 2 * margin || chipHeight > height - 2 * margin) continue;
+    const right = width - chipWidth - margin, below = height - chipHeight - margin;
+    // The right side first; on a small card, where the text fills it, over the picture on the left.
+    const spots = [[right, below], [right, margin], [right, (height - chipHeight) / 2], [margin, below], [margin, margin]];
+    const clear = rects => ([x, y]) => !rects.some(rect => rect.left < x + chipWidth && rect.right > x &&
+      rect.top < y + chipHeight && rect.bottom > y);
+    const spot = spots.find(clear(drawn)) ?? spots.find(clear(prices));
+    if (!spot) continue;
+    Object.assign(chip.style, { display: 'flex', left: spot[0] + 'px', top: spot[1] + 'px', width: chipWidth + 'px',
+      height: chipHeight + 'px' });
+    return;
+  }
+}
+
 // All web hosts share the same scene and controls. Legacy stills retain their original path.
 export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, allowVideo, allowAudio, animate }) {
   const doc = stage.ownerDocument;
@@ -286,7 +354,7 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
         node.style.borderStyle = 'solid';
         draw ||= Boolean(node.style.borderColor && !rgbaTransparent(node.style.borderColor));
       }
-      let action;
+      let action, buyChip;
       if ((offer && (layer.action === 'product' || layer.type === 'product') && commerce.enabled) ||
           (layer.action === 'link' && isHttps(layer.url))) {
         const product = layer.action !== 'link';
@@ -296,7 +364,9 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
           boxSizing: 'border-box', pointerEvents: 'auto', background: 'transparent', padding: '0', border: 'none' });
         if (product) {
           action.type = 'button';
-          action.setAttribute('aria-label', offer.title);
+          const chipped = wantsBuyChip(layer, scene, products, commerce);
+          action.setAttribute('aria-label', chipped ? `${commerce.buyLabel(offer)}: ${offer.title}` : offer.title);
+          if (chipped) buyChip = makeBuyChip(doc, commerce.buyLabel(offer), cue.brand);
           action.addEventListener('click', () => {
             if (stillActive()) commerce.open(cue, offer, action, stillActive);
           });
@@ -307,8 +377,9 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
           action.setAttribute('aria-label', layer.name || layer.text || new URL(layer.url).hostname);
         }
         node.appendChild(action);
+        if (buyChip) node.appendChild(buyChip);
       }
-      const entry = { layer, node, media, action, draw, textContent, line };
+      const entry = { layer, node, media, action, draw, textContent, line, buyChip };
       action?.addEventListener('keydown', event => {
         if (tv && (event.key === 'Enter' || event.key === 'OK')) {
           event.preventDefault();
@@ -335,13 +406,25 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
     }
     stage.appendChild(root);
     current = { root, entries, originalFocus: doc.activeElement };
-    // A button under the host's controls could not be pressed: it moves up just enough, with the layers drawn on it.
+    // A web font arriving later changes the label's width: the chips are placed again.
+    doc.fonts?.ready?.then(() => {
+      if (current?.root !== root) return;
+      for (const entry of entries) entry.chipSize = null;
+      update(clock());
+    }).catch?.(() => {});
+    // Whatever sits under the host's controls could not be pressed. A Super or overlay moves up whole, so nothing of it
+    // is clipped; in an L, whose bands are fixed, the button moves up with the layers drawn on it.
     current.liftActions = () => {
       let safe = 0;
       try {
         safe = parseFloat(win.getComputedStyle(stage).getPropertyValue('--il-safe-bottom')) || 0;
       } catch {
         safe = 0;
+      }
+      if (!l) {
+        const over = Math.max(0, root.offsetTop + root.clientHeight - (stage.clientHeight - safe));
+        root.style.translate = safe && over ? `0 ${-over}px` : '';
+        return;
       }
       const scale = root.clientHeight / scene.height;
       for (const entry of entries) {
@@ -441,6 +524,17 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
         current.squeezed = false;
       }
       root.style.display = hasArtwork ? '' : 'none';
+      for (const entry of entries) {
+        if (!entry.buyChip || !root.clientWidth) continue;
+        const inner = entries.filter(other => other.textContent && insideCard(other.layer, entry.layer));
+        // Placed again when the card's size, its texts or where they are drawn change.
+        const size = [entry.node.clientWidth, entry.node.clientHeight, ...inner.map(other => [other.textContent.textContent,
+          other.textContent.style.fontSize, other.node.style.left, other.node.style.top].join(' '))].join('|');
+        if (entry.chipSize === size) continue;
+        entry.chipSize = size;
+        placeBuyChip(entry.buyChip, entry.node, inner.map(other => ({ text: other.textContent,
+          price: /price/i.test(other.layer.binding ?? '') })));
+      }
       if (current.floats) current.floats.style.display = root.style.display;
       if (tv && hasArtwork && !current.didFocus) {
         const first = entries.find(entry => entry.action && entry.visible);

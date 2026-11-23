@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { attachAds } from '../web/ads.mjs';
 import { createSession } from '../web/session.mjs';
 import { normalizeCue } from '../web/cues.mjs';
+import { JSDOM } from 'jsdom';
+import { attachHtmlVideo } from '../web/index.mjs';
 
 const DLV = 'D'.repeat(43);
 const offer = { id: 'p', title: 'Delantal', price: '100.00', currency: 'USD', handoffUrl: 'https://ads.example/commerce/offer/d',
@@ -188,4 +190,40 @@ test('normalizeCue keeps a valid holdUntil only', () => {
   assert.equal(normalizeCue({ ...base, holdUntil: 20 }).holdUntil, 20);
   assert.equal(normalizeCue({ ...base, holdUntil: 5 }).holdUntil, undefined);
   assert.equal(normalizeCue({ ...base, holdUntil: Infinity }).holdUntil, undefined);
+});
+
+function bannerHost(layers) {
+  const { window } = new JSDOM('<div id="s"><video></video></div>', { pretendToBeVisual: true });
+  const doc = window.document, stage = doc.querySelector('#s'), video = doc.querySelector('video');
+  Object.defineProperties(video, { currentTime: { value: 5 }, readyState: { value: 4 }, seeking: { value: false }, ended: { value: false }, paused: { value: false } });
+  const sdk = attachHtmlVideo({ video, stage, timeline: 'media', interval: false, commerce: { locale: 'es' } });
+  sdk.addCue({ id: 'd', format: 'super', start: 0, end: 10000, commerce: undefined, products: [{ ...offer, imageUrl: 'https://a.example/a.jpg' }],
+    scene: { format: 'super', width: 1440, height: 216, durationMs: 10000, layers } });
+  return { sdk, doc };
+}
+const card = { id: 'card', type: 'rect', x: 86, y: 26, width: 1267, height: 164, fill: '#151923', productIndex: 0, action: 'product' };
+const title = { id: 'title', type: 'text', x: 492, y: 39, width: 848, height: 64, text: 'Sartén', binding: 'title', productIndex: 0 };
+
+test('a product card with no button of its own shows a Comprar control and the click opens the product', () => {
+  const r = bannerHost([card, title]);
+  const chip = r.doc.querySelector('[data-layer-id="card"] .il-scene-buy');
+  assert.equal(chip.textContent, 'Comprar');
+  assert.equal(r.doc.querySelector('.il-scene-action').getAttribute('aria-label'), 'Comprar: Delantal');
+  r.doc.querySelector('.il-scene-action').click();
+  assert.ok(r.doc.querySelector('.il-commerce-buy'));
+  r.sdk.destroy();
+});
+
+test('a template with its own button gets no second one', () => {
+  const r = bannerHost([{ ...card, action: undefined }, title, { id: 'cta', type: 'rect', x: 1100, y: 100, width: 200, height: 60, fill: '#fff', action: 'product', productIndex: 0 }]);
+  assert.equal(r.doc.querySelector('.il-scene-buy'), null);
+  r.sdk.destroy();
+});
+
+test('a card with an inner action, a CTA layer or painted Comprar gets no chip', () => {
+  for (const inner of [{ action: 'link', url: 'https://a.example/' }, { name: 'CTA' }, { text: 'Comprar ahora' }]) {
+    const r = bannerHost([card, { id: 'x', type: 'text', x: 1100, y: 100, width: 200, height: 60, text: 'Oferta', ...inner }]);
+    assert.equal(r.doc.querySelector('.il-scene-buy'), null, JSON.stringify(inner));
+    r.sdk.destroy();
+  }
 });

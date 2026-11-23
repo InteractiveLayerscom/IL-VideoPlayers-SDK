@@ -319,4 +319,6 @@ Para mostrar **Comprar** durante un midroll vinculado, leé `creativeId` y `deli
 
 Con un plan de IL y `linear: 'ima'`, `attachAds` hace todo esto solo: reconoce el anuncio vinculado por el `Ad@id` y el `Creative@id` que expone IMA, pide el producto a IL con `commerce.break_url` y retira la tarjeta al terminar, saltear o fallar el anuncio. Requiere `commerce` en el adaptador y no pasar un `sessionId` propio a `attachAds`.
 
+Una tarjeta de producto de escena sin botón propio muestra un control **Comprar** visible; toda la tarjeta sigue siendo clicable. Si la plantilla tiene su botón, no se agrega otro.
+
 Los controles del host se declaran con `insets: { bottom: <px> }` o con la variable CSS `--il-safe-bottom` en la escena. La tarjeta, el overlay y los botones de una escena quedan por encima. Sin declararlo, el SDK mide la barra de Video.js y reserva 48 px si el `<video>` usa `controls`.
