@@ -344,4 +344,6 @@ Con un plan de IL y `linear: 'ima'`, `attachAds` hace todo esto solo: reconoce e
 
 Una tarjeta de producto de escena sin botón propio muestra un control **Comprar** visible; toda la tarjeta sigue siendo clicable. Si la plantilla tiene su botón, no se agrega otro.
 
+Si el espectador abrió el producto durante un anuncio y el anuncio termina, el panel queda abierto y el contenido sigue en pausa hasta que lo cierre, vuelva atrás o reproduzca el contenido. El corte termina a tiempo: `break_end` (o `break_error`) llega como siempre, con `held: true`, para la medición y la analítica; enseguida llega `content_held`, y `content_released` cuando el panel se cierra, y entonces el módulo reanuda el contenido. Un host que reanuda el contenido en `break_end` debe omitirlo cuando `held` es `true` y esperar `content_released`. Si igual lo reanuda, el panel se cierra y la vista sigue como antes, sin estados intermedios. Un corte nuevo cierra un panel retenido de un corte anterior.
+
 Los controles del host se declaran con `insets: { bottom: <px> }` o con la variable CSS `--il-safe-bottom` en la escena. La tarjeta, el overlay y los botones de una escena quedan por encima. Sin declararlo, el SDK mide la barra de Video.js y reserva 48 px si el `<video>` usa `controls`.

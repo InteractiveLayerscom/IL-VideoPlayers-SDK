@@ -153,3 +153,7 @@
 
 .il-tv-shop-trigger { padding:.55em .95em; border:1px solid #eee; border-radius:.35em; background:#171717db; color:#fff; cursor:pointer; }
 .il-tv-shop-trigger[hidden] { display:none; }
+
+/* While an ad plays (a product opened during it, or held over the next ad of a pod), the TV shop's sheet leaves the ad
+   player's Skip, bottom right, reachable. */
+.il-ad-playing .il-tv-shop .il-tv-sheet { bottom: 22%; }
