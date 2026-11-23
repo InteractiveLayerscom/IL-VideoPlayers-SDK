@@ -16,6 +16,11 @@ public final class ILAdPlanIMA: NSObject, ILLinearAdEngine {
     private var continuation: CheckedContinuation<ILLinearAdOutcome, Never>?
     private var onStart: (() -> Void)?
     private var didStart = false
+    private var loaded = false
+    /// After LOADED, an ad whose media does not start fails after this many seconds.
+    static let mediaLoadTimeoutSeconds: TimeInterval = 5
+    /// After the hold, a loaded ad that has not started is given up after this long, even if IMA stays silent.
+    static let loadedStartLimitSeconds: TimeInterval = ILAdPlanPlayer.loadedStartLimitSeconds
     private var guardTask: Task<Void, Never>?
 
     public init(adContainer: UIView, viewController: UIViewController?) {
@@ -44,6 +49,7 @@ public final class ILAdPlanIMA: NSObject, ILLinearAdEngine {
     public func playAd(tagURL: String, adsResponse: String?, deadline: Date, onStart: @escaping () -> Void) async -> ILLinearAdOutcome {
         cancel()
         didStart = false
+        loaded = false
         self.onStart = onStart
         return await withCheckedContinuation { waiting in
             continuation = waiting
@@ -56,7 +62,15 @@ public final class ILAdPlanIMA: NSObject, ILLinearAdEngine {
             guardTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                 guard !Task.isCancelled, let self, !self.didStart else { return }
-                self.finish(.noFill)
+                guard self.loaded else {
+                    self.finish(.noFill)
+                    return
+                }
+                // As on Android, an ad IMA has loaded is not cut by the hold. It still has to start within IMA's media
+                // timeout plus a margin; STARTED cancels this task and the started-ad watchdog takes over.
+                try? await Task.sleep(nanoseconds: UInt64(Self.loadedStartLimitSeconds * 1_000_000_000))
+                guard !Task.isCancelled, !self.didStart else { return }
+                self.finish(.failed)
             }
             loader.requestAds(with: request)
         }
@@ -100,11 +114,13 @@ extension ILAdPlanIMA: IMAAdsLoaderDelegate {
         guard continuation != nil, let loaded = adsLoadedData.adsManager else { return }
         manager = loaded
         loaded.delegate = self
-        loaded.initialize(with: nil)
+        let settings = IMAAdsRenderingSettings()
+        settings.loadVideoTimeout = Self.mediaLoadTimeoutSeconds
+        loaded.initialize(with: settings)
     }
 
     public func adsLoader(_ loader: IMAAdsLoader, failedWith adErrorData: IMAAdLoadingErrorData) {
-        finish(adErrorData.adError.code == .VAST_EMPTY_RESPONSE ? .noFill : .unavailable)
+        finish(Self.noAnswer(adErrorData.adError.code) ? .noFill : .unavailable)
     }
 }
 
@@ -112,7 +128,9 @@ extension ILAdPlanIMA: IMAAdsManagerDelegate {
     public func adsManager(_ adsManager: IMAAdsManager, didReceive event: IMAAdEvent) {
         guard adsManager === manager else { return }
         switch event.type {
-        case .LOADED: adsManager.start()
+        case .LOADED:
+            loaded = true
+            adsManager.start()
         case .STARTED:
             didStart = true
             watchStarted(durationSeconds: event.ad?.duration ?? 0)
@@ -124,7 +142,13 @@ extension ILAdPlanIMA: IMAAdsManagerDelegate {
 
     public func adsManager(_ adsManager: IMAAdsManager, didReceive error: IMAAdError) {
         guard adsManager === manager else { return }
-        finish(didStart ? .failed : error.code == .VAST_EMPTY_RESPONSE ? .noFill : .unavailable)
+        finish(didStart ? .failed : Self.noAnswer(error.code) ? .noFill : .unavailable)
+    }
+
+    /// No usable answer from the ad server: the break goes to its next request instead of asking the same URL again
+    /// for the MP4 path (seen on the Android emulator: a stalled first request spent the whole hold).
+    static func noAnswer(_ code: IMAErrorCode) -> Bool {
+        [.VAST_EMPTY_RESPONSE, .VAST_LOAD_TIMEOUT, .FAILED_TO_REQUEST_ADS, .VAST_TOO_MANY_REDIRECTS].contains(code)
     }
 
     public func adsManagerDidRequestContentPause(_ adsManager: IMAAdsManager) {}

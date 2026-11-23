@@ -398,7 +398,9 @@ final class AdPlanDriver {
         AdPlan.LinearAd identity = spot != null && plan.breakShop ? spot.ad : null;
         boolean running = host.playIma(tag, spot == null ? null : spot.vast, resumeAt, new ImaCallback() {
             @Override public void loaded() {
-                if (walk == current) host.play();
+                if (walk != current) return;
+                current.loaded(token);
+                host.play();
             }
             @Override public void started(long durationMs) {
                 if (walk != current) return;
@@ -432,6 +434,12 @@ final class AdPlanDriver {
     // correlator is the same request to the ad server.
     private void fallBackToMp4(String tag, Fetched spot, long token, AdBreakWalk current) {
         host.cancelIma();
+        // IMA loaded the ad, the hold passed, then IMA failed (for example on its media timeout): nothing new starts,
+        // neither an MP4 nor a second request for the same URL. The break ends.
+        if (current.holdPassed()) {
+            current.noFill(token);
+            return;
+        }
         if (spot != null) {
             if (spot.ad.mediaUrl == null) current.noFill(token);
             else playAd(spot.ad, token);
@@ -527,8 +535,12 @@ final class AdPlanDriver {
         emit(complete ? "break_end" : "break_error", null, cut.id);
         Runnable ready = afterPreroll;
         afterPreroll = null;
-        // A plan closed during a break gives the content back without starting it.
-        if (closing) return;
+        // A plan closed during a break gives the content back without starting it. The MP4 ad left playWhenReady on,
+        // and restored items would start by themselves (seen on the emulator), so the player is paused here.
+        if (closing) {
+            host.pause();
+            return;
+        }
         if (ready != null) ready.run();
         else if (resumePlay) host.play();
     }

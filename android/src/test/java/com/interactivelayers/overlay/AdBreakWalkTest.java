@@ -26,6 +26,30 @@ public final class AdBreakWalkTest {
         assertEquals(Arrays.asList("ask iadserver", "empty iadserver", "ask gam", "empty gam", "end false"), log);
     }
 
+    @Test public void theHoldDoesNotCutAnAdImaHasLoaded() {
+        walk.start();
+        walk.loaded(token);
+        walk.holdExpired();
+        assertFalse(log.contains("end false"));
+        walk.started(token);
+        walk.done(token, true);
+        assertEquals("end true", log.get(log.size() - 1));
+    }
+
+    @Test public void afterTheHoldALoadedAdThatFailsAsksNoMore() {
+        walk.start();
+        walk.loaded(token);
+        walk.holdExpired();
+        walk.done(token, false);
+        assertEquals(Arrays.asList("ask iadserver", "empty iadserver", "end false"), log);
+    }
+
+    @Test public void theHoldStillEndsABreakWithNothingLoaded() {
+        walk.start();
+        walk.holdExpired();
+        assertEquals("end false", log.get(log.size() - 1));
+    }
+
     @Test public void anAdThatFailsBeforeItsFirstFrameFallsThrough() {
         walk.start();
         walk.done(token, false);

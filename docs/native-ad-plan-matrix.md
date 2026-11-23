@@ -2,7 +2,37 @@
 
 Cada plataforma lee el plan de IL con las reglas de `web/ads.mjs`: pedidos ordenados por corte, pacing, ventanas, una impresión y nada dibujado sobre un anuncio. Un plan vencido, de otra versión o con línea de tiempo `stitched` (anuncios insertados en el servidor) no muestra anuncios y el contenido sigue.
 
-**Nada de esto corrió todavía en un dispositivo físico ni contra IMA, Google Mobile Ads (GMA) o RAF reales.** Todo lo que dice "lógica probada" corre en pruebas de escritorio con dobles del reproductor, del SDK de anuncios y de la red. Las pruebas del reproductor de Apple corren en Mac Catalyst. El video, el foco del control remoto, la composición en pantalla y la respuesta real de cada SDK de anuncios siguen sin verificar.
+**Nada de esto corrió todavía en un dispositivo físico.** Todo lo que dice "lógica probada" corre en pruebas de escritorio con dobles del reproductor, del SDK de anuncios y de la red. Las pruebas del reproductor de Apple corren en Mac Catalyst.
+
+**Android teléfono se probó en un emulador** (Android 15, API 35, imagen `google_apis` arm64, Pixel 7 apaisado) con ExoPlayer de Media3 1.6.0, IMA real y Google Mobile Ads real, en una app de demostración:
+
+- Pruebas instrumentadas del SDK: pasan.
+- Mid-roll con IMA y la etiqueta de ejemplo pública de Google: se reproduce y el contenido vuelve a su posición.
+- Orden de pedidos: un primer pedido que no responde pasa al segundo, que se reproduce dentro de la espera de 8 s.
+- Etiqueta de prueba real de iADServer: el VAST leído por el SDK se entrega a IMA y se reproduce. Comprar aparece durante el corte y abre el producto. El feed de la sesión recibió el `sid` del host y la identidad del anuncio.
+- Build de release minificada sin IMA ni GMA: corre y reproduce el corte en MP4.
+- Súper, L y tarjeta de producto: aparecen en sus ventanas, nunca durante el anuncio, y respetan el pacing.
+- Overlay de GMA con el App ID y la unidad de prueba de Google: se muestra en su ventana.
+- Robustez: segundo plano por más de 2 minutos, anuncio adelantado, bloqueo del hilo principal, `close()` durante un corte, lista de dos ítems y un anuncio cuyo medio nunca carga.
+
+**Android TV se probó en un emulador** (Android 14, API 34, imagen `android-tv` arm64, perfil `tv_1080p`), sólo con el control remoto:
+
+- Entrada en el lanzador de TV y pruebas instrumentadas: pasan.
+- Súper, L y tarjeta de producto: aparecen en sus ventanas y nunca durante el anuncio.
+- El Overlay de GMA no se ofrece en TV: `supported()` es falso y no se pide nada.
+- El panel de producto se recorre con el D-pad hasta el QR, y Atrás vuelve paso a paso hasta cerrarlo sin salir de la app.
+- Comprar durante el corte real de iADServer se abre con el control.
+- El foco ya no sale del panel abierto hacia los controles del reproductor de la app.
+
+Límites conocidos en TV, sin cambio en esta versión:
+
+- **La tarjeta y los controles de Media3.** Si la app usa los controles de Media3 del `PlayerView` y están visibles, el D-pad no llega al botón «Ver producto», que queda debajo de esa barra. La tarjeta toma el foco al aparecer, pero si el espectador ya tocó el control, los controles de Media3 se quedan con él. Con una app que usa sus propios controles, el recorrido funciona. Opciones:
+  - que el SDK ofrezca un punto de enganche para el foco;
+  - que la tarjeta se ubique fuera de la barra de controles mientras esté visible;
+  - que la guía de integración pida a la app de TV que resuelva este caso.
+- **Comprar durante un corte no toma el foco solo.** Cuando aparece, hace falta una tecla para llegar a él.
+
+Lo que el emulador no prueba: el decodificador de video de un teléfono o una TV reales, el rendimiento, Fire TV y un control remoto físico. En el emulador, después de un anuncio de IMA en 1280x720 el contenido de 640x360 se dibujó en un cuarto de la pantalla sobre el último cuadro del anuncio. Pasó igual sin la recarga de contenido del SDK y con `TextureView`, con el decodificador `c2.goldfish.h264.decoder` del emulador. Falta confirmar en un teléfono que no pasa.
 
 ## Estado
 
@@ -50,6 +80,11 @@ Cada pedido que el SDK hace a GAM o a iADServer (cortes, gráficas, prelecturas)
 ## Cortes
 
 - **Espera.** Un corte retiene el contenido hasta 8 segundos esperando que empiece un anuncio. En Apple, cada descarga de VAST tiene un límite total de 5 segundos (`timeoutIntervalForResource`), la lectura de iADServer compite con ese plazo y, pasado el plazo, no se pide nada más. En Android, IMA tiene 4 segundos para cargar un VAST, así que queda tiempo para el pedido siguiente.
+- **Sin respuesta, pedido siguiente.** Si IMA vence esperando el VAST, no puede pedirlo, o recibe uno vacío o con demasiados redireccionamientos, el corte pasa al pedido siguiente. No se vuelve a pedir la misma URL para MP4, porque eso gastaba la espera entera, como se vio en el emulador. El camino MP4 queda para un VAST que llegó pero IMA no pudo reproducir. Esto aplica a Android y a Apple; en Apple sólo está verificado en tipos.
+- **Un anuncio que IMA ya cargó no se corta por la espera.** En Android y en Apple, cuando IMA informa `LOADED`, la espera de 8 s ya no termina el corte. Desde ahí, el SDK le da a IMA 5 s para que empiece el video del anuncio (`setMediaLoadTimeoutMs` en Android, `loadVideoTimeout` en Apple). Si el video no empieza, el corte termina. Si IMA no responde, el corte también tiene un límite propio:
+
+- **Android:** el watchdog del corte, de 120 s de tiempo en primer plano, sigue activo después de `LOADED`.
+- **Apple:** si el anuncio no empezó a los 10 s de pasada la espera (los 5 s de IMA más 5 s de margen), el SDK cancela el motor y el corte termina, aunque IMA no informe nada. El reproductor aplica este límite a cualquier motor. Pasada la espera no empieza nada nuevo: ni un MP4, ni otro pedido de la misma URL, ni el pedido siguiente. Un MP4 propio sigue liberándose a los 8 s si no muestra su primer cuadro. En el emulador, la respuesta real de iADServer más el arranque de IMA tardó 7,7 s y 8,1 s. En Apple esta regla sólo está verificada en tipos y en una prueba con un motor simulado.
 - **Un solo pedido por anuncio de iADServer.** El SDK lee el VAST de iADServer para conocer la identidad de Comprar y se lo entrega a IMA como respuesta (`adsResponse` en Apple, URI `data:` en Media3). Si IMA no puede reproducirlo, el MP4 sale de esa misma respuesta. En el código de iADServer de esta máquina (`stable_tags.go`, `storeStableOpportunity`), un mismo `correlator` reutiliza la oportunidad y la identidad de entrega guardadas, así que repetir el pedido tampoco reservaba dos veces.
 - **Watchdog.** Una vez empezado, un anuncio puede durar lo que dice su VAST más 30 segundos (120 segundos si no informa duración), y nunca más de 180 segundos, aunque el VAST declare horas. Sólo cuenta el tiempo con la app en primer plano: una app en segundo plano no reanuda el contenido por su cuenta.
 - **MP4 sin primer cuadro.** En Apple, un MP4 que no muestra su primer cuadro antes del plazo de espera libera el corte, y nada empieza después de ese plazo. En Samsung, un MP4 que no se prepara en 8 segundos termina el corte.
