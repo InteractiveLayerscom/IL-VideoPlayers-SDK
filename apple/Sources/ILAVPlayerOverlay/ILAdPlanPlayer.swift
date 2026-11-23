@@ -9,6 +9,8 @@ public enum ILLinearAdOutcome: Equatable, Sendable { case noFill, completed, fai
 @MainActor
 public protocol ILLinearAdEngine: AnyObject {
     /// `adsResponse` is the VAST this player already fetched for `tagURL`, so the engine need not ask again.
+    /// Call `onStart` when the ad's first frame shows: an engine that has not called it
+    /// `ILAdPlanPlayer.loadedStartLimitSeconds` after `deadline` is cancelled and the content comes back.
     func playAd(tagURL: String, adsResponse: String?, deadline: Date, onStart: @escaping () -> Void) async -> ILLinearAdOutcome
     func cancel()
 }
@@ -20,6 +22,10 @@ public protocol ILDisplayAdSlot: AnyObject {
     func setVisible(_ visible: Bool)
     func clear()
 }
+
+/// Whether the engine reported the ad's start, shared with the break's backstop.
+@MainActor
+private final class StartFlag { var value = false }
 
 /// Plays IL's ad plan on the app's AVPlayer: ordered requests per break, graphics, Overlay and scene products.
 /// Breaks use the linear engine when the host passes one (`ILAdPlanIMA`), and progressive MP4 on the same player
@@ -59,6 +65,10 @@ public final class ILAdPlanPlayer {
     private var breakContent: (item: AVPlayerItem?, at: CMTime)?
     /// How long a break may hold the content before its ad starts. Shortened in tests.
     var holdSeconds: TimeInterval = 8
+    /// Past the hold, an engine's ad that was loaded but has not started is given up after this long: IMA's media
+    /// timeout (5 s) plus a margin. Any engine is cancelled then, so a silent one cannot hold the content.
+    public static let loadedStartLimitSeconds: TimeInterval = 10
+    var startLimitSeconds: TimeInterval = ILAdPlanPlayer.loadedStartLimitSeconds
     /// Whether the app is in the foreground: the MP4 watchdog does not count background time.
     var appActive: () -> Bool = { UIApplication.shared.applicationState == .active }
     /// Replaces MP4 playback in tests.
@@ -351,10 +361,19 @@ public final class ILAdPlanPlayer {
             guard !closed else { return }
             if let engine, Date() < deadline {
                 let spot = plan.breakShop ? fetched?.ad : nil
+                let started = StartFlag()
+                let limit = deadline.addingTimeInterval(startLimitSeconds)
+                let backstop = Task { @MainActor [weak engine] in
+                    let wait = limit.timeIntervalSinceNow
+                    if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+                    if !Task.isCancelled, !started.value { engine?.cancel() }
+                }
                 outcome = await engine.playAd(tagURL: tag, adsResponse: fetched?.vast, deadline: deadline) { [weak self] in
+                    started.value = true
                     guard let self, !self.closed else { return }
                     self.overlay.setLinearAdBreak(true, creativeID: spot?.creativeID, deliveryID: spot?.deliveryID)
                 }
+                backstop.cancel()
                 guard !closed else { return }
             }
             switch outcome {

@@ -18,6 +18,7 @@ import com.google.ads.interactivemedia.v3.api.AdEvent;
  */
 public final class AdPlanIma implements AutoCloseable {
     static final int VAST_LOAD_TIMEOUT_MS = 4000;
+    static final int MEDIA_LOAD_TIMEOUT_MS = 5000;
     private final DefaultMediaSourceFactory sources;
     private final AdViewProvider adViews;
     private final ImaAdsLoader loader;
@@ -34,14 +35,25 @@ public final class AdPlanIma implements AutoCloseable {
         loader = new ImaAdsLoader.Builder(context.getApplicationContext())
                 // Shorter than IMA's default, so an ad server that stalls leaves time for the next request in the break.
                 .setVastLoadTimeoutMs(VAST_LOAD_TIMEOUT_MS)
+                // After LOADED the break is bounded by this: an ad whose media does not start fails here.
+                .setMediaLoadTimeoutMs(MEDIA_LOAD_TIMEOUT_MS)
                 .setAdEventListener(this::onAdEvent)
                 .setAdErrorListener(event -> {
                     AdPlanDriver.ImaCallback current = attempt;
                     if (current == null) return;
-                    if (event.getError().getErrorCode() == AdError.AdErrorCode.VAST_EMPTY_RESPONSE) current.empty();
+                    if (noAnswer(event.getError().getErrorCode())) current.empty();
                     else current.failed();
                 })
                 .build();
+    }
+
+    /**
+     * An error that means the ad server gave no usable answer: the break goes to its next request. Asking the same
+     * URL again for the MP4 path would only spend the hold on a server that already timed out or refused.
+     */
+    static boolean noAnswer(AdError.AdErrorCode code) {
+        return code == AdError.AdErrorCode.VAST_EMPTY_RESPONSE || code == AdError.AdErrorCode.VAST_LOAD_TIMEOUT
+                || code == AdError.AdErrorCode.FAILED_TO_REQUEST_ADS || code == AdError.AdErrorCode.VAST_TOO_MANY_REDIRECTS;
     }
 
     private void onAdEvent(AdEvent event) {

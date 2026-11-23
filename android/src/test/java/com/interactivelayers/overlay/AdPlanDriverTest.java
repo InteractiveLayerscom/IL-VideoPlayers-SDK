@@ -174,6 +174,26 @@ public final class AdPlanDriverTest {
         assertEquals("break_error", host.events.get(host.events.size() - 1));
     }
 
+    @Test public void aLoadedAdThatFailsAfterTheHoldStartsNothingNew() throws Exception {
+        host.replies.put(GAM, LINEAR);
+        started(base().put("cuts", new JSONArray().put(cut("pre", 0, GAM, GAM + "&b=2"))));
+        AdPlanDriver.ImaCallback ima = host.ima;
+        ima.loaded();
+        host.fire(8000);
+        assertFalse("a loaded ad is not cut by the hold", ready);
+        ima.failed();
+        assertTrue(host.fetched.isEmpty());
+        assertFalse(host.calls.stream().anyMatch(call -> call.startsWith("mp4")));
+        assertEquals("no second request after the hold", 1, host.tags.size());
+        assertTrue(ready);
+        assertEquals("break_error", host.events.get(host.events.size() - 1));
+    }
+
+    @Test public void imaMediaHasItsOwnBoundAfterLoaded() {
+        assertEquals(5000, AdPlanIma.MEDIA_LOAD_TIMEOUT_MS);
+        assertTrue(AdPlanIma.VAST_LOAD_TIMEOUT_MS + AdPlanIma.MEDIA_LOAD_TIMEOUT_MS < 120000);
+    }
+
     @Test public void aMainThreadStallIsNotAScrub() throws Exception {
         host.imaAvailable = false;
         host.replies.put(GAM, LINEAR);
@@ -219,6 +239,9 @@ public final class AdPlanDriverTest {
         driver.close();
         assertTrue(host.calls.contains("restore 30400"));
         assertFalse(host.calls.contains("play"));
+        // The restored items must not start on the playWhenReady the MP4 ad left on.
+        assertEquals("pause", host.calls.get(host.calls.size() - 1));
+        assertTrue(host.calls.indexOf("pause") > host.calls.indexOf("restore 30400"));
     }
 
     @Test public void theFetchedIadServerVastIsWhatImaAndMp4Play() throws Exception {

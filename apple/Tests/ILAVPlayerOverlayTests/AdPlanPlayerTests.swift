@@ -41,11 +41,27 @@ private final class FakeEngine: ILLinearAdEngine {
     var tags: [String] = []
     var responses: [String?] = []
     var duringAd: (() -> Void)?
+    /// Seconds the engine takes before answering (an ad IMA loaded, then failed on its media).
+    var answerAfter: TimeInterval = 0
+    var silentAfterLoad = false
+    var startAfter: TimeInterval = 0
+    var playFor: TimeInterval = 0
+    var cancelled = false
+    private var pending: CheckedContinuation<ILLinearAdOutcome, Never>?
     init(_ outcomes: [ILLinearAdOutcome]) { self.outcomes = outcomes }
 
     func playAd(tagURL: String, adsResponse: String?, deadline: Date, onStart: @escaping () -> Void) async -> ILLinearAdOutcome {
         tags.append(tagURL)
         responses.append(adsResponse)
+        // Loaded, then neither STARTED nor an error: only cancel() ends it.
+        if silentAfterLoad { return await withCheckedContinuation { pending = $0 } }
+        if startAfter > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(startAfter * 1_000_000_000))
+            onStart()
+            try? await Task.sleep(nanoseconds: UInt64(playFor * 1_000_000_000))
+            return cancelled ? .failed : .completed
+        }
+        if answerAfter > 0 { try? await Task.sleep(nanoseconds: UInt64(answerAfter * 1_000_000_000)) }
         let outcome = outcomes.removeFirst()
         if outcome != .noFill {
             onStart()
@@ -53,7 +69,12 @@ private final class FakeEngine: ILLinearAdEngine {
         }
         return outcome
     }
-    func cancel() {}
+    func cancel() {
+        cancelled = true
+        let waiting = pending
+        pending = nil
+        waiting?.resume(returning: .failed)
+    }
 }
 
 @MainActor
@@ -258,6 +279,53 @@ final class AdPlanPlayerTests: XCTestCase {
         XCTAssertEqual(played?.absoluteString, "https://c.example/a.mp4")
         XCTAssertEqual(StubNetwork.seen.first, engine.tags.first)
         XCTAssertEqual(events.last?.type, "break_end")
+        player.stop()
+    }
+
+    func testALoadedAdThatNeverStartsIsGivenUpAtTheBound() async throws {
+        StubNetwork.reset([:])
+        let engine = FakeEngine([])
+        engine.silentAfterLoad = true
+        let (player, overlay) = try make(["cuts": [["id": "pre", "at": 0, "tag_url": gam]]], engine: engine)
+        player.holdSeconds = 0.2
+        player.startLimitSeconds = 0.4
+        let begun = Date()
+        await player.start()
+        let took = Date().timeIntervalSince(begun)
+        XCTAssertGreaterThanOrEqual(took, 0.55, "not before the hold plus the start limit")
+        XCTAssertLessThan(took, 2, "a silent engine cannot hold the content")
+        XCTAssertTrue(engine.cancelled)
+        XCTAssertEqual(events.last?.type, "break_error")
+        XCTAssertFalse(overlay.isInLinearAdBreak, "the content is back")
+        player.stop()
+    }
+
+    func testAnAdThatStartsInsideTheBoundIsNotCut() async throws {
+        StubNetwork.reset([:])
+        let engine = FakeEngine([])
+        engine.startAfter = 0.4
+        engine.playFor = 0.6
+        let (player, _) = try make(["cuts": [["id": "pre", "at": 0, "tag_url": gam]]], engine: engine)
+        player.holdSeconds = 0.2
+        player.startLimitSeconds = 0.4
+        await player.start()
+        XCTAssertFalse(engine.cancelled, "a started ad plays past the bound")
+        XCTAssertEqual(events.last?.type, "break_end")
+        player.stop()
+    }
+
+    func testAnAdThatFailsAfterTheHoldStartsNothingNew() async throws {
+        StubNetwork.reset(["pubads.g.doubleclick.net": (200, linearVast)])
+        let engine = FakeEngine([.unavailable, .completed])
+        engine.answerAfter = 0.5
+        let (player, _) = try make(["cuts": [["id": "pre", "at": 0, "requests": [
+            ["provider": "gam", "tag_url": gam], ["provider": "gam", "tag_url": gam + "&b=2"]]]]], engine: engine)
+        player.holdSeconds = 0.2
+        player.playMedia = { _, _ in XCTFail("no MP4 after the hold"); return true }
+        await player.start()
+        XCTAssertTrue(StubNetwork.seen.isEmpty, "the same URL is not asked again after the hold")
+        XCTAssertEqual(engine.tags.count, 1, "no second request after the hold")
+        XCTAssertEqual(events.last?.type, "break_error")
         player.stop()
     }
 

@@ -14,7 +14,7 @@ final class AdBreakWalk {
     private final Engine engine;
     private int index = -1;
     private long token;
-    private boolean started, over;
+    private boolean started, over, loaded, holdPassed;
 
     AdBreakWalk(List<AdPlan.Request> requests, Engine engine) {
         this.requests = requests;
@@ -43,11 +43,23 @@ final class AdBreakWalk {
     void noFill(long answer) {
         if (over || answer != token || started) return;
         engine.noFill(requests.get(index));
-        next();
+        loaded = false;
+        // Past the hold no further request is started.
+        if (holdPassed) finish(false);
+        else next();
     }
 
     void started(long answer) {
         if (!over && answer == token) started = true;
+    }
+
+    /**
+     * IMA has this request's ad loaded and is starting it. The hold no longer ends the break: IMA's own media timeout
+     * and the ad watchdog bound what follows. (On the emulator, iADServer's real answer plus IMA's start took 7.7 s
+     * and 8.1 s, so the 8 s hold cut an ad that was already on its way.)
+     */
+    void loaded(long answer) {
+        if (!over && answer == token) loaded = true;
     }
 
     void done(long answer, boolean complete) {
@@ -57,7 +69,11 @@ final class AdBreakWalk {
     }
 
     /** Content may wait this long for an ad. An ad already playing is not interrupted. */
+    /** Whether the hold has passed: from then on nothing new may start in this break. */
+    boolean holdPassed() { return holdPassed; }
+
     void holdExpired() {
-        if (!started) finish(false);
+        holdPassed = true;
+        if (!started && !loaded) finish(false);
     }
 }

@@ -47,6 +47,22 @@ final class TvShopView extends LinearLayout {
 
     void cover() { focusDimension = host.offer.dimensions.isEmpty() ? -1 : 0; pages.clear(); show(Stage.COVER); }
 
+    // The remote stays inside the open panel. Without this, a D-pad move with no target in the panel went to the
+    // nearest focusable view of the host, such as the PlayerView's time bar (seen on the Android TV emulator).
+    @Override public View focusSearch(View focused, int direction) {
+        View inside = keepInside(this, focused, direction);
+        return inside != null ? inside : super.focusSearch(focused, direction);
+    }
+
+    /** Null when the panel is hidden or collapsed: the normal focus search applies then. */
+    static View keepInside(android.view.ViewGroup root, View focused, int direction) {
+        for (View view = root; view != null; view = view.getParent() instanceof View ? (View) view.getParent() : null) {
+            if (view.getVisibility() != VISIBLE) return null;
+        }
+        View next = android.view.FocusFinder.getInstance().findNextFocus(root, focused, direction);
+        return next != null ? next : focused;
+    }
+
     boolean galleryOpen() { return stage == Stage.GALLERY; }
 
     private void show(Stage next) {
