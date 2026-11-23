@@ -478,5 +478,6 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     stage.appendChild(shell);
     if (trigger) openPanel();
   }
-  return { show, hide, open: openOffer, isOpen, lastAction, enabled: Boolean(options) };
+  const buyLabel = offer => copy[commerceLocale(options?.locale ?? offer?.locale)][3];
+  return { show, hide, open: openOffer, isOpen, lastAction, buyLabel, enabled: Boolean(options) };
 }

@@ -143,8 +143,8 @@ for (const kind of ['HTML5', 'Video.js', 'AVPlay', 'Shaka']) {
       assert.equal(layer('second-image').querySelector('img').src, 'https://ads.example/cap.png');
       assert.equal(layer('second-price').textContent, '16,00 US$');
 
-      const first = root.querySelector('button[aria-label="Botines"]');
-      const second = root.querySelector('button[aria-label="Gorra"]');
+      const first = root.querySelector('button[aria-label$="Botines"]');
+      const second = root.querySelector('button[aria-label$="Gorra"]');
       first.focus();
       first.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
       assert.equal(doc.activeElement, second);
