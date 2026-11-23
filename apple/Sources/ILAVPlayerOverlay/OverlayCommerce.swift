@@ -80,6 +80,9 @@ struct OverlayCommerce: Equatable, Decodable {
         self.price = price
     }
 
+    /// Shopify's lone "Default Title" variant of a product without options, which the panels never show (web/tv-shop.mjs:196, :304).
+    var defaultVariantOnly: Bool { variants.count == 1 && variants[0].label == "Default Title" }
+
     func previousPrice(for variant: Variant) -> Decimal? {
         guard let previous = variant.previousPrice ?? (variant.price == price ? previousPrice : nil),
               previous > variant.price else { return nil }

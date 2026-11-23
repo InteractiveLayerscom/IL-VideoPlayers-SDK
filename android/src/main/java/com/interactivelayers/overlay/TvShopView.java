@@ -39,7 +39,9 @@ final class TvShopView extends LinearLayout {
     private String l(String en, String es, String pt) { return host.l(en, es, pt); }
     private int dp(int value) { return host.dp(value); }
     private String price() { return host.money.format(host.offer.variants.get(host.selection).price); }
+    /** Null for a product without options: the cart shows no variant line, as web does. */
     private String selection() {
+        if (host.offer.defaultVariantOnly()) return null;
         OverlayCommerce.Variant variant = host.offer.variants.get(host.selection);
         if (variant.options.isEmpty()) return variant.label;
         return android.text.TextUtils.join(" · ", variant.options.values());
@@ -122,9 +124,10 @@ final class TvShopView extends LinearLayout {
                     hero(true);
                     if (host.offer.vendor != null) text(body, host.offer.vendor, 13, false);
                     text(body, host.offer.title, 20, true);
-                    boolean range = host.offer.minimumPrice.compareTo(host.offer.maximumPrice) != 0;
+                    // As web: "Desde" and the lowest price when the available variants cost different amounts.
+                    boolean range = host.offer.hasPriceRange();
                     String coverPrice = host.money.format(host.offer.minimumPrice);
-                    if (range) coverPrice += " – " + host.money.format(host.offer.maximumPrice);
+                    if (range) coverPrice = l("From", "Desde", "A partir de") + " " + coverPrice;
                     text(body, coverPrice, 22, true);
                     if (!range) previousPrice();
                     if (host.offer.description != null) {
@@ -202,11 +205,13 @@ final class TvShopView extends LinearLayout {
         String url = productPhoto();
         if (url == null && host.fallback == null) return;
         FrameLayout art = new FrameLayout(getContext());
-        int height = Math.round(playerHeight() * (stage == Stage.COVER ? .33f : .25f));
+        // web/tv-shop.css:47, :53: 33% of the player's height on the cover, 26% on details. Web's QR step has no hero
+        // (only a thumbnail), so that step keeps its earlier 25%; the cart step draws no hero.
+        int height = Math.round(playerHeight() * (stage == Stage.COVER ? .33f : stage == Stage.DETAIL ? .26f : .25f));
         art.addView(host.photo(url, 720, true), new FrameLayout.LayoutParams(-1, -1));
         body.addView(art, new LayoutParams(-1, height));
         if (galleryLink) {
-            photosButton = host.button(l("View photos", "Ver fotos", "Ver fotos"), () -> {
+            photosButton = host.button(galleryLabel(), () -> {
                 galleryOrigin = stage;
                 show(Stage.GALLERY);
             }, false);
@@ -215,8 +220,15 @@ final class TvShopView extends LinearLayout {
         }
     }
 
+    /** "Ampliar foto" when the viewer it opens shows one photo, "Ver fotos" for several (web/tv-shop.mjs:100). */
+    String galleryLabel() {
+        return host.gallery().size() > 1 ? l("View photos", "Ver fotos", "Ver fotos")
+                : l("Enlarge photo", "Ampliar foto", "Ampliar foto");
+    }
+
     private void options() {
         OverlayCommerce offer = host.offer;
+        if (offer.defaultVariantOnly()) return;
         if (offer.dimensions.isEmpty()) {
             List<String> labels = new ArrayList<>();
             for (OverlayCommerce.Variant variant : offer.variants) labels.add(variant.label);
@@ -263,7 +275,9 @@ final class TvShopView extends LinearLayout {
         button.setEnabled(enabled);
         LayoutParams params = host.spaced(6);
         addView(button, params);
-        if (enabled && stage != Stage.DETAIL) focus = button;
+        // On the details step the selected option keeps focus; without an option row the action takes it, as web's
+        // fallback to 'cart' (web/tv-shop.mjs:358), so one OK press never leaves through the back arrow.
+        if (enabled && (stage != Stage.DETAIL || host.offer.defaultVariantOnly())) focus = button;
     }
 
     private void cart() {
@@ -274,7 +288,7 @@ final class TvShopView extends LinearLayout {
         detail.setOrientation(VERTICAL);
         item.addView(detail, new LayoutParams(0, -2, 1));
         text(detail, host.offer.title, 15, true);
-        text(detail, selection(), 13, false);
+        if (selection() != null) text(detail, selection(), 13, false);
         text(detail, l("1 item", "1 unidad", "1 unidade"), 13, false);
         LinearLayout total = host.row();
         addView(total, host.spaced(6));
@@ -286,7 +300,7 @@ final class TvShopView extends LinearLayout {
     private void handoffBody() {
         hero(false);
         text(body, host.offer.title, 16, true);
-        text(body, price() + "   " + selection(), 15, true);
+        text(body, selection() == null ? price() : price() + "   " + selection(), 15, true);
         if (code != null) {
             ImageView qr = new ImageView(getContext());
             qr.setContentDescription(host.copy[3]);

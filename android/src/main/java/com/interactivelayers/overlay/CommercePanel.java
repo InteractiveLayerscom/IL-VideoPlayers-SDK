@@ -287,8 +287,9 @@ final class CommercePanel extends LinearLayout {
             hero.addView(shot, thumb);
         }
         hero.addView(label(money.format(offer.variants.get(selection).price), 18, true));
-        body.addView(label(copy[7], 13, false), spaced(8));
-        int count = offer.variants.size();
+        // A product without options shows no variant row: the panel goes straight to Buy (web/tv-shop.mjs:196).
+        int count = offer.defaultVariantOnly() ? 0 : offer.variants.size();
+        if (count > 0) body.addView(label(copy[7], 13, false), spaced(8));
         LinearLayout pair = null;
         for (int i = phonePage * 20; i < Math.min(count, (phonePage + 1) * 20); i++) {
             if (i % 2 == 0) { pair = row(); body.addView(pair, spaced(5)); }
