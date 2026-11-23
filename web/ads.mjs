@@ -407,7 +407,8 @@ export function attachAds({
       return null;
     }
   })();
-  const breakShop = { token: 0, id: null, abort: null, spot: false };
+  // kept: the card of an ad that ended while its product was open; deferred: the end of the break, run once it closes.
+  const breakShop = { token: 0, id: null, abort: null, spot: false, kept: null, deferred: null, poll: null };
   const scenes = valid.scenes;
   const unit = scenes?.overlay?.ad_unit;
   const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
@@ -799,7 +800,8 @@ export function attachAds({
     watch();
     if (time == null) return;
     schedule(time / 1000);
-    if (!played || breakOn()) return;
+    // Nothing new is asked while a product held from a break is open over the paused content.
+    if (!played || breakOn() || breakShop.deferred) return;
     // One product request at a time and one card at a time, asked `lead_ms` ahead.
     if (shopOn && !productController && !productLive(time)) {
       const product = shopWindows.find((window) => !products.has(window.id) &&
@@ -820,9 +822,9 @@ export function attachAds({
     if (next) void request(next);
   }
 
-  const emitBreak = (type, cut) => {
+  const emitBreak = (type, cut, extra) => {
     try {
-      onEvent?.({ type, cut: cut?.id ?? null });
+      onEvent?.({ type, cut: cut?.id ?? null, ...extra });
     } catch {
       // Diagnostics must never break playback.
     }
@@ -876,8 +878,49 @@ export function attachAds({
     breakShop.token++;
     breakShop.abort?.abort();
     breakShop.abort = null;
-    if (breakShop.id) session.removeCue(breakShop.id);
+    // A viewer who opened the product keeps it when the ad ends: the purchase is not taken away mid-choice.
+    if (breakShop.id && !disposed && session.holding?.(breakShop.id)) keepOpen(breakShop.id);
+    else if (breakShop.id) session.removeCue(breakShop.id);
     breakShop.id = null;
+  }
+  function keepOpen(id) {
+    if (breakShop.kept && breakShop.kept !== id) session.removeCue(breakShop.kept);
+    breakShop.kept = id;
+    breakShop.poll ??= setInterval(checkKept, 250);
+  }
+  // Once the viewer closes the product (or goes back), its card goes and the content held for it resumes.
+  function checkKept() {
+    if (!disposed && breakShop.kept && session.holding?.(breakShop.kept)) return;
+    releaseHeld(true);
+  }
+  // The end of the held time: by the viewer closing the product (resume), by the host or the viewer playing the
+  // content, or by a new break (no resume: content is already moving, or the new break owns it).
+  function releaseHeld(resumeContent) {
+    clearInterval(breakShop.poll);
+    breakShop.poll = null;
+    video.removeEventListener('play', hostPlayed);
+    if (breakShop.kept) session.removeCue(breakShop.kept);
+    breakShop.kept = null;
+    const deferred = breakShop.deferred;
+    breakShop.deferred = null;
+    if (!deferred || disposed) return;
+    emitBreak('content_released', deferred.cut);
+    if (resumeContent) deferred.resume();
+  }
+  function hostPlayed() {
+    if (breakShop.deferred) releaseHeld(false);
+  }
+  // The break ends on time: its event, the session leaving the break. Only resuming the content waits for a product
+  // the viewer has open; the host is told (`held` on the event, then `content_held` and `content_released`).
+  function finishBreak(type, cut, resumeContent) {
+    clearBreakShop();
+    const held = !disposed && !!breakShop.kept;
+    emitBreak(type, cut, held ? { held: true } : undefined);
+    const wasOpen = endBreak();
+    if (!held) return resumeContent(wasOpen);
+    breakShop.deferred = { cut, resume: () => resumeContent(wasOpen) };
+    emitBreak('content_held', cut);
+    video.addEventListener('play', hostPlayed);
   }
   // One ad of the break started: the session is told which, and the card of exactly this delivery is asked for.
   async function shopAdStarted(event, cut, request) {
@@ -939,6 +982,7 @@ export function attachAds({
     clearTimeout(ima.watchdog);
     if (!inBreak) return false;
     inBreak = false;
+    stage?.classList?.remove('il-ad-playing');
     session.setLinearAd(false);
     return true;
   }
@@ -968,9 +1012,14 @@ export function attachAds({
     const playing = inBreak;
     const cut = playing ? ima.cut ?? cutOf(null) : failedCut(null);
     ima.cut = null;
-    if (endBreak()) resume();
-    if (!playing && (!cut || failedCuts.has(cut.id))) return;
-    if (cut) failedCuts.add(cut.id);
+    if (playing) {
+      if (cut) failedCuts.add(cut.id);
+      return finishBreak('break_error', cut, (wasOpen) => {
+        if (wasOpen) resume();
+      });
+    }
+    if (!cut || failedCuts.has(cut.id)) return;
+    failedCuts.add(cut.id);
     emitBreak('break_error', cut);
   }
   // With ad rules IMA reports a break it could not fetch, or an empty one, without AD_ERROR.
@@ -1030,12 +1079,13 @@ export function attachAds({
     const held = wf.held;
     wf.held = false;
     destroyManager();
-    emitBreak(type, cut);
     // Content resumes only if a break was open or the module itself held it for the pre-roll.
     const viewerPaused = wf.viewerPaused;
     wf.viewerPaused = false;
     // A viewer who paused while the module held the content is not overruled when the break ends.
-    if ((endBreak() && !viewerPaused) || held) resumeWalk(cut);
+    finishBreak(type, cut, (wasOpen) => {
+      if ((wasOpen && !viewerPaused) || held) resumeWalk(cut);
+    });
   }
   // The module's resume runs outside a gesture; a refused play() is reported so the host can show its control.
   function resumeWalk(cut) {
@@ -1147,8 +1197,11 @@ export function attachAds({
   }
   function beginBreak(cut) {
     if (inBreak) return;
+    // A product still held from an earlier break gives way: its deferred end never touches this one.
+    if (breakShop.deferred || breakShop.kept) releaseHeld(false);
     video.pause?.();
     inBreak = true;
+    stage?.classList?.add('il-ad-playing');
     updateOverlay(now());
     session.setLinearAd(true);
     emitBreak('break_start', cut);
@@ -1266,6 +1319,8 @@ export function attachAds({
         manager.addEventListener(sdk.AdErrorEvent.Type.AD_ERROR, adError);
         manager.addEventListener(sdk.AdEvent.Type.CONTENT_PAUSE_REQUESTED, (e) => {
           if (disposed) return;
+          if (breakShop.deferred || breakShop.kept) releaseHeld(false);
+          stage?.classList?.add('il-ad-playing');
           ima.cut = cutOf(e);
           if (ima.cut) startedCuts.add(ima.cut.id);
           video.pause?.();
@@ -1298,9 +1353,7 @@ export function attachAds({
           if (disposed) return;
           const cut = ima.cut;
           ima.cut = null;
-          endBreak();
-          emitBreak('break_end', cut);
-          resume();
+          finishBreak('break_end', cut, () => resume());
         });
         startManager();
       });
@@ -1415,6 +1468,8 @@ export function attachAds({
     destroy() {
       if (disposed) return;
       disposed = true;
+      breakShop.deferred = null;
+      releaseHeld(false);
       clearWalkTimers();
       wf.token++;
       // The host loses the module: content the module was holding is given back, without an event.

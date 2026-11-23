@@ -18,7 +18,7 @@ const planWith = (commerce = {}) => ({ version: 1, asset_id: 'a', duration: 60, 
 const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
 const adEvent = (id, creative = 'cr1') => ({ getAd: () => ({ getAdId: () => id, getCreativeId: () => creative }) });
 
-async function rig({ plan = planWith(), answer, sessionId, muted = false, volume = 0.6, customPlayback = false } = {}) {
+async function rig({ plan = planWith(), answer, sessionId, muted = false, volume = 0.6, customPlayback = false, held = new Set() } = {}) {
   const listeners = {};
   const volumes = [];
   const manager = { addEventListener(type, fn) { (listeners[type] ??= []).push(fn); }, init() {}, start() { volumes.push('start'); }, destroy() {}, resize() {},
@@ -34,9 +34,11 @@ async function rig({ plan = planWith(), answer, sessionId, muted = false, volume
     AdsRequest: class {},
   } };
   const video = new EventTarget();
-  Object.assign(video, { muted, volume, currentTime: 3, paused: false, ended: false, clientWidth: 640, clientHeight: 360, pause() {}, play: async () => {} });
+  let plays = 0;
+  Object.assign(video, { muted, volume, currentTime: 3, paused: false, ended: false, clientWidth: 640, clientHeight: 360, pause() {}, play: async () => { plays++; } });
   const linear = [], adds = [], removed = [], asked = [];
-  const session = { commerce: { locale: 'es' }, sceneFeatures: [],
+  const events = [], eventObjects = [];
+  const session = { commerce: { locale: 'es' }, sceneFeatures: [], holding: (id) => held.has(id),
     setLinearAd(value, identity) { linear.push([value, identity]); },
     addCue(cue) { adds.push(cue); return true; }, removeCue(id) { removed.push(id); return true; } };
   const fetchImpl = async (url) => {
@@ -46,12 +48,12 @@ async function rig({ plan = planWith(), answer, sessionId, muted = false, volume
     return { status: body ? 200 : 204, ok: true, json: async () => body };
   };
   const ads = attachAds({ session, video, plan, fetchImpl, planOrigin: 'https://il.example', linear: 'ima', adContainer: {},
-    loadScript: async () => {}, sessionId });
+    loadScript: async () => {}, sessionId, onEvent: (event) => { events.push(event.type); eventObjects.push(event); } });
   ads.start();
   await flush();
   const fire = async (type, event = {}) => { for (const fn of listeners[type] ?? []) fn(event); await flush(); };
   await fire('CONTENT_PAUSE_REQUESTED');
-  return { ads, fire, linear, adds, removed, asked, video, volumes, done() { ads.destroy(); globalThis.google = previous; } };
+  return { ads, fire, linear, adds, removed, asked, video, volumes, held, events, eventObjects, plays: () => plays, done() { ads.destroy(); globalThis.google = previous; } };
 }
 
 test('a shop-linked ad asks IL once with its identity, shows the card and takes it away when it ends', async () => {
@@ -226,4 +228,159 @@ test('a card with an inner action, a CTA layer or painted Comprar gets no chip',
     assert.equal(r.doc.querySelector('.il-scene-buy'), null, JSON.stringify(inner));
     r.sdk.destroy();
   }
+});
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('an open product outlives the end of its ad: the break waits for the viewer, then content resumes', async () => {
+  const r = await rig();
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
+  r.held.add(DLV);                                  // the viewer opened the product
+  await r.fire('COMPLETE');
+  await r.fire('CONTENT_RESUME_REQUESTED');
+  assert.deepEqual(r.removed, []);                  // the card stays
+  assert.deepEqual(r.events.slice(-2), ['break_end', 'content_held']);   // the break ends on time, held
+  assert.equal(r.eventObjects.find((event) => event.type === 'break_end').held, true);
+  assert.deepEqual(r.linear.at(-1), [false, undefined]);
+  const plays = r.plays();
+  await wait(300);
+  assert.equal(r.plays(), plays);                   // nothing resumes while the viewer chooses
+  r.held.delete(DLV);                               // closed
+  await wait(300);
+  assert.deepEqual(r.removed, [DLV]);
+  assert.equal(r.events.filter((type) => type === 'break_end').length, 1);
+  assert.equal(r.events.at(-1), 'content_released');
+  assert.ok(r.plays() > plays);
+  assert.equal(r.asked.length, 1);                  // no second request
+  r.done();
+});
+
+test('a product never opened changes nothing: the card goes and the break ends at once', async () => {
+  const r = await rig();
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
+  await r.fire('COMPLETE');
+  await r.fire('CONTENT_RESUME_REQUESTED');
+  assert.deepEqual(r.removed, [DLV]);
+  assert.equal(r.events.filter((type) => type === 'break_end').length, 1);
+  assert.ok(!r.events.includes('content_held') && r.eventObjects.find((event) => event.type === 'break_end').held === undefined);
+  r.done();
+});
+
+test('a skipped ad keeps an open product, and in a pod it stays over the next ad', async () => {
+  const r = await rig();
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
+  r.held.add(DLV);
+  await r.fire('SKIPPED');
+  assert.deepEqual(r.removed, []);
+  const other = 'F'.repeat(43);
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${other}`));   // the next ad of the pod, with its own shop
+  assert.deepEqual(r.removed, []);
+  assert.equal(r.adds.at(-1).id, other);
+  await r.fire('COMPLETE');
+  assert.deepEqual(r.removed, [other]);            // the second card was never opened
+  await r.fire('CONTENT_RESUME_REQUESTED');
+  assert.deepEqual(r.events.slice(-2), ['break_end', 'content_held']);
+  r.held.delete(DLV);
+  await wait(300);
+  assert.ok(r.removed.includes(DLV) && r.events.at(-1) === 'content_released');
+  r.done();
+});
+
+test('destroy releases a held product', async () => {
+  const r = await rig();
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
+  r.held.add(DLV);
+  await r.fire('CONTENT_RESUME_REQUESTED');
+  assert.equal(r.events.at(-1), 'content_held');
+  r.done();
+  assert.ok(r.removed.includes(DLV));
+});
+
+test('a host that plays the content itself releases the held product without a second resume', async () => {
+  const r = await rig();
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
+  r.held.add(DLV);
+  await r.fire('CONTENT_RESUME_REQUESTED');
+  const plays = r.plays();
+  r.video.dispatchEvent(new Event('play'));
+  assert.ok(r.removed.includes(DLV) && r.events.at(-1) === 'content_released');
+  r.held.delete(DLV);
+  await wait(300);
+  assert.equal(r.plays(), plays);
+  r.done();
+});
+
+test('a later break drops the deferred end of an earlier held product and is never closed by it', async () => {
+  const r = await rig();
+  await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
+  r.held.add(DLV);
+  await r.fire('CONTENT_RESUME_REQUESTED');
+  await r.fire('CONTENT_PAUSE_REQUESTED');           // the next break starts while the panel is still open
+  assert.ok(r.removed.includes(DLV) && r.events.includes('content_released'));
+  const ends = r.events.filter((type) => type === 'break_end').length;
+  const plays = r.plays();
+  r.held.delete(DLV);
+  await wait(300);
+  assert.equal(r.events.filter((type) => type === 'break_end').length, ends);   // nothing closed the new break
+  assert.equal(r.plays(), plays);
+  assert.deepEqual(r.linear.at(-1), [true, undefined]);
+  r.done();
+});
+
+
+test('the real session keeps a held card on screen across the end of the break, and drops it once closed', () => {
+  let open = false;
+  const shown = [];
+  const renderer = { show(cue) { shown.push(cue.id); }, hide() { shown.length = 0; }, visible: () => true, holding: () => open };
+  const session = createSession({ clock: () => 3000, playing: () => true, renderer, interval: false, commerce: {}, scenes: true,
+    fetchImpl: async () => ({}) });
+  session.addCue({ id: DLV, format: 'midroll', linearCreativeId: 'cr1', start: 0, end: Number.MAX_SAFE_INTEGER, commerce: offer });
+  session.setLinearAd(true, { creativeId: 'cr1', deliveryId: DLV });
+  assert.deepEqual(shown, [DLV]);
+  open = true;
+  session.setLinearAd(false);
+  assert.deepEqual(shown, [DLV]);                    // held: the break ended, the card stays
+  open = false;
+  session.tick();
+  assert.deepEqual(shown, []);
+  session.setLinearAd(false);
+  session.destroy();
+});
+
+function heldPanel(handoffStatus = 201) {
+  const { window } = new JSDOM('<div id="s"><video></video></div>', { pretendToBeVisual: true });
+  const doc = window.document, stage = doc.querySelector('#s'), video = doc.querySelector('video');
+  Object.defineProperties(video, { currentTime: { value: 3 }, readyState: { value: 4 }, seeking: { value: false }, ended: { value: false }, paused: { value: true } });
+  const fetchImpl = async (url, init) => init?.method === 'POST'
+    ? { ok: handoffStatus < 300, status: handoffStatus, json: async () => ({ continueUrl: 'https://shop.example/c' }) } : { ok: true, status: 204 };
+  const sdk = attachHtmlVideo({ video, stage, timeline: 'media', interval: false, commerce: { locale: 'es' }, fetchImpl });
+  sdk.addCue({ id: DLV, format: 'midroll', linearCreativeId: 'cr1', start: 0, end: Number.MAX_SAFE_INTEGER, commerce: offer });
+  sdk.setLinearAd(true, { creativeId: 'cr1', deliveryId: DLV });
+  doc.querySelector('.il-commerce > button').click();
+  sdk.setLinearAd(false);                             // the ad ended with the panel open
+  return { sdk, doc, window };
+}
+
+for (const [name, close] of [['Escape', (doc, window) => doc.querySelector('.il-commerce').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))],
+  ['back (remote)', (doc, window) => doc.querySelector('.il-commerce').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'GoBack', bubbles: true }))],
+  ['Close', (doc) => doc.querySelector('.il-commerce-close').click()]]) {
+  test(`a held panel closed with ${name} leaves, so the held content can resume`, () => {
+    const r = heldPanel();
+    assert.ok(r.doc.querySelector('.il-commerce-panel:not([hidden])'));
+    assert.equal(r.sdk.holding(DLV), true);
+    close(r.doc, r.window);
+    r.sdk.tick();
+    assert.equal(r.sdk.holding(DLV), false);
+    assert.equal(r.doc.querySelector('.il-commerce-panel:not([hidden])'), null);
+    r.sdk.destroy();
+  });
+}
+
+test('an expired offer in a held panel says so plainly and keeps the panel', async () => {
+  const r = heldPanel(404);
+  r.doc.querySelector('.il-commerce-buy').click();
+  await flush();
+  assert.equal(r.doc.querySelector('.il-commerce-result').textContent, 'Esta oferta ya no está disponible.');
+  assert.equal(r.sdk.holding(DLV), true);
+  r.sdk.destroy();
 });

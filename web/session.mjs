@@ -115,7 +115,8 @@ export function createSession({
   function render(time) {
     function canShow(cue) {
       if (!Number.isSafeInteger(time)) return false;
-      if (cue.format === 'midroll') return inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot();
+      // An open product of an ad that has ended stays until the viewer closes it.
+      if (cue.format === 'midroll') return (inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot()) || holding(cue);
       // A card with a Buy button, like an interactive scene, stays while the viewer pauses to look at it;
       // a plain graphic shows only during playback.
       if (cue.commerce && !cue.scene) return !inBreak && contentKnown() && presentingCard();
