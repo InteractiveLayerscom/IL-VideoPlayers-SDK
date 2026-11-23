@@ -43,3 +43,4 @@ Import the web adapters as ES modules. For native apps, follow the platform guid
 | AVPlayer | AVPlayer played HLS on macOS, read both cues, and reported the expected playhead position after three seeks. The UIKit view was tested on Mac Catalyst. The package compiled for iOS and tvOS. |
 | Roku | BrighterScript validated the components. The BrightScript interpreter ran tests for cue parsing, playhead timing, ad breaks, and layout. |
 | Video.js, AVPlay, and HTML5 | The adapters were tested with a test DOM and platform API test doubles. Video output on the target TVs still needs device testing. |
+| Server-stitched ads (MediaTailor) | Content clocks for hls.js, Shaka, Video.js and Safari's own HLS played a local stitched stream in Chromium and WebKit (`npm run test:browser`, needs `ffmpeg`): no graphic on any ad frame, content time read from the frames, one request and one impression per window. [Details](web/README.md#anuncios-insertados-en-el-stream-mediatailor) |
