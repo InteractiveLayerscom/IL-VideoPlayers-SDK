@@ -4,7 +4,9 @@ import { videoClock } from './content-clock.mjs';
 import { commerceLocale } from './commerce.mjs';
 import { normalizeCue } from './cues.mjs';
 
-export { hlsContentClock, videoClock } from './content-clock.mjs';
+export {
+  hlsContentClock, nativeHlsContentClock, parseMediaPlaylist, shakaContentClock, videoClock, videoJsContentClock,
+} from './content-clock.mjs';
 
 export const PREPARE_MS = 4000;
 const REQUEST_TIMEOUT_MS = 4000;

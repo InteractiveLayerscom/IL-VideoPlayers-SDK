@@ -21,11 +21,15 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test -c test/browser/playwright.config.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "hls.js": "1.7.4",
     "jsdom": "26.1.0",
-    "shaka-player": "5.3.5"
+    "shaka-player": "5.3.5",
+    "video.js": "8.24.2"
   },
   "description": "Player adapters for contextual overlays and L-shaped ads on FAST channels",
   "repository": {
