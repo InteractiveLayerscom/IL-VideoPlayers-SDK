@@ -1,6 +1,6 @@
 # Integrar la app web o de Smart TV
 
-Copiá el directorio `web/` a la app e importá los módulos relativos, o instalá el paquete desde GitHub con una identidad que tenga acceso al repositorio. Fijá el commit de la versión que homologaste. El paquete distribuye módulos ES y una hoja de estilos. Para motores de TV antiguos incluí el SDK en la compilación que transpila la app y verificá las APIs web en el modelo objetivo.
+Copiá el directorio `web/` a la app e importá los módulos relativos, o instalá el paquete desde GitHub con una identidad que tenga acceso al repositorio. Fijá el commit de la versión que homologaste. El paquete distribuye módulos ES, una hoja de estilos y la tipografía de los paneles de compra ([Tipografía de los paneles](#tipografía-de-los-paneles)). Para motores de TV antiguos incluí el SDK en la compilación que transpila la app y verificá las APIs web en el modelo objetivo.
 
 ```sh
 npm install git+https://github.com/InteractiveLayerscom/IL-VideoPlayers-SDK.git
@@ -347,3 +347,27 @@ Una tarjeta de producto de escena sin botón propio muestra un control **Comprar
 Si el espectador abrió el producto durante un anuncio y el anuncio termina, el panel queda abierto y el contenido sigue en pausa hasta que lo cierre, vuelva atrás o reproduzca el contenido. El corte termina a tiempo: `break_end` (o `break_error`) llega como siempre, con `held: true`, para la medición y la analítica; enseguida llega `content_held`, y `content_released` cuando el panel se cierra, y entonces el módulo reanuda el contenido. Un host que reanuda el contenido en `break_end` debe omitirlo cuando `held` es `true` y esperar `content_released`. Si igual lo reanuda, el panel se cierra y la vista sigue como antes, sin estados intermedios. Un corte nuevo cierra un panel retenido de un corte anterior.
 
 Los controles del host se declaran con `insets: { bottom: <px> }` o con la variable CSS `--il-safe-bottom` en la escena. La tarjeta, el overlay y los botones de una escena quedan por encima. Sin declararlo, el SDK mide la barra de Video.js y reserva 48 px si el `<video>` usa `controls`.
+
+## Tipografía de los paneles
+
+Los paneles de compra (la tienda de Smart TV y la tarjeta del player) se dibujan con **Montserrat**, y el SDK la incluye con el nombre de familia `IL Montserrat`: no depende de que el dispositivo la tenga instalada y no pide nada a Google ni a otro tercero. Es un solo archivo variable, `web/fonts/Montserrat-wght.woff2` (216 KB), que cubre todos los pesos. Los paneles usan 500 para el texto, 600 para los botones, 650 para los subtítulos y 700 para los títulos y los precios. La regla `@font-face` está en su propia hoja, `web/fonts.css`, que `player.css` importa antes de `tv-shop.css`. El navegador baja el archivo la primera vez que aparece un producto en pantalla, y en pantalla se ve primero la tipografía de reemplazo (`Montserrat` si tu página ya la tiene, si no `Inter` o `system-ui`) hasta que llega (`font-display: swap`).
+
+`fonts.css` tiene que cargarse en el documento, no dentro de un shadow root: ahí los navegadores ignoran la regla y los paneles usan la tipografía de reemplazo. El archivo se busca junto a `fonts.css`, en `fonts/Montserrat-wght.woff2`:
+
+- **Con una etiqueta `link` a `web/player.css`**, publicá la carpeta `web/` completa, con `fonts/`. Si copiás sólo los `.css`, los paneles caen a `Inter` o `system-ui`.
+- **Con una etiqueta `link` sólo a `web/tv-shop.css`**, agregá también una a `web/fonts.css`: `tv-shop.css` nombra la tipografía pero no la declara.
+- **Con un bundler**, importá `@interactivelayers/player-sdk/player.css` como siempre: el bundler toma el `url()` de `fonts.css` y publica el archivo con el resto de los recursos (algunos lo incrustan en la hoja, y entonces la hoja crece unos 290 KB). Verificá en la compilación cómo llega el `.woff2`.
+- **Para entregar la tipografía de otra forma** (por ejemplo, sólo cuando se abre un panel, o desde tu CDN), dejá `fonts.css` afuera y declará vos la familia `IL Montserrat` con una regla `@font-face` en el documento. Los pesos de los paneles son 500, 600, 650 y 700. Sin esa regla los paneles usan la `Montserrat` de tu página, si la tiene, y si no `Inter` o `system-ui`.
+- **Si el archivo se sirve desde otro origen que la página** (una CDN), ese origen debe enviar `Access-Control-Allow-Origin`, porque los navegadores piden las tipografías con CORS. Si tu política de seguridad (CSP) define `font-src`, agregá ese origen.
+
+El SDK declara la tipografía con su propio nombre, `IL Montserrat`, así que no reemplaza ni es reemplazada por una `Montserrat` que declare tu página, y no toca el texto de tu página. Una capa de escena cuyo `fontFamily` empieza por Montserrat (sin distinguir mayúsculas ni comillas; `Montserrat Alternates` es otra familia) recibe `IL Montserrat` al frente de su lista; los demás valores no cambian.
+
+Los navegadores sin tipografías variables (Chrome y Firefox anteriores a 62, Safari anterior a 11) ignoran la regla y usan la tipografía de reemplazo.
+
+Montserrat es de The Montserrat.Git Project Authors y se distribuye con la licencia SIL Open Font License 1.1, sin nombre reservado de fuente. El archivo `.woff2` es el tipo variable de `google/fonts` (`ofl/montserrat/Montserrat[wght].ttf`, commit `06bfe0d62a98375cb09c942fa18e68bd32cff057`) convertido sin cambios de contenido a WOFF2 con `fonttools` 4.55.3 y `brotli` 1.1.0:
+
+```sh
+uvx --from 'fonttools==4.55.3' --with 'brotli==1.1.0' fonttools ttLib.woff2 compress -o web/fonts/Montserrat-wght.woff2 'Montserrat[wght].ttf'
+```
+
+La licencia está en `web/fonts/OFL.txt`; conservala si redistribuís la carpeta. Huellas SHA-256: `Montserrat[wght].ttf` `0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7`; `Montserrat-wght.woff2` `6e712eafc11f23dc2b0651c0849c1a331aa81a3a4499ba61ef5091e5c123c796`; `OFL.txt` `8b7141c03fa4f8d44e6345d5d4931709290f0f67875e452e95ac1fd3a027802e`.

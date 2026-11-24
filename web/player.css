@@ -1,3 +1,4 @@
+@import './fonts.css';
 @import './tv-shop.css';
 [data-il-hold] { visibility: hidden !important; }
 [data-il-unsqueeze] { transform: none !important; transition: none !important; }
@@ -12,7 +13,7 @@
   max-width: calc(100% - 20px);
   box-sizing: border-box;
   color: var(--il-commerce-foreground, #fff);
-  font: 500 clamp(13px, 1.25vw, 24px)/1.35 system-ui, sans-serif;
+  font: 500 clamp(13px, 1.25vw, 24px)/1.35 'IL Montserrat', Montserrat, Inter, system-ui, sans-serif;
   font-size: clamp(12px, 1.9cqw, 18px);
   pointer-events: auto;
   text-align: left;

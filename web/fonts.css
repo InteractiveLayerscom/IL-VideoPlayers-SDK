@@ -1,0 +1,12 @@
+/* Montserrat travels with the SDK (web/fonts/, SIL OFL 1.1), so the panels look the same on every screen and nothing is requested from a third party.
+   The face has its own name, 'IL Montserrat', so it never replaces or gets replaced by a Montserrat the host page declares.
+   One variable file covers every weight from 100 to 900. A browser without variable fonts (before Chrome 62, Firefox 62 or Safari 11) skips the rule and uses the fallback stack. */
+@supports (font-variation-settings: normal) {
+  @font-face {
+    font-family: 'IL Montserrat';
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url('fonts/Montserrat-wght.woff2') format('woff2');
+  }
+}

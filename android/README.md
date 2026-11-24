@@ -122,7 +122,7 @@ Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guí
 
 ## Tipografía de la tienda
 
-Los paneles de producto de TV y de móvil usan Montserrat, la primera fuente que nombra la tienda web, con sus pesos: 500 para el texto, 600 para los botones, 650 para los encabezados y 700 para títulos y precios. En Android, la biblioteca incluye la fuente y la app no tiene que agregar nada. En la web, la tienda solo la muestra si la página ya cargó Montserrat; si no, usa la siguiente fuente de la lista. Desde Android 8.0 (API 26) se usa la fuente incluida. En versiones anteriores, o si la fuente no se puede usar, los paneles usan la fuente del sistema. Una capa de escena cuyo `fontFamily` empieza por Montserrat también recibe la fuente incluida; las demás familias se resuelven como antes.
+Los paneles de producto de TV y de móvil usan Montserrat, la primera fuente que nombra la tienda web, con sus pesos: 500 para el texto, 600 para los botones, 650 para los encabezados y 700 para títulos y precios. En Android, la biblioteca incluye la fuente y la app no tiene que agregar nada. El paquete web también la incluye (`web/fonts/`) y la carga con `player.css` o `fonts.css`; ver [Tipografía de los paneles](../web/README.md#tipografía-de-los-paneles). Desde Android 8.0 (API 26) se usa la fuente incluida. En versiones anteriores, o si la fuente no se puede usar, los paneles usan la fuente del sistema. Una capa de escena cuyo `fontFamily` empieza por Montserrat también recibe la fuente incluida; las demás familias se resuelven como antes.
 
 ## Avisos de terceros
 

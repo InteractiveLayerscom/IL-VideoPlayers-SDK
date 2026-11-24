@@ -9,7 +9,7 @@ const root = resolve(import.meta.dirname, '../..');
 const fixture = makeStitched(process.env.IL_STITCHED_FIXTURE || resolve(tmpdir(), 'il-sdk-stitched-fixture'));
 const types = {
   '.html': 'text/html; charset=utf-8', '.mjs': 'application/javascript', '.js': 'application/javascript',
-  '.css': 'text/css', '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.mp4': 'video/mp4',
+  '.css': 'text/css', '.woff2': 'font/woff2', '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.mp4': 'video/mp4',
   '.m4s': 'video/iso.segment',
 };
 

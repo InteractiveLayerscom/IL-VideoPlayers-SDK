@@ -70,6 +70,14 @@ const place = {
 const lMask = 'polygon(75% 0, 100% 0, 100% 100%, 0 100%, 0 75%, 75% 75%)';
 const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
+// A layer whose font list starts with Montserrat (quotes and case ignored; "Montserrat Alternates" is another family)
+// gets the SDK's own face first. Any other value is left as it is.
+export function sceneFontFamily(value) {
+  if (typeof value !== 'string') return '';
+  const first = value.split(',', 1)[0].trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+  return first.toLowerCase() === 'montserrat' ? "'IL Montserrat', " + value : value;
+}
+
 export function sceneSupported(window) {
   return window.CSS?.supports?.('clip-path', lMask) ?? true;
 }
@@ -313,7 +321,7 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
         textContent = doc.createElement('div');
         textContent.textContent = text;
         Object.assign(textContent.style, {
-          color: cssColor(layer.fill) || '#fff', fontFamily: typeof layer.fontFamily === 'string' ? layer.fontFamily : '',
+          color: cssColor(layer.fill) || '#fff', fontFamily: sceneFontFamily(layer.fontFamily),
           fontStyle: layer.fontStyle === 'italic' ? 'italic' : 'normal',
           fontWeight: Number.isFinite(Number(layer.fontWeight)) ? String(layer.fontWeight) : '',
           lineHeight: String(Number.isFinite(layer.lineHeight) && layer.lineHeight > 0 ? layer.lineHeight : 1.1),
