@@ -58,6 +58,15 @@ final class CommercePanel extends LinearLayout {
     private int generation, photoGeneration, phonePage;
     int selection;
     private boolean expanded, disposed;
+    /**
+     * Variants whose cart answered 404: iADServer says so for an expired delivery or a variant that is gone
+     * (web/commerce.mjs). Buy stays off for those only; another variant can still be tried.
+     */
+    private final java.util.Set<String> goneVariants = new java.util.HashSet<>();
+    private Button phoneBuy;
+
+    /** The selected variant answered 404: no longer available, nothing to retry for it. */
+    boolean selectedGone() { return goneVariants.contains(offer.variants.get(selection).id); }
     /** Set while the panel is held past its ad: the viewer closing it removes it instead of folding it back. */
     Runnable onViewerClosed;
     /** Media keys while the SDK holds the host's controller (OverlayController.mediaKey). */
@@ -234,7 +243,7 @@ final class CommercePanel extends LinearLayout {
     }
 
     void buy() {
-        if (pending != null || disposed || !offer.variants.get(selection).available) return;
+        if (pending != null || disposed || selectedGone() || !offer.variants.get(selection).available) return;
         int attempt = ++generation;
         String variantId = offer.variants.get(selection).id;
         if (tv) shop.handoff(null, copy[5], false);
@@ -242,15 +251,30 @@ final class CommercePanel extends LinearLayout {
         pending = workers.submit(() -> {
             OverlayNetwork.Handoff reply = null;
             Bitmap image = null;
+            boolean expired = false;
             try {
                 reply = network.prepareCart(offer.handoffUrl, variantId);
                 if (tv && reply.qrImageUrl != null) image = network.qrImage(reply.qrImageUrl);
+            } catch (OverlayNetwork.OfferGone offerGone) {
+                expired = true;
             } catch (IOException ignored) {}
             OverlayNetwork.Handoff handoff = reply;
             Bitmap bitmap = image;
+            boolean offerGone = expired;
             post(() -> {
                 if (attempt != generation || disposed || !expanded || !isShown()) return;
                 pending = null;
+                if (offerGone) {
+                    // The delivery expired (404): as web, the offer is no longer available and nothing is retried.
+                    goneVariants.add(variantId);
+                    if (tv) shop.handoff(null, copy[8], false);
+                    else {
+                        // In place, as the other failure: the panel keeps its scroll and accessibility focus.
+                        status.setText(copy[8]);
+                        if (phoneBuy != null) phoneBuy.setEnabled(false);
+                    }
+                    return;
+                }
                 if (tv) {
                     shop.handoff(bitmap, bitmap != null ? copy[3] : copy[6], bitmap == null);
                     return;
@@ -312,11 +336,12 @@ final class CommercePanel extends LinearLayout {
         }
         if (count > 20) pager(body, phonePage, (count + 19) / 20,
                 () -> { phonePage--; renderPhone(); }, () -> { phonePage++; renderPhone(); });
-        status = label("", 13, false);
+        status = label(selectedGone() ? copy[8] : "", 13, false);
         status.setAccessibilityLiveRegion(ACCESSIBILITY_LIVE_REGION_POLITE);
         body.addView(status);
         Button buy = button(copy[2], this::buy, true);
-        buy.setEnabled(offer.variants.get(selection).available);
+        buy.setEnabled(!selectedGone() && offer.variants.get(selection).available);
+        phoneBuy = buy;
         phone.addView(buy, spaced(8));
     }
 
@@ -448,19 +473,20 @@ final class CommercePanel extends LinearLayout {
         return button;
     }
 
-    private static String[] labels(String locale) {
+    static String[] labels(String locale) {
         switch (locale) {
             case "es":
                 return new String[]{"Ver producto", "Producto", "Comprar",
                         "Escaneá para pagar en Shopify", "Cerrar", "Preparando tu carrito…",
-                        "No se pudo preparar el carrito. Intentá de nuevo.", "Variante"};
+                        "No se pudo preparar el carrito. Intentá de nuevo.", "Variante", "Esta oferta ya no está disponible."};
             case "pt-BR":
                 return new String[]{"Ver produto", "Produto", "Comprar",
                         "Escaneie para pagar na Shopify", "Fechar", "Preparando seu carrinho…",
-                        "Não foi possível preparar o carrinho. Tente novamente.", "Variante"};
+                        "Não foi possível preparar o carrinho. Tente novamente.", "Variante", "Esta oferta não está mais disponível."};
             default:
                 return new String[]{"View product", "Product", "Buy", "Scan to pay on Shopify",
-                        "Close", "Preparing your cart…", "Could not prepare the cart. Try again.", "Variant"};
+                        "Close", "Preparing your cart…", "Could not prepare the cart. Try again.", "Variant",
+                        "This offer is no longer available."};
         }
     }
 }

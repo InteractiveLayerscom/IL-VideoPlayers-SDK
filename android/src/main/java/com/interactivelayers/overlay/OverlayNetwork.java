@@ -86,6 +86,16 @@ final class OverlayNetwork {
         }
     }
 
+    /** iADServer answers 404 once the delivery has expired or the variant is gone: the offer is no longer available. */
+    static final class OfferGone extends IOException {
+        OfferGone() { super("Offer no longer available"); }
+    }
+
+    /** The error for a cart answer outside 2xx: 404 means the offer is gone (web/commerce.mjs: `gone`). */
+    static IOException cartFailure(int status) {
+        return status == 404 ? new OfferGone() : new IOException("Cart unavailable");
+    }
+
     Handoff prepareCart(String handoffUrl, String variantId) throws IOException {
         if (!OverlayCue.isHttps(handoffUrl)) throw new IOException("Expected an HTTPS checkout endpoint");
         HttpURLConnection connection = connection(new URL(handoffUrl));
@@ -99,7 +109,7 @@ final class OverlayNetwork {
                 out.write(payload);
             }
             int status = connection.getResponseCode();
-            if (status < 200 || status >= 300) throw new IOException("Cart unavailable");
+            if (status < 200 || status >= 300) throw cartFailure(status);
             JSONObject reply = new JSONObject(new String(read(connection, 16384), StandardCharsets.UTF_8));
             String continuation = reply.optString("continueUrl");
             String qr = reply.optString("qrImageUrl");

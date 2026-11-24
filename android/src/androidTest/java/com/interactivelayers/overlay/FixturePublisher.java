@@ -37,6 +37,8 @@ final class FixturePublisher implements Closeable {
     final CountDownLatch responseSent = new CountDownLatch(1);
     volatile boolean hold;
     volatile boolean invalidImage;
+    /** What the cart endpoint answers: 200 with a checkout by default. */
+    volatile int cartStatus = 200;
     private final MockWebServer server = new MockWebServer();
     private final SSLSocketFactory originalTrust = HttpsURLConnection.getDefaultSSLSocketFactory();
     private final String live;
@@ -72,6 +74,8 @@ final class FixturePublisher implements Closeable {
                 if (request.getPath().endsWith("/cart") && request.getMethod().equals("POST")) {
                     checkoutDestinations.add(request.getPath());
                     checkoutSelections.add(request.getBody().readUtf8());
+                    // 404 as iADServer answers for an expired delivery; any other status for an ordinary failure.
+                    if (cartStatus != 200) return new MockResponse().setResponseCode(cartStatus);
                     return new MockResponse().setHeader("Content-Type", "application/json")
                             .setBody("{\"continueUrl\":\"" + url("/continue") + "\",\"qrImageUrl\":\"" + url("/qr.png") + "\"}");
                 }
@@ -168,7 +172,10 @@ final class FixturePublisher implements Closeable {
                     .setBody("[{\"id\":\"sale\",\"format\":\"overlay\",\"start\":1795046400000,\"end\":1795046418000,"
                             + "\"imageUrl\":\"" + url("/assets/sidecar") + "\",\"impressionUrl\":\"" + url("/measure/commerce")
                             + "\",\"commerce\":{\"title\":\"Botines\",\"price\":\"25.00\",\"locale\":\"es\",\"currency\":\"USD\","
-                            + "\"variants\":[{\"id\":\"42\",\"label\":\"Talle 42\"},{\"id\":\"43\",\"label\":\"Talle 43\"}],"
+                            + ("1".equals(request.queryParameter("single"))
+                                    // A product without options, as Shopify sends it: one "Default Title" variant.
+                                    ? "\"variants\":[{\"id\":\"only\",\"label\":\"Default Title\"}],"
+                                    : "\"variants\":[{\"id\":\"42\",\"label\":\"Talle 42\"},{\"id\":\"43\",\"label\":\"Talle 43\"}],")
                             + "\"viewUrl\":\"" + url("/measure/product-view") + "\",\"handoffUrl\":\"" + url("/cart") + "\"}}]");
         }
         if (path.equals("/session")) {
