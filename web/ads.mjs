@@ -451,6 +451,7 @@ export function attachAds({
   let controller = null;
   let disposed = false;
   let inBreak = false;
+  let nativePausedContent = false;
   const ima = { sdk: null, display: null, loader: null, manager: null, started: false, running: false, cut: null,
     gaveUp: false, loadTimer: null, watchdog: null, observer: null };
   // With a cut of several requests the module schedules the breaks and asks them in order;
@@ -783,6 +784,7 @@ export function attachAds({
       productController?.abort();
       productController = null;
       cancelAttempt();
+      settleBehind();
       dropSlot();
       for (const [id, cue] of cues) if (cue.onScreen) session.removeCue(id);
       cues.clear();
@@ -1227,6 +1229,7 @@ export function attachAds({
     if (inBreak) return;
     // A product still held from an earlier break gives way: its deferred end never touches this one.
     if (breakShop.deferred || breakShop.kept) releaseHeld(false);
+    nativePausedContent = video.paused === false;
     video.pause?.();
     inBreak = true;
     stage?.classList?.add('il-ad-playing');
@@ -1459,7 +1462,9 @@ export function attachAds({
   function expired() {
     if (!native || Date.now() < Date.parse(valid.expires_at)) return false;
     if (!disposed) {
+      const resumeContent = inBreak && nativePausedContent && !wf.viewerPaused;
       api.destroy();
+      if (resumeContent) resumeWalk(null);
       try { onEvent?.({ type: 'plan_expired' }); } catch { /* diagnostics cannot interrupt playback */ }
     }
     return true;

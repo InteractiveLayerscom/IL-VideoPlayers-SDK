@@ -1824,3 +1824,35 @@ test('native GAM seeking out of a window removes its prefetched graphic immediat
   assert.equal(h.removed.length, 1);
   h.ads.destroy();
 });
+
+test('native GAM settles contextual cuts crossed by a seek', async () => {
+  const r = await waterfallRig({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    expires_at: new Date(Date.now()+60000).toISOString(), cuts: [{ id: 'mid', at: 60, position: 'midroll', tag_url: TAG }] }) });
+  r.ads.start();
+  r.at(1, 'playing');
+  r.at(90, 'seeking');
+  r.at(90, 'seeked');
+  assert.equal(r.made.requests.length, 0);
+  r.ads.destroy();
+});
+
+test('native GAM expiry during a midroll resumes content paused by the SDK', async () => {
+  const original = Date.now;
+  let now = original();
+  Date.now = () => now;
+  try {
+    const r = await waterfallRig({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+      expires_at: new Date(now+60000).toISOString(), cuts: [{ id: 'mid', at: 60, position: 'midroll', tag_url: TAG }] }) });
+    r.ads.start();
+    r.at(60, 'playing');
+    const manager=r.made.load();
+    manager.fire('pause', {});
+    manager.fire('started', {});
+    assert.equal(r.video.paused, true);
+    now+=60000;
+    r.video.dispatchEvent(new Event('timeupdate'));
+    await ticks();
+    assert.equal(r.video.paused, false);
+    r.ads.destroy();
+  } finally { Date.now=original; }
+});

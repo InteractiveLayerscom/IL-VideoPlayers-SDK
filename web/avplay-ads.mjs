@@ -109,6 +109,8 @@ export function attachAvPlayAds({
   isVisible = () => globalThis.document?.visibilityState !== 'hidden',
 } = {}) {
   if (!avplay || !session || typeof getDisplayRect !== 'function') throw new Error('Provide avplay, the session and getDisplayRect');
+  // This adapter owns a separate scheduler and has not implemented native plan renewal/expiry.
+  if (plan?.version === 2) plan = null;
   const breakShop = breakShopAllowed(plan, planOrigin, sessionId);
   const handlers = new Map();
   let inBreak = false;
