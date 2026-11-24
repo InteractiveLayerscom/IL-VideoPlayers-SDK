@@ -71,17 +71,6 @@ export function normalizeBrand(value) {
 }
 
 
-// Past its window an open card is held for at most HOLD_MS of content time since the later of the window's end
-// and the viewer's last action in it; a paused video does not move the clock, so a paused viewer keeps it.
-export const HOLD_MS = 60000;
-export function withinHold(cue, time, actedAt) {
-  if (!Number.isSafeInteger(time)) return true;
-  // A seek back before the card's start releases it: it then follows its window, closed, like any other.
-  if (time < cue.start) return false;
-  if (time < cue.end) return true;
-  return time - Math.max(cue.end, Number.isSafeInteger(actedAt) ? actedAt : cue.end) <= HOLD_MS;
-}
-
 const copy = {
   en: ['View product', 'Product', 'Variant', 'Buy', 'Scan with your phone', 'Continue to Shopify',
     'Close', 'Preparing your cart…', 'Could not prepare the cart. Try again.', 'This offer is no longer available.'],
@@ -106,17 +95,15 @@ export function applySafeArea(stage, insets, known) {
 }
 
 // `hooks` lets the adapter follow the viewer: opened() when the detail opens, closed(byViewer) when it closes
-// (byViewer false when the card is taken away, by a break or the end of its time) and checkout() once the
+// (byViewer false when the card is taken away, by a break or the end of the session) and checkout() once the
 // purchase page or its QR is handed over.
-export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}, clock = () => null) {
+//
+// A card whose detail the viewer opened is theirs: it stays when its ad ends (the graphic goes, the open panel is kept
+// as `held`) until the viewer closes it, they open another product, or release() is called (a new break, the media
+// changing, the session ending). Another ad appearing meanwhile does not move it.
+export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, hooks = {}) {
   const doc = stage.ownerDocument;
   if (options) stage.classList?.add('il-stage');
-  // Content time of the viewer's last action in the open card (a click or key on it, a result appearing).
-  let actedAt = null;
-  const act = () => {
-    const time = clock();
-    actedAt = Number.isSafeInteger(time) ? time : actedAt;
-  };
   const embedded = () => {
     try {
       return doc.defaultView.self !== doc.defaultView.top;
@@ -125,7 +112,11 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     }
   };
   const viewed = new Set();
+  // The card of the cue on screen (its opener, or its open detail) and an open detail whose cue is gone.
   let root;
+  let held;
+  // Where focus goes when a held panel closes and its ad is gone: the first control of the ad on screen, if any.
+  let focusTarget = () => null;
 
   const notify = (name, ...args) => {
     try {
@@ -135,20 +126,79 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     }
   };
 
-  function hide() {
-    const was = root;
-    root = null;
-    was?.dispose();
-    if (was?.isOpen()) notify('closed', false);
+  function clearHeld() {
+    held = null;
+    root?.suspend(false);
   }
 
-  // The detail of this cue is open: the session keeps the card while the viewer is choosing.
-  const isOpen = cue => !!root && root.cue.id === cue.id && root.isOpen();
-  const lastAction = cue => (isOpen(cue) ? actedAt : null);
+  // The cue's graphic is going away (its window ended, another ad replaced it). An open detail stays, held; a closed
+  // card goes with its ad. `focusBack` is where focus was before the ad took it.
+  function retire(focusBack) {
+    const was = root;
+    root = null;
+    if (!was) return;
+    if (!was.isOpen()) return was.dispose();
+    if (held && held !== was) {
+      const old = held;
+      held = null;
+      old.dispose();
+      notify('closed', false);
+    }
+    if (focusBack?.isConnected) was.focusBack = focusBack;
+    was.orphan();
+    held = was;
+  }
+
+  // Closes what is open, for one cue or for all (but the card of `except`, the ad now playing): the viewer opened
+  // another product, a new break began, the media changed, or the session ended.
+  function release(id, except) {
+    for (const which of ['root', 'held']) {
+      const card = which === 'root' ? root : held;
+      if (!card || (id != null && card.cue.id !== id) || (except != null && card.cue.id === except)) continue;
+      if (which === 'root') root = null;
+      else held = null;
+      const open = card.isOpen();
+      card.dispose();
+      if (open) notify('closed', false);
+    }
+    root?.suspend(!!held);
+  }
+
+  // A card the viewer closed (or a held panel) is gone: the ad's button that waited behind a held panel is shown again,
+  // and only then is focus settled, so the first control of the ad now on screen can take it. `ours` says focus was the
+  // SDK's to move; an element the host focused meanwhile stays focused.
+  function closedByViewer(card, { wasHeld, ours, orphaned, trigger, isActive, fallback }) {
+    if (card === root) root = null;
+    if (wasHeld) held = null;
+    card.dispose(false);
+    if (wasHeld) root?.suspend(false);
+    notify('closed', true);
+    if (!ours) return;
+    if (!orphaned && isActive() && trigger?.isConnected) trigger.focus();
+    else (focusTarget() ?? card.focusBack ?? fallback)?.focus?.();
+  }
+
+  // Focus belongs to the SDK only while it is inside the card or on nothing: an element the host focused meanwhile stays.
+  const ownsFocus = (node) => {
+    const active = doc.activeElement;
+    return !active || active === doc.body || Boolean(node?.contains(active));
+  };
+
+  // The detail is open for this cue, in its window or kept after it.
+  const isOpen = cue => (!!root && root.cue.id === cue.id && root.isOpen()) || (!!held && held.cue.id === cue.id && held.isOpen());
 
   function show(cue, isActive) {
     if (!options || !cue.commerce || root?.cue === cue) return;
+    // The cue's own detail, kept while its graphic was away (a seek, a pause on a scene): it is the card again.
+    if (held?.cue.id === cue.id) {
+      root = held;
+      held = null;
+      root.adopt(isActive);
+      return;
+    }
     mount(cue, cue.commerce, isActive);
+    // Another product is open on top: this ad's button waits behind it.
+    if (held) root?.suspend(true);
   }
 
   function openOffer(cue, offer, trigger, isActive) {
@@ -180,39 +230,50 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     opener.className = 'il-commerce il-commerce--' + cue.format + ' il-tv-shop-trigger';
     opener.textContent = copy[locale][cue.format === 'midroll' ? 3 : 0];
     let flow;
+    // Once its ad is gone the open shop belongs to the viewer: it is live for as long as it is the one held.
+    let orphaned = false;
+    const alive = () => (orphaned ? held === tvRoot : isActive());
     function launch() {
       if (!isActive() || flow) return;
       opener.hidden = true;
       trackView(cue, offer);
-      act();
       notify('opened', cue);
       flow = openTVShop(stage, {
         offer: { ...offer, imageUrl: offer.imageUrl ?? offer.images?.[0] ?? (cue.format !== 'midroll' ? cue.imageUrl : undefined) },
         locale, brand:cue.brand,
         onClose() {
-          if (trigger) { root = null; tvRoot.dispose(); flow = null; if (isActive() && trigger.isConnected) trigger.focus(); }
-          else { flow.dispose(); flow = null; opener.hidden = false; opener.focus(); }
+          const ours = ownsFocus(stage.querySelector('.il-tv-shop'));
+          if (trigger || orphaned) {
+            closedByViewer(tvRoot, { wasHeld: held === tvRoot, ours, orphaned, trigger, isActive, fallback: activeBefore });
+            flow = null;
+            return;
+          }
+          flow.dispose(); flow = null; opener.hidden = false; if (ours) opener.focus();
           notify('closed', true);
         },
         async prepareCheckout(variant, signal) {
-          if (!isActive()) throw new Error('Offer expired');
+          if (!alive()) throw new Error('Offer expired');
           const reply = await handoff(offer, variant, signal);
-          if (!isActive() || !isHttps(reply.qrImageUrl)) throw new Error('Invalid QR');
-          act();
+          if (!alive() || !isHttps(reply.qrImageUrl)) throw new Error('Invalid QR');
           notify('checkout');
           return reply.qrImageUrl;
         },
       });
     }
-    // Every remote key while the shop is open is the viewer acting in it.
-    const tvKey = () => { if (flow) act(); };
-    stage.addEventListener('keydown', tvKey, true);
-    const tvRoot = {cue, isOpen: () => Boolean(flow), dispose() {
-      const ownsFocus = doc.activeElement === opener || Boolean(flow);
-      stage.removeEventListener('keydown', tvKey, true);
-      flow?.dispose(); opener.remove();
-      if (ownsFocus && activeBefore?.isConnected) activeBefore.focus();
-    }};
+    const tvRoot = {cue, focusBack: null, isOpen: () => Boolean(flow),
+      focusable: () => (flow || opener.hidden ? null : opener),
+      suspend(flag) { if (!flow) opener.hidden = flag; },
+      orphan() { orphaned = true; opener.remove(); },
+      adopt(next) {
+        isActive = next;
+        orphaned = false;
+        if (!opener.isConnected && !trigger) stage.appendChild(opener);
+      },
+      dispose(restore = true) {
+        const ownsTheFocus = doc.activeElement === opener || Boolean(flow);
+        flow?.dispose(); opener.remove();
+        if (restore && ownsTheFocus && activeBefore?.isConnected) activeBefore.focus();
+      }};
     root = tvRoot;
     if (trigger) launch();
     else {
@@ -221,12 +282,15 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
         if (event.key !== 'OK' && event.key !== 'Enter') return;
         event.preventDefault(); event.stopPropagation(); if (!event.repeat) launch();
       });
-      stage.appendChild(opener); opener.focus();
+      stage.appendChild(opener);
+      if (!held) opener.focus();
     }
   }
 
   function mount(cue, offer, isActive, trigger) {
-    hide();
+    // The viewer opening a product replaces whatever product was open; an ad's own button only replaces its predecessor.
+    if (trigger) release();
+    else retire();
     const locale = commerceLocale(options.locale ?? offer.locale);
     if (options.tv) return mountTV(cue, offer, isActive, trigger, locale);
     const [view, productText, variantText, buy, scanText, continueText, closeText, loading, errorText, goneText] = copy[locale];
@@ -235,6 +299,11 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     const shell = doc.createElement('div');
     shell.className = 'il-commerce il-commerce--' + cue.format;
     let request;
+    // Variants iADServer answered 404 for (the delivery expired, or the variant is gone): each stays off, another is still tried.
+    const goneVariants = new Set();
+    // Once its ad is gone the open panel belongs to the viewer: it is live for as long as it is the one held.
+    let orphaned = false;
+    const alive = () => (orphaned ? held === shellRoot : isActive());
     let variant = offer.variants.find(v => v.availableForSale !== false) ?? offer.variants[0];
     function button(label, action) {
       const el = doc.createElement('button');
@@ -308,6 +377,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       request = null;
       variant = choice;
       result.replaceChildren();
+      // A variant that already answered 404 says so again, and stays off.
+      if (goneVariants.has(choice)) result.textContent = goneText;
       updateChoice();
     }));
     choices.append(...buttons);
@@ -326,7 +397,7 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
         element.disabled = offer.variants[index].availableForSale === false;
         element.setAttribute('aria-pressed', String(offer.variants[index] === variant));
       });
-      checkout.disabled = variant.availableForSale === false;
+      checkout.disabled = variant.availableForSale === false || goneVariants.has(variant);
       checkout.setAttribute('aria-disabled', String(Boolean(request) || checkout.disabled));
     }
 
@@ -346,7 +417,6 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       // A sold-out variant is disabled and cannot take focus, which would leave Escape and the arrows with nothing.
       if (chosen.disabled || chosen.getBoundingClientRect().bottom > panel.getBoundingClientRect().bottom) close.focus({ preventScroll: true });
       trackView(cue, offer);
-      act();
       notify('opened', cue);
     }
 
@@ -363,11 +433,8 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     }
 
     function closePanel() {
-      if (trigger) {
-        root = null;
-        shellRoot.dispose();
-        notify('closed', true);
-        if (isActive() && trigger.isConnected) trigger.focus();
+      if (trigger || orphaned) {
+        closedByViewer(shellRoot, { wasHeld: held === shellRoot, ours: ownsFocus(shell), orphaned, trigger, isActive, fallback: previousFocus });
         return;
       }
       request?.abort();
@@ -383,15 +450,14 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
     }
 
     async function proceed() {
-      if (request || !isActive()) return;
+      if (request || !alive()) return;
       const current = new AbortController();
       request = current;
       updateChoice();
       result.textContent = loading;
       try {
         const reply = await handoff(offer, variant, current.signal);
-        if (request !== current || current.signal.aborted || !isActive()) return;
-        act();
+        if (request !== current || current.signal.aborted || !alive()) return;
         notify('checkout');
         if (options.navigate) {
           options.navigate(reply.continueUrl);
@@ -427,21 +493,25 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
           reveal();
         }
       } catch (error) {
-        if (request === current && !current.signal.aborted && isActive()) {
+        if (request === current && !current.signal.aborted && alive()) {
+          if (error?.gone) goneVariants.add(variant);
           result.textContent = error?.gone ? goneText : errorText;
           reveal();
-          act();
         }
       } finally {
         if (request === current) {
           request = null;
           updateChoice();
+          // Buy just turned off under the viewer's finger: focus goes to a control that works.
+          const lost = doc.activeElement === checkout || doc.activeElement === doc.body || !doc.activeElement;
+          if (checkout.disabled && lost && alive()) {
+            const chosen = buttons[offer.variants.indexOf(variant)];
+            (chosen && !chosen.disabled ? chosen : close).focus({ preventScroll: true });
+          }
         }
       }
     }
 
-    shell.addEventListener('click', act, true);
-    shell.addEventListener('keydown', act, true);
     shell.addEventListener('keydown', event => {
       if (['Escape', 'Backspace', 'GoBack', 'BrowserBack'].includes(event.key) || event.keyCode === 10009 || event.keyCode === 461) {
         if (panel.hidden) return;
@@ -467,17 +537,26 @@ export function commerceSurface(stage, options, fetchImpl = globalThis.fetch, ho
       event.preventDefault();
       event.stopPropagation();
     });
-    const shellRoot = { cue, isOpen: () => !panel.hidden, dispose() {
-      request?.abort();
-      const restoreFocus = shell.contains(doc.activeElement);
-      shell.remove();
-      if (restoreFocus && previousFocus?.isConnected) previousFocus.focus();
-    } };
+    const shellRoot = { cue, focusBack: null, isOpen: () => !panel.hidden,
+      focusable: () => (panel.hidden && !open.hidden && shell.style.display !== 'none' ? open : null),
+      suspend(flag) { shell.style.display = flag ? 'none' : ''; },
+      orphan() { orphaned = true; },
+      adopt(next) { isActive = next; orphaned = false; },
+      dispose(restore = true) {
+        request?.abort();
+        const restoreFocus = restore && shell.contains(doc.activeElement);
+        shell.remove();
+        if (restoreFocus && previousFocus?.isConnected) previousFocus.focus();
+      } };
     root = shellRoot;
     updateChoice();
     stage.appendChild(shell);
     if (trigger) openPanel();
   }
   const buyLabel = offer => copy[commerceLocale(options?.locale ?? offer?.locale)][3];
-  return { show, hide, open: openOffer, isOpen, lastAction, buyLabel, enabled: Boolean(options) };
+  // The control the viewer would reach first on the card now on screen (a closed card's button).
+  focusTarget = () => root?.focusable?.() ?? null;
+  return { show, retire, hide: () => release(), release, open: openOffer, isOpen, buyLabel, enabled: Boolean(options),
+    // The scene on screen, if any, offers its own first control; the surface falls back to a closed card's button.
+    setFocusTarget(find) { focusTarget = () => find?.() ?? root?.focusable?.() ?? null; } };
 }

@@ -1,4 +1,4 @@
-import { applySafeArea, commerceSurface, withinHold } from './commerce.mjs';
+import { applySafeArea, commerceSurface } from './commerce.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
 import { imageVisible, listenToVideo, nativeProgramTime } from './video.mjs';
@@ -57,7 +57,7 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
 
   function hide() {
     scenes.hide();
-    commerce.hide();
+    commerce.retire();
     layer?.remove();
     layer = null;
     images = [];
@@ -152,7 +152,9 @@ function renderer(stage, surface, avplay, getDisplayRect, commerce, options) {
     hide,
     update: scenes.update,
     applyAudioPermissions: scenes.applyAudioPermissions,
-    holding: cue => commerce.isOpen(cue) && withinHold(cue, options.clock(), commerce.lastAction(cue)),
+    holding: cue => commerce.isOpen(cue),
+    release: (id, except) => commerce.release(id, except),
+    detached: () => !stage.isConnected,
     visible: cue => cue.scene ? scenes.visible() :
       layer?.style.visibility === 'visible' && images.length > 0 && images.every(imageVisible),
   };
@@ -174,7 +176,7 @@ function attach({ stage, surface, squeezed = surface, video, avplay, getDisplayR
     return bar ? Math.round(bar.getBoundingClientRect().height) || 30 : video?.controls ? 48 : 0;
   });
   const pausing = video && source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
-  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing, clock);
+  const commerce = commerceSurface(stage, source.commerce, source.fetchImpl, pausing);
   const allowVideo = source.secondaryVideo ?? !avplay;
   const allowAudio = allowVideo && source.secondaryVideoAudio === true;
   const window = stage.ownerDocument.defaultView;
@@ -201,12 +203,37 @@ function attach({ stage, surface, squeezed = surface, video, avplay, getDisplayR
   const doc = stage.ownerDocument;
   const unlisten = video ? listenToVideo(video, session.tick) : () => doc.removeEventListener('visibilitychange', session.tick);
   if (!video) doc.addEventListener('visibilitychange', session.tick);
+  // A new source closes a product kept from the old one. `emptied` only says the element was reset (a new source, but also
+  // load() again on the same file after an error, or a Media Source player detaching and attaching its `blob:` source to
+  // recover), so it decides nothing: the next `loadstart` does, by comparing the new `currentSrc` with the one before the
+  // reset. A different file or HLS URL closes the panel; the same one, or one `blob:` URL for another (recovery), does not.
+  // If nothing ever loads after the reset (the source was removed), there is nothing new on screen and the panel stays until
+  // the viewer closes it or the host calls closeProduct(). hls.js on a plain element and AVPlay have no event of their own
+  // for new content (see the README): the host calls closeProduct() there; Video.js and Shaka say so through the player.
+  let elementSrc = video?.currentSrc || '';
+  let beforeReset = null;   // the source the element had when it was emptied, until the next one starts to load
+  const loaded = () => {
+    const next = video.currentSrc || '';
+    const before = beforeReset ?? elementSrc;
+    const blob = (url) => /^blob:/.test(url);
+    if (before && next && next !== before && !(blob(before) && blob(next))) session.closeProduct();
+    beforeReset = null;
+    elementSrc = next;
+  };
+  const mediaChanged = () => {
+    if (elementSrc) beforeReset = elementSrc;
+    elementSrc = '';
+  };
+  video?.addEventListener('loadstart', loaded);
+  video?.addEventListener('emptied', mediaChanged);
   return {
     ...session,
     // The ads module asks for scene products only when this session renders commerce.
     commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
+      video?.removeEventListener('loadstart', loaded);
+      video?.removeEventListener('emptied', mediaChanged);
       pausing?.dispose();
       session.destroy();
     },
@@ -285,10 +312,22 @@ export function attachVideoJs({ player, stage, ...options }) {
     video,
   });
   player.one('dispose', session.destroy);
+  // Video.js knows when the viewer's source changes, whatever the element is playing: a new `src()` changes
+  // `currentSource()`, while VHS re-attaching its blob (a recovery) does not.
+  let current = player.currentSource?.().src;
+  const sourceChanged = () => {
+    const next = player.currentSource?.().src;
+    if (current && next && next !== current) session.closeProduct();
+    current = next || current;
+  };
+  player.on?.('sourceset', sourceChanged);
+  player.on?.('loadstart', sourceChanged);
   return {
     ...session,
     destroy() {
       player.off('dispose', session.destroy);
+      player.off?.('sourceset', sourceChanged);
+      player.off?.('loadstart', sourceChanged);
       session.destroy();
     },
   };

@@ -304,8 +304,12 @@ test('a linked midroll requests only its live VAST delivery, draws no MP4 as ima
   assert.equal(urls.at(-1).searchParams.get('midroll_delivery_id'),'delivery');
   stage.querySelector('.il-tv-shop-trigger').click();
   assert.equal(stage.querySelector('.il-tv-hero').src,cue.imageUrl); assert.deepEqual(measured,[]);
-  sdk.setLinearAd(false); await settle(); assert.equal(stage.querySelector('.il-tv-shop'),null);
+  sdk.setLinearAd(false); await settle();
+  assert.ok(stage.querySelector('.il-tv-shop'), 'the shop the viewer opened stays when the ad ends');
+  assert.equal(stage.querySelector('.il-tv-shop-trigger'), null, 'the ad\'s own button is gone');
   assert.equal(urls.at(-1).searchParams.has('midroll_delivery_id'),false);
+  sdk.setLinearAd(true); await settle();
+  assert.equal(stage.querySelector('.il-tv-shop'),null, 'a new break closes it');
   sdk.destroy(); window.close();
 });
 

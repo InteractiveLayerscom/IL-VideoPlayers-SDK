@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { attachAds } from '../web/ads.mjs';
 import { createSession } from '../web/session.mjs';
@@ -17,6 +17,10 @@ const planWith = (commerce = {}) => ({ version: 1, asset_id: 'a', duration: 60, 
     break_url: 'https://il.example/il-player/break-product?project=p&asset=a&grant=g', lead_ms: 1000, pacing, windows: [], ...commerce } });
 const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
 const adEvent = (id, creative = 'cr1') => ({ getAd: () => ({ getAdId: () => id, getCreativeId: () => creative }) });
+
+// Whatever a failed assertion leaves running (the module's timers, the held-product poll) is stopped after each test.
+const cleanups = [];
+afterEach(() => { for (const stop of cleanups.splice(0)) stop(); });
 
 async function rig({ plan = planWith(), answer, sessionId, muted = false, volume = 0.6, customPlayback = false, held = new Set() } = {}) {
   const listeners = {};
@@ -53,7 +57,9 @@ async function rig({ plan = planWith(), answer, sessionId, muted = false, volume
   await flush();
   const fire = async (type, event = {}) => { for (const fn of listeners[type] ?? []) fn(event); await flush(); };
   await fire('CONTENT_PAUSE_REQUESTED');
-  return { ads, fire, linear, adds, removed, asked, video, volumes, held, events, eventObjects, plays: () => plays, done() { ads.destroy(); globalThis.google = previous; } };
+  const done = () => { ads.destroy(); globalThis.google = previous; };
+  cleanups.push(done);
+  return { ads, session, fire, linear, adds, removed, asked, video, volumes, held, events, eventObjects, plays: () => plays, done };
 }
 
 test('a shop-linked ad asks IL once with its identity, shows the card and takes it away when it ends', async () => {
@@ -122,19 +128,19 @@ test('a host with its own view id gets the ad without the card, and a plan witho
   old.done();
 });
 
-test('holdUntil: an open card leaves at the verified limit; a paused viewer keeps it', () => {
+test('a holdUntil on the card is ignored: the graphic ends with its window and nothing times the open panel out', () => {
   let time = 5000, open = true;
   const shown = [];
   const renderer = { show(cue) { shown.push(cue.id); }, hide() { shown.length = 0; }, visible: () => true, holding: () => open };
   const session = createSession({ clock: () => time, playing: () => true, renderer, interval: false, commerce: {}, fetchImpl: async () => ({}) });
   session.addCue({ id: 'c', format: 'super', start: 1000, end: 8000, holdUntil: 9000, imageUrl: 'https://a.example/a.png', mimeType: 'image/png', commerce: offer });
   session.tick();
-  time = 8500; session.tick();
   assert.deepEqual(shown, ['c']);
-  session.tick();   // paused: content time does not move
-  assert.deepEqual(shown, ['c']);
-  time = 9000; session.tick();
-  assert.deepEqual(shown, []);
+  time = 8000; session.tick();
+  assert.deepEqual(shown, [], 'the graphic is gone exactly at its end');
+  assert.equal(session.holding('c'), true, 'the open panel is not the session\'s to close');
+  time = 99999999; session.tick();
+  assert.equal(session.holding('c'), true, 'and no time limit takes it');
   session.destroy();
 });
 
@@ -187,11 +193,9 @@ test('with custom playback the shared element keeps the viewer volume', async ()
   r.done();
 });
 
-test('normalizeCue keeps a valid holdUntil only', () => {
+test('a plan that still carries holdUntil is simply ignored', () => {
   const base = { id: 'c', format: 'super', start: 1, end: 10, imageUrl: 'https://a.example/a.png', mimeType: 'image/png', commerce: offer };
-  assert.equal(normalizeCue({ ...base, holdUntil: 20 }).holdUntil, 20);
-  assert.equal(normalizeCue({ ...base, holdUntil: 5 }).holdUntil, undefined);
-  assert.equal(normalizeCue({ ...base, holdUntil: Infinity }).holdUntil, undefined);
+  for (const holdUntil of [20, 5, Infinity, 'x']) assert.equal('holdUntil' in normalizeCue({ ...base, holdUntil }), false);
 });
 
 function bannerHost(layers) {
@@ -296,17 +300,22 @@ test('destroy releases a held product', async () => {
   assert.ok(r.removed.includes(DLV));
 });
 
-test('a host that plays the content itself releases the held product without a second resume', async () => {
+test('a host that plays the content itself ends the wait without a second resume, and the panel stays', async () => {
+  const closed = [];
   const r = await rig();
+  r.session.closeProduct = (id) => closed.push(id);
   await r.fire('STARTED', adEvent(`il-shop-midroll-${DLV}`));
   r.held.add(DLV);
   await r.fire('CONTENT_RESUME_REQUESTED');
   const plays = r.plays();
+  closed.length = 0;
   r.video.dispatchEvent(new Event('play'));
-  assert.ok(r.removed.includes(DLV) && r.events.at(-1) === 'content_released');
-  r.held.delete(DLV);
+  assert.equal(r.events.at(-1), 'content_released');
+  assert.deepEqual(closed, [], 'the panel is not closed by the content moving on');
+  assert.ok(!r.removed.includes(DLV));
+  r.held.delete(DLV);                                // the viewer closes it later
   await wait(300);
-  assert.equal(r.plays(), plays);
+  assert.equal(r.plays(), plays, 'no second resume');
   r.done();
 });
 
@@ -328,22 +337,24 @@ test('a later break drops the deferred end of an earlier held product and is nev
 });
 
 
-test('the real session keeps a held card on screen across the end of the break, and drops it once closed', () => {
+test('the real session ends a midroll\'s graphic with its break; an open panel is kept by the renderer and closes on a new break', () => {
   let open = false;
-  const shown = [];
-  const renderer = { show(cue) { shown.push(cue.id); }, hide() { shown.length = 0; }, visible: () => true, holding: () => open };
+  const shown = [], released = [];
+  const renderer = { show(cue) { shown.push(cue.id); }, hide() { shown.length = 0; }, visible: () => true, holding: () => open,
+    release: (...args) => { released.push(args); open = false; } };
   const session = createSession({ clock: () => 3000, playing: () => true, renderer, interval: false, commerce: {}, scenes: true,
     fetchImpl: async () => ({}) });
   session.addCue({ id: DLV, format: 'midroll', linearCreativeId: 'cr1', start: 0, end: Number.MAX_SAFE_INTEGER, commerce: offer });
   session.setLinearAd(true, { creativeId: 'cr1', deliveryId: DLV });
   assert.deepEqual(shown, [DLV]);
+  assert.deepEqual(released, [[undefined, DLV]], 'a break starting closes what was kept, but never this ad\'s own panel');
+  released.length = 0;
   open = true;
   session.setLinearAd(false);
-  assert.deepEqual(shown, [DLV]);                    // held: the break ended, the card stays
-  open = false;
-  session.tick();
-  assert.deepEqual(shown, []);
-  session.setLinearAd(false);
+  assert.deepEqual(shown, [], 'the graphic ends with the break');
+  assert.deepEqual(released, [], 'the end of a break keeps the open panel');
+  session.setLinearAd(true, { creativeId: 'cr9', deliveryId: 'E'.repeat(43) });
+  assert.deepEqual(released, [[undefined, 'E'.repeat(43)]], 'the next break closes it, unless it is the ad now playing');
   session.destroy();
 });
 

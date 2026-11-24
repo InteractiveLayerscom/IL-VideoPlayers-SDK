@@ -17,6 +17,8 @@ export function createSession({
   fetchImpl = globalThis.fetch,
   interval = 200,
   onVisible,
+  inAd,
+  onMediaChange,
   refreshMs = eventsUrl ? 750 : 1500,
 }) {
   if (eventsUrl && playlistUrl) throw new Error('Choose one source of graphics per session');
@@ -107,28 +109,25 @@ export function createSession({
     }
   }
 
-  // The viewer has this card's detail open: it outlasts its window until they close it.
-  const holding = cue => (!!cue.commerce || !!cue.products?.some(Boolean)) && current?.id === cue.id && !!renderer.holding?.(cue) &&
-    // Past the limit IL verified an open card goes, whatever the viewer does. Paused, content time does not reach it.
-    !(cue.holdUntil != null && clock() >= cue.holdUntil);
+  // The graphic of a cue lasts exactly its window. A product the viewer opened is another matter: its panel is kept by
+  // the renderer after the graphic goes, until the viewer closes it (see commerce.mjs).
 
   function render(time) {
     function canShow(cue) {
       if (!Number.isSafeInteger(time)) return false;
-      // An open product of an ad that has ended stays until the viewer closes it.
-      if (cue.format === 'midroll') return (inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot()) || holding(cue);
+      if (cue.format === 'midroll') return inBreak && !!spot && cue.id === spot.deliveryId && cue.linearCreativeId === spot.creativeId && presentingSpot();
       // A card with a Buy button, like an interactive scene, stays while the viewer pauses to look at it;
       // a plain graphic shows only during playback.
       if (cue.commerce && !cue.scene) return !inBreak && contentKnown() && presentingCard();
-      return !inBreak && contentKnown() && (cue.scene ? presenting() || (holding(cue) && presentingCard()) : playing());
+      return !inBreak && contentKnown() && (cue.scene ? presenting() : playing());
     }
-    const due = cue => (cue.start <= time && time < cue.end) || holding(cue);
+    const due = cue => cue.start <= time && time < cue.end;
     let active = null;
     for (const { cue } of pinned.values()) {
       if (!active && canShow(cue) && due(cue)) active = cue;
     }
     for (const [id, cue] of cues) {
-      if (Number.isFinite(time) && cue.end < time - 120000 && !holding(cue)) cues.delete(id);
+      if (Number.isFinite(time) && cue.end < time - 120000) cues.delete(id);
       else if (!active && canShow(cue) && due(cue)) active = cue;
     }
     const hooks = active && pinned.get(active.id)?.cue === active ? pinned.get(active.id).hooks : null;
@@ -144,7 +143,7 @@ export function createSession({
             canShow(active) &&
             current?.id === active.id &&
             Number.isSafeInteger(now) &&
-            ((active.start <= now && now < active.end) || holding(active))
+            active.start <= now && now < active.end
           );
         }, hooks?.onClick);
     } else if (active && current !== active) {
@@ -177,6 +176,9 @@ export function createSession({
 
   function tick() {
     if (disposed) return;
+    // The player left the page: nothing is left to look at. A server-inserted ad on screen (the host's stitched clock
+    // says so; buffering or an unknown position is not an ad) closes a product kept from the content.
+    if (renderer.detached?.() || inAd?.()) renderer.release?.();
     const time = playhead();
     render(time);
     if (
@@ -189,6 +191,8 @@ export function createSession({
       void refresh(time);
   }
 
+  // The host's way to say other content was loaded (hlsContentClock's `onMediaChange`): a kept product closes.
+  const stopMedia = typeof onMediaChange === 'function' ? onMediaChange(() => renderer.release?.()) : null;
   if (interval !== false) timer = setInterval(tick, interval);
   return {
     tick,
@@ -196,8 +200,13 @@ export function createSession({
     clock,
     // What a designed product banner may use; null when this session cannot draw scenes.
     sceneFeatures: scenes ? sceneFeatures : null,
-    // Whether the card with this id is on screen with its detail open.
-    holding: id => !!current && current.id === id && holding(current),
+    // Whether the product of the card with this id is open: in its window, or kept after it.
+    holding: id => !!renderer.holding?.({ id }),
+    // Closes the open product (of this card only, when an id is given; never the one of `except`): the host's way to say
+    // the media changed or another ad started.
+    closeProduct(id, except) {
+      renderer.release?.(id, except);
+    },
     addCue(item, { onVisible, onHidden, onClick } = {}) {
       const cue = normalizeCue(item);
       if (!cue || disposed) return false;
@@ -225,6 +234,9 @@ export function createSession({
         pending = null;
         nextRead = 0;
         for (const [id, cue] of cues) if (cue.format === 'midroll') cues.delete(id);
+        // A new break, or another ad with its own identity, closes the product kept from before (never the ad now
+        // playing's own). The end of a break, and an ad's identity merely cleared inside a break, keep it.
+        if ((value && !inBreak) || (next && next.deliveryId !== spot?.deliveryId)) renderer.release?.(undefined, next?.deliveryId);
       }
       inBreak = Boolean(value);
       spot = next ? { creativeId:next.creativeId, deliveryId:next.deliveryId } : null;
@@ -236,6 +248,8 @@ export function createSession({
       clearInterval(timer);
       pending?.abort();
       if (current) conceal();
+      if (typeof stopMedia === 'function') stopMedia();
+      renderer.release?.();
       renderer.destroy?.();
       cues.clear();
       pinned.clear();

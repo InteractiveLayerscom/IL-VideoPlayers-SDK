@@ -721,9 +721,7 @@ export function attachAds({
       // A designed banner lasts what its creative says, up to the end IL verified; a plain card stays in its window.
       const designed = !!session.sceneFeatures && !!card?.scene;
       const end = designed ? Number(card?.end) : Math.min(window.end, Number(card?.end));
-      // A plan product without a verified limit is not held past its end.
-      const holdUntil = Number.isSafeInteger(card?.holdUntil) && card.holdUntil >= end ? card.holdUntil : end;
-      const item = { ...card, start, end, holdUntil };
+      const item = { ...card, start, end };
       const cue = card && (card.window == null || card.window === window.id) ? normalizeCue(item) : null;
       if (!(cue?.commerce || (designed && cue?.scene && cue.products.some(Boolean))) || cue.format === 'midroll') reject('invalid_product');
       outcome = 'filled';
@@ -776,22 +774,24 @@ export function attachAds({
 
   function sync(event) {
     if (disposed) return;
+    // A stitched ad starting is a new ad break: it closes the product kept from the content.
+    if (stitched && clock.inAd?.()) session.closeProduct?.();
     // No ad server is asked before the viewer has started playback in this session.
     // An ad playing in the content <video> (iOS custom playback) is not content playback.
     const time = now();
     if (!inBreak && time != null && (event?.type === 'playing' || video.paused === false)) played = true;
     for (const [id, cue] of cues) {
       // During a stitched ad every graphic leaves the session at once and comes back with the content.
-      // A product whose detail the viewer has open outlasts its window, but never a break.
-      const held = cue.product && !!session.holding?.(id);
-      if (time == null || (cue.product && (time < cue.end || held) && !productVisible(time))) {
+      // A graphic lasts exactly its window; a product the viewer opened is kept by the session after it (and a new
+      // break closes it there).
+      if (time == null || (cue.product && time < cue.end && !productVisible(time))) {
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
-      } else if (time >= cue.end && !held) {
+      } else if (time >= cue.end) {
         if (!cue.replay) cues.delete(id);
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
-      } else if (cue.replay && time < cue.start && !held) {
+      } else if (cue.replay && time < cue.start) {
         if (cue.onScreen) session.removeCue(id);
         cue.onScreen = false;
       } else if (!cue.onScreen) cue.onScreen = session.addCue(cue.item, cue.hooks);
@@ -809,10 +809,8 @@ export function attachAds({
         window.end - Math.max(window.start, time) >= ms(shop.pacing.min_seconds) && pacingAllows(window, committed(), shop.pacing));
       if (product) void requestProduct(product);
     }
-    // The single overlay slot is not reused while it still holds a creative. While a product card is held past
-    // its window (the viewer is choosing), a graphic could not be shown: none is asked for.
+    // The single overlay slot is not reused while it still holds a creative.
     if (controller || overlay.live || !servableNow().length) return;
-    if ([...cues].some(([id, cue]) => cue.product && time >= cue.end && session.holding?.(id))) return;
     if ([...cues.values()].some((cue) => cue.replay && cue.start <= time && time < cue.end)) return;
     // A window with a product waits for its answer; a product (200) wins over the graphics in that window.
     const next = windows.find((window) => !attempted.has(window.id) &&
@@ -884,7 +882,10 @@ export function attachAds({
     breakShop.id = null;
   }
   function keepOpen(id) {
-    if (breakShop.kept && breakShop.kept !== id) session.removeCue(breakShop.kept);
+    if (breakShop.kept && breakShop.kept !== id) {
+      session.removeCue(breakShop.kept);
+      session.closeProduct?.(breakShop.kept);
+    }
     breakShop.kept = id;
     breakShop.poll ??= setInterval(checkKept, 250);
   }
@@ -893,13 +894,16 @@ export function attachAds({
     if (!disposed && breakShop.kept && session.holding?.(breakShop.kept)) return;
     releaseHeld(true);
   }
-  // The end of the held time: by the viewer closing the product (resume), by the host or the viewer playing the
-  // content, or by a new break (no resume: content is already moving, or the new break owns it).
+  // The end of the held time: by the viewer closing the product (resume), or by a new break (no resume: the new break
+  // owns the content). The content playing under the panel only ends the wait (hostPlayed).
   function releaseHeld(resumeContent) {
     clearInterval(breakShop.poll);
     breakShop.poll = null;
     video.removeEventListener('play', hostPlayed);
-    if (breakShop.kept) session.removeCue(breakShop.kept);
+    if (breakShop.kept) {
+      session.removeCue(breakShop.kept);
+      session.closeProduct?.(breakShop.kept);
+    }
     breakShop.kept = null;
     const deferred = breakShop.deferred;
     breakShop.deferred = null;
@@ -907,8 +911,14 @@ export function attachAds({
     emitBreak('content_released', deferred.cut);
     if (resumeContent) deferred.resume();
   }
+  // The content moving on under the held panel (the host or the viewer pressed play) only ends the wait: nothing is
+  // resumed twice, and the panel stays until the viewer closes it.
   function hostPlayed() {
-    if (breakShop.deferred) releaseHeld(false);
+    const deferred = breakShop.deferred;
+    if (!deferred) return;
+    breakShop.deferred = null;
+    video.removeEventListener('play', hostPlayed);
+    emitBreak('content_released', deferred.cut);
   }
   // The break ends on time: its event, the session leaving the break. Only resuming the content waits for a product
   // the viewer has open; the host is told (`held` on the event, then `content_held` and `content_released`).
@@ -938,6 +948,8 @@ export function attachAds({
     } catch {
       identity = null;
     }
+    // Each ad of a break closes the product kept from the one before, never its own.
+    session.closeProduct?.(undefined, identity?.deliveryId);
     // A spot without a shop changes nothing unless the one before it had one.
     if (identity || breakShop.spot) session.setLinearAd(true, identity ?? undefined);
     breakShop.spot = !!identity;
@@ -1410,6 +1422,8 @@ export function attachAds({
   for (const name of VIDEO_EVENTS) video.addEventListener(name, sync);
   // A clock that knows when the fragment changes (an ad starting while paused, say) re-checks at once.
   const unwatch = typeof content.onChange === 'function' ? content.onChange(() => sync()) : null;
+  // Other content loaded into the host's hls.js closes a product kept from the old content.
+  const unwatchMedia = typeof content.onMediaChange === 'function' ? content.onMediaChange(() => session.closeProduct?.()) : null;
   // A hidden page gets no frame callbacks, so a stitched ad can start under a card kept on it. visibilitychange is
   // dispatched in the task that makes the page visible, before its next rendering (and before any frame callback),
   // so the check run here removes the card before a frame over the ad can be painted.
@@ -1437,6 +1451,8 @@ export function attachAds({
     },
     setBreakActive(active) {
       if (disposed) return;
+      // A new break closes a product the viewer kept from before (see session.setLinearAd).
+      if (active && !hostBreak) session.closeProduct?.();
       hostBreak = Boolean(active);
       updateOverlay(now());
       sync();
@@ -1482,6 +1498,7 @@ export function attachAds({
       video.removeEventListener('volumechange', syncAdVolume);
       for (const name of VIDEO_EVENTS) video.removeEventListener(name, sync);
       if (typeof unwatch === 'function') unwatch();
+      if (typeof unwatchMedia === 'function') unwatchMedia();
       unwatchFrames();
       visibilityTarget?.removeEventListener?.('visibilitychange', onVisibility);
       video.removeEventListener('ended', contentEnded);

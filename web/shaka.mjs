@@ -1,4 +1,4 @@
-import { applySafeArea, commerceSurface, withinHold } from './commerce.mjs';
+import { applySafeArea, commerceSurface } from './commerce.mjs';
 import { pauseOnOpen } from './dom.mjs';
 import { sceneRenderer, sceneSupported, sceneFeatures } from './scene.mjs';
 import { createSession } from './session.mjs';
@@ -78,7 +78,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
   const sceneStage = stage ?? clientContainer;
   if (source.commerce) applySafeArea(sceneStage, source.insets, () => (video.controls ? 48 : 0));
   const pausing = source.commerce?.pauseOnOpen === true ? pauseOnOpen(video) : undefined;
-  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl, pausing, () => clock());
+  const commerce = commerceSurface(sceneStage, source.commerce, source.fetchImpl, pausing);
   // timeline: 'media' is a video on demand, whose plan and cards are in the video's own time.
   const clock = programTime ?? (source.timeline === 'media' ? () => Math.round(video.currentTime * 1000) : () => {
     if (video.readyState < 2) return null;
@@ -131,13 +131,15 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     },
     hide() {
       scenes.hide();
-      commerce.hide();
+      commerce.retire();
       if (!desired?.scene) mute(last);
       desired = null;
     },
     update: scenes.update,
     applyAudioPermissions: scenes.applyAudioPermissions,
-    holding: cue => commerce.isOpen(cue) && withinHold(cue, clock(), commerce.lastAction(cue)),
+    holding: cue => commerce.isOpen(cue),
+    release: (id, except) => commerce.release(id, except),
+    detached: () => !sceneStage.isConnected,
     visible(cue) {
       if (cue.scene) return scenes.visible();
       const visible = ownsCurrent(cue) && imageVisible(matchImage(cue.imageUrl));
@@ -146,7 +148,7 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
     },
     destroy() {
       scenes.hide();
-      commerce.hide();
+      commerce.release();
       unmute();
     },
   };
@@ -177,12 +179,18 @@ export function attachShaka({ player, clientContainer, serverContainer, programT
   manager.addEventListener('ad-started', onStarted);
   manager.addEventListener('ad-stopped', unmute);
   const unlisten = listenToVideo(video, sync);
+  // A new source closes a product kept from the old one. Shaka says so itself: `loading` (load() was called) and
+  // `unloading`. The element's `emptied` is not used: Shaka recovers a failed MediaSource by attaching it again
+  // (`mediasourcerecovered`), with the same content.
+  const mediaChanged = () => session.closeProduct();
+  for (const name of ['loading', 'unloading']) player.addEventListener?.(name, mediaChanged);
   return {
     ...session,
     // The ads module asks for scene products only when this session renders commerce.
     commerce: commerce.enabled ? source.commerce : undefined,
     destroy() {
       unlisten();
+      for (const name of ['loading', 'unloading']) player.removeEventListener?.(name, mediaChanged);
       pausing?.dispose();
       manager.removeEventListener('ad-started', onStarted);
       manager.removeEventListener('ad-stopped', unmute);

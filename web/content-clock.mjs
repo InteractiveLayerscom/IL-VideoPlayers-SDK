@@ -22,6 +22,7 @@ const RENDITION_TOLERANCE = 0.1;
 // hls.js event names (Hls.Events.FRAG_CHANGED, LEVEL_LOADED, LEVEL_UPDATED).
 const FRAG_CHANGED = 'hlsFragChanged';
 const LEVEL_EVENTS = ['hlsLevelLoaded', 'hlsLevelUpdated'];
+const MANIFEST_LOADING = 'hlsManifestLoading';
 // shaka.net.NetworkingEngine.RequestType.MANIFEST: HLS media playlists come through it too.
 const SHAKA_MANIFEST = 0;
 const SHAKA_SEGMENT = 1;
@@ -50,9 +51,11 @@ export function parseMediaPlaylist(text) {
   let duration = null;
   let pdt = NaN;
   let range = null;
+  let run = 0;   // segments between two #EXT-X-DISCONTINUITY tags are one run
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     const line = raw.trim();
-    if (line.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) pdt = Date.parse(line.slice(25));
+    if (line === '#EXT-X-DISCONTINUITY') run++;
+    else if (line.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) pdt = Date.parse(line.slice(25));
     else if (line.startsWith('#EXTINF:')) duration = Number.parseFloat(line.slice(8));
     else if (line.startsWith('#EXT-X-BYTERANGE:')) {
       const [length, offset] = line.slice(17).split('@').map(Number);
@@ -64,7 +67,7 @@ export function parseMediaPlaylist(text) {
         ends.set(line, byteStart + range.length);
       }
       if (Number.isFinite(duration) && duration > 0) {
-        segments.push(Object.freeze({ start, duration, pdt, uri: line, byteStart }));
+        segments.push(Object.freeze({ start, duration, pdt, uri: line, byteStart, run }));
         start += duration;
       }
       duration = null;
@@ -81,8 +84,11 @@ export function parseMediaPlaylist(text) {
 // ad may be carrying a PDT, and the whole playlist is unknown rather than wrong. `layout.unknown` names why
 // any of it is unknown: 'pdt_out_of_range' or 'pdt_not_contiguous' (the clocks report it once, see `reporter`).
 export function layoutSegments(segments, { origin, duration = Infinity }) {
-  let out = segments.map(({ start, duration: length, pdt, uri, byteStart = null }) => {
-    if (!Number.isFinite(pdt)) return { start, end: start + length, kind: 'ad', uri, byteStart };
+  // A run holding any dated segment is content (some of it of unknown time); only a run with none is an ad pod, as MediaTailor
+  // writes one between discontinuities. A layout that says nothing about runs counts as one run.
+  const datedRuns = new Set(segments.filter((segment) => Number.isFinite(segment.pdt)).map((segment) => segment.run ?? 0));
+  let out = segments.map(({ start, duration: length, pdt, uri, byteStart = null, run = 0 }) => {
+    if (!Number.isFinite(pdt)) return { start, end: start + length, kind: 'ad', pod: !datedRuns.has(run), uri, byteStart };
     const content = (pdt - origin) / 1000;
     const plausible = content >= -PDT_TOLERANCE && content + length <= duration + PDT_TOLERANCE;
     return { start, end: start + length, kind: plausible ? 'content' : 'unknown', content, length, uri, byteStart };
@@ -92,7 +98,8 @@ export function layoutSegments(segments, { origin, duration = Infinity }) {
   for (const segment of out) {
     if (segment.kind !== 'content') continue;
     if (previous && Math.abs(segment.content - (previous.content + previous.length)) > PDT_TOLERANCE) {
-      out = out.map((item) => ({ ...item, kind: 'unknown' }));
+      // The content is unknown; an undated segment stays what it is (its run decides whether it is an ad pod), which never lends a time.
+      out = out.map((item) => (item.kind === 'ad' ? item : { ...item, kind: 'unknown' }));
       unknown = 'pdt_not_contiguous';
       break;
     }
@@ -143,6 +150,19 @@ function allContent(layout, from, to) {
   return reached > to || i === layout.length;
 }
 
+// What a segment is for `inAd()`: an ad only when it is undated AND in a run of undated segments (an ad pod). An undated
+// segment among dated ones is content whose time is unknown, which may never close anything.
+export function segmentKind(segment) {
+  if (!segment) return null;
+  return segment.kind === 'ad' && segment.pod === false ? 'unknown' : segment.kind;
+}
+
+// What the segment holding stream second `t` is: 'content', 'ad', 'unknown', or null when none holds it.
+function kindAt(layout, t) {
+  const i = layout ? indexAt(layout, t) : -1;
+  return i < 0 ? null : segmentKind(layout[i]);
+}
+
 // Content second at stream second `t` in one layout, or null near an ad.
 function contentAt(layout, t, from, to) {
   const i = layout ? indexAt(layout, t) : -1;
@@ -154,7 +174,7 @@ function contentAt(layout, t, from, to) {
 // The clock over the player: `resolve(t, from, to)` gives the content second at stream second `t`, null when
 // any of [from, to] may be an ad. `position()` and `rate()` read the player now, so the first frames, seeks
 // and pauses need no event.
-function segmentClock({ resolve, position, rate, edge, lead, onDestroy }) {
+function segmentClock({ resolve, kind, position, rate, edge, lead, onDestroy }) {
   let disposed = false;
   const listeners = new Set();
   function time() {
@@ -169,6 +189,13 @@ function segmentClock({ resolve, position, rate, edge, lead, onDestroy }) {
   return {
     kind: 'stitched',
     time,
+    // Whether the picture is an ad right now: the segment on screen is one without a program date. Unlike a null `time()`,
+    // it is false while the position is unknown, nothing is loaded yet or the player is buffering.
+    inAd() {
+      if (disposed) return false;
+      const t = Number(position());
+      return Number.isFinite(t) && kind?.(t) === 'ad';
+    },
     // For the session's programTime: content milliseconds, null while an ad plays.
     programTime() {
       const seconds = time();
@@ -216,7 +243,7 @@ export function hlsContentClock({ hls, video, plan, edge = AD_EDGE_SECONDS, lead
     if (!Array.isArray(fragments) || !fragments.length) return null;
     if (!layouts.has(fragments)) {
       layouts.set(fragments, report(layoutSegments(fragments.map((frag) => ({
-        start: frag.start, duration: frag.duration,
+        start: frag.start, duration: frag.duration, run: frag.cc,
         pdt: typeof frag.rawProgramDateTime === 'string' ? Date.parse(frag.rawProgramDateTime) : NaN,
       })), bounds)));
     }
@@ -229,10 +256,13 @@ export function hlsContentClock({ hls, video, plan, edge = AD_EDGE_SECONDS, lead
       return null;
     }
   };
-  function resolve(t, from, to) {
+  const layoutFor = (t) => {
     const playing = current && current.start <= t && t < current.start + current.duration
       ? layoutOf(levelFragments(current.level)) : null;
-    const layout = playing ?? layoutOf(levelFragments(hls.currentLevel)) ?? layoutOf(details?.fragments);
+    return playing ?? layoutOf(levelFragments(hls.currentLevel)) ?? layoutOf(details?.fragments);
+  };
+  function resolve(t, from, to) {
+    const layout = layoutFor(t);
     const value = contentAt(layout, t, from, to);
     if (value == null) return null;
     const loaded = (Array.isArray(hls.levels) ? hls.levels.map((_, i) => layoutOf(levelFragments(i))) : []).filter(Boolean);
@@ -245,17 +275,56 @@ export function hlsContentClock({ hls, video, plan, edge = AD_EDGE_SECONDS, lead
     current = data?.frag ?? null;
     clock.notify();
   };
+  // hls.js says `hlsManifestLoading` only from loadSource(), which is the host loading content; its own error recovery
+  // (recoverMediaError, swapAudioCodec) detaches and attaches the media without it. Another URL than the one last seen is
+  // other content; the first load and the same URL again are not a change.
+  const absolute = (url) => {
+    try {
+      return new URL(url, globalThis.location?.href).href;
+    } catch {
+      return null;
+    }
+  };
+  let lastSource = (() => {
+    try {
+      return hls.url ? absolute(hls.url) : null;
+    } catch {
+      return null;
+    }
+  })();
+  const mediaListeners = new Set();
+  const onManifestLoading = (_, data) => {
+    const next = absolute(data?.url);
+    const changed = lastSource != null && next != null && next !== lastSource;
+    lastSource = next ?? lastSource;
+    if (!changed) return;
+    for (const listener of mediaListeners) {
+      try {
+        listener();
+      } catch {
+        // A listener must not break the others.
+      }
+    }
+  };
   const clock = segmentClock({
-    resolve, edge, lead,
+    resolve, kind: (t) => kindAt(layoutFor(t), t), edge, lead,
     position: () => video.currentTime,
     rate: () => video.playbackRate,
     onDestroy() {
       for (const name of LEVEL_EVENTS) hls.off?.(name, onLevel);
       hls.off?.(FRAG_CHANGED, onFrag);
+      hls.off?.(MANIFEST_LOADING, onManifestLoading);
+      mediaListeners.clear();
     },
   });
   for (const name of LEVEL_EVENTS) hls.on(name, onLevel);
   hls.on(FRAG_CHANGED, onFrag);
+  hls.on(MANIFEST_LOADING, onManifestLoading);
+  // Calls `listener` when the host loads other content into this hls.js; returns the way to stop.
+  clock.onMediaChange = (listener) => {
+    mediaListeners.add(listener);
+    return () => mediaListeners.delete(listener);
+  };
   return publicClock(clock);
 }
 
@@ -395,13 +464,19 @@ export function shakaContentClock({ player, video = player?.getMediaElement?.(),
       return false;
     }
   };
-  function resolve(t, from, to) {
+  // The layout of the active video variant's playlist at `t`, if it has been downloaded.
+  const activeLayout = (t) => {
     if (!switches) onSwitch();
     if (!switches) return null;
     let uris = switches[0].uris;
     for (const item of switches) if (item.from <= t) uris = item.uris;
-    const layout = uris.map((written) => [...layouts.keys()].find((uri) => named(written, uri)))
+    return uris.map((written) => [...layouts.keys()].find((uri) => named(written, uri)))
       .filter(Boolean).map((uri) => layouts.get(uri))[0];
+  };
+  function resolve(t, from, to) {
+    if (!switches) onSwitch();
+    if (!switches) return null;
+    const layout = activeLayout(t);
     if (!layout) {
       if (!missingSaid && layouts.size) {
         missingSaid = true;
@@ -421,8 +496,13 @@ export function shakaContentClock({ player, video = player?.getMediaElement?.(),
     const value = contentAt(layout, t, from, to);
     return value == null || adInAny([...layouts.values()], from, to) ? null : value;
   }
+  // What is on screen is the segment last downloaded for that moment, else the active variant's playlist says.
+  const kindOfMoment = (t) => {
+    const here = downloads.findLast((item) => item.start <= t && t < item.end);
+    return here ? segmentKind(here.segment) : kindAt(activeLayout(t), t);
+  };
   const clock = segmentClock({
-    resolve, edge, lead,
+    resolve, kind: kindOfMoment, edge, lead,
     position: () => video.currentTime,
     rate: () => video.playbackRate,
     onDestroy: () => {
@@ -453,10 +533,12 @@ export function videoJsContentClock({ player, plan, edge = AD_EDGE_SECONDS, lead
     let layout = layouts.get(list);
     if (!layout) {
       let start = 0;
+      let run = 0;
       layout = report(layoutSegments(list.map((segment) => {
         const at = Number.isFinite(segment.start) ? segment.start : start;
         start = at + segment.duration;
-        return { start: at, duration: segment.duration,
+        if (segment.discontinuity) run++;
+        return { start: at, duration: segment.duration, run,
           pdt: typeof segment.dateTimeString === 'string' ? Date.parse(segment.dateTimeString) : NaN };
       }), bounds));
       layouts.set(list, layout);
@@ -494,8 +576,19 @@ export function videoJsContentClock({ player, plan, edge = AD_EDGE_SECONDS, lead
     const value = contentAt(fresh((loaded ?? media).segments, t), t, from, to);
     return value == null || adInAny(candidates.map((item) => fresh(item.segments, t)), from, to) ? null : value;
   }
+  // The segment the layout used for `t` holds, as in resolve.
+  function kindOfMoment(t) {
+    const { media, all } = playlists();
+    if (!media) return null;
+    const candidates = [media, ...all.filter((item) => item !== media)];
+    const loaded = candidates.find((item) => {
+      const i = indexAt(fresh(item.segments, t), t);
+      return i >= 0 && Number.isFinite(item.segments[i].start);
+    });
+    return kindAt(fresh((loaded ?? media).segments, t), t);
+  }
   return publicClock(segmentClock({
-    resolve, edge, lead,
+    resolve, kind: kindOfMoment, edge, lead,
     position: () => player.currentTime(),
     rate: () => player.playbackRate(),
   }));
@@ -538,8 +631,10 @@ export function nativeHlsContentClock({ video, plan, playlistUrl, fetchImpl = gl
     if (values.some((value) => value == null)) return null;
     return values.every((value) => Math.abs(value - values[0]) <= RENDITION_TOLERANCE) ? values[0] : null;
   }
+  // Which variant Safari shows cannot be known: it is an ad only where every variant says so.
+  const kindOfMoment = (t) => (layouts?.length && layouts.every((layout) => kindAt(layout, t) === 'ad') ? 'ad' : null);
   const clock = segmentClock({
-    resolve, edge, lead,
+    resolve, kind: kindOfMoment, edge, lead,
     position: () => video.currentTime,
     rate: () => video.playbackRate,
     onDestroy: () => {

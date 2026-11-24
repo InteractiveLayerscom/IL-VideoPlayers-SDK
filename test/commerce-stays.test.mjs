@@ -275,13 +275,24 @@ test('a hand-off refused because the offer expired says so instead of «try agai
   busy.close();
 });
 
-test('the content ending takes the card away, open or not', async () => {
+test('the content ending takes the closed card away; an open panel stays until the viewer closes it', async () => {
+  const closed = player({ id: 'dlv_ended_closed' });
+  await cardOnScreen(closed, 3);
+  closed.state.ended = true;
+  closed.state.paused = true;
+  closed.video.dispatchEvent(new closed.window.Event('ended'));
+  await closed.tick();
+  assert.equal(closed.stage.querySelector('.il-commerce'), null);
+  closed.close();
   const p = player({ id: 'dlv_ended' });
   await cardOnScreen(p, 3);
   p.button('View product').click();
   p.state.ended = true;
   p.state.paused = true;
   p.video.dispatchEvent(new p.window.Event('ended'));
+  await p.tick();
+  assert.ok(p.button('Buy'), 'the panel the viewer opened is theirs to close');
+  p.stage.querySelector('.il-commerce-close').click();
   await p.tick();
   assert.equal(p.stage.querySelector('.il-commerce'), null);
   p.close();
@@ -306,7 +317,7 @@ test('a plain Super still leaves on pause and comes back on play, as before', as
   window.close();
 });
 
-test('an open detail left idle while the video plays is released 60 s of content after the window, then the next windows are served', async () => {
+test('an open detail left alone while the video plays stays with no time limit, and the next windows are served meanwhile', async () => {
   const planned = plan({
     scenes: { formats: ['super'], pacing: PACING, graphics: [{ format: 'super', tag_url: TAG }],
       windows: [{ id: 'g', start_ms: 60000, end_ms: 75000 }] },
@@ -315,28 +326,29 @@ test('an open detail left idle while the video plays is released 60 s of content
   const p = player({ id: 'dlv_idle', planned });
   await cardOnScreen(p, 6);
   p.button('View product').click();
-  for (let t = 8; t <= 67; t += 1) await p.at(t);
-  assert.ok(p.button('Buy'), 'still held 59 s after the window');
-  assert.equal(p.count('/gampad/ads'), 0, 'no graphic asked for while the held card would hide it');
-  await p.at(68.5);
-  assert.equal(p.stage.querySelector('.il-commerce'), null, 'released past 60 s');
+  for (let t = 8; t <= 68; t += 1) await p.at(t);
+  assert.ok(p.button('Buy'), 'still open 60 s after the window');
   await p.at(69);
-  assert.equal(p.count('/gampad/ads'), 1, 'the graphic window is served after the release');
+  assert.ok(p.button('Buy'), 'and after the old limit');
+  assert.equal(p.count('/gampad/ads'), 1, 'the graphic window is served while the panel is open');
   for (let t = 96; t <= 101; t += 1) await p.at(t);
   assert.equal(p.count('window=m2'), 1, 'and the next product window is asked');
+  await p.at(600);
+  assert.ok(p.button('Buy'), 'ten minutes later it is still open');
   p.close();
 });
 
-test('an action inside the card extends the hold; a paused viewer keeps it as long as they like', async () => {
+test('no idle time or action closes an open panel; a paused viewer keeps it as long as they like', async () => {
   const p = player({ id: 'dlv_act' });
   await cardOnScreen(p, 6);
   p.button('View product').click();
   await p.at(40);
   p.button('White').click();
   await p.at(95);
-  assert.ok(p.button('Buy'), 'held 55 s after the last action');
+  assert.ok(p.button('Buy'), 'open 55 s after the last action');
   await p.at(101);
-  assert.equal(p.stage.querySelector('.il-commerce'), null, 'released 60 s after the last action');
+  assert.ok(p.button('Buy'), 'and 61 s after it');
+  assert.equal(p.button('White').getAttribute('aria-pressed'), 'true', 'with the choice made');
   p.close();
 
   const still = player({ id: 'dlv_still' });
@@ -345,7 +357,7 @@ test('an action inside the card extends the hold; a paused viewer keeps it as lo
   await still.at(30);
   await still.pause();
   for (let i = 0; i < 20; i++) await still.tick();
-  assert.ok(still.button('Buy'), 'paused: content time stands still, the card stays');
+  assert.ok(still.button('Buy'), 'paused: the panel stays');
   still.close();
 });
 
@@ -374,17 +386,20 @@ test('a hidden page keeps the open card with its choice, counts nothing while hi
   p.close();
 });
 
-test('a seek back before the window releases an open detail; the card returns closed when its window starts', async () => {
+test('a seek back before the window keeps the open panel; its window starting again does not duplicate it', async () => {
   const p = player({ id: 'dlv_seek_back' });
   await cardOnScreen(p, 6);
   p.button('View product').click();
+  p.button('White').click();
   await p.at(20);
   assert.ok(p.button('Buy'), 'held past the window');
   await p.at(0.5);
-  assert.equal(p.stage.querySelector('.il-commerce'), null, 'never before its window');
+  assert.ok(p.button('Buy'), 'a seek does not close it');
   await p.at(1.5);
-  assert.ok(p.button('View product'), 'back, closed, with its window');
-  assert.equal(p.button('Buy'), undefined);
+  assert.equal(p.stage.querySelectorAll('.il-commerce').length, 1, 'the card of the window is the same panel, not a second one');
+  assert.equal(p.button('White').getAttribute('aria-pressed'), 'true', 'with the choice made');
+  assert.equal(p.count('/events/dlv_seek_back/impression'), 1);
+  assert.equal(p.count('/creativeView'), 1);
   p.close();
 });
 
