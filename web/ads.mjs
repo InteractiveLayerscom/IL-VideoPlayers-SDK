@@ -42,6 +42,8 @@ const planOrigins = new WeakMap();
 // Delivery ids whose impression this page already fired: a re-attach or a second attachAds asking the same
 // window with the same sid gets the same delivery back and must not count it twice.
 const measuredDeliveries = new Set();
+// Renewing a short-lived plan does not start a new viewing session or reset its pacing.
+const nativeViews = new WeakMap();
 
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -365,6 +367,12 @@ export function attachAds({
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
   const native = valid.version === 2;
+  let view = nativeViews.get(session);
+  if (view && (view.asset !== valid.asset_id || view.version !== valid.asset_version)) view = null;
+  if (native && !view) {
+    view = { asset: valid.asset_id, version: valid.asset_version, shown: [], attempted: new Set(), settled: new Set() };
+    nativeViews.set(session, view);
+  }
   let expiryTimer;
   // Stitched: the ads are already in the stream. Nothing here requests or plays a video break, whatever
   // the host passed, and without a content clock the video position is stream time: no graphics either.
@@ -445,8 +453,8 @@ export function attachAds({
   const committed = () => [...shown, ...pendingWindows];
   const pacing = scenes?.pacing;
   const minMs = scenes ? ms(pacing.min_seconds) : 0;
-  const attempted = new Set();
-  const shown = [];
+  const attempted = view?.attempted ?? new Set();
+  const shown = view?.shown ?? [];
   const cues = new Map();
   let controller = null;
   let disposed = false;
@@ -462,7 +470,7 @@ export function attachAds({
   const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false,
     held: false, ownPause: false, adComing: false, holdSpent: false, begun: false,
     viewerPaused: false };
-  const settledCuts = new Set();
+  const settledCuts = view?.settled ?? new Set();
 
   const emit = (type, format, window) => {
     try {

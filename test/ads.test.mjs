@@ -55,7 +55,7 @@ function harness(options = {}) {
     video.dispatchEvent(new Event(type));
     await flush();
   };
-  return { video, ads, requests, pixels, events, added, removed, at };
+  return { session, fetchImpl, video, ads, requests, pixels, events, added, removed, at };
 }
 
 test('nothing is requested without a valid, current plan', async () => {
@@ -1855,4 +1855,19 @@ test('native GAM expiry during a midroll resumes content paused by the SDK', asy
     assert.equal(r.video.paused, false);
     r.ads.destroy();
   } finally { Date.now=original; }
+});
+
+
+test('native GAM renewal preserves graphic pacing in the same playback session', async () => {
+  const plan = makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    expires_at: new Date(Date.now()+60000).toISOString(), pacing: { max_per_video: 1 } });
+  const h = harness({ plan });
+  await h.at(40);
+  assert.equal(h.requests.length, 1);
+  h.ads.destroy();
+  const renewed = attachAds({ session: h.session, video: h.video, plan,
+    fetchImpl: h.fetchImpl });
+  await h.at(44);
+  assert.equal(h.requests.length, 1);
+  renewed.destroy();
 });

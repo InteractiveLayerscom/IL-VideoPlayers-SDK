@@ -377,3 +377,7 @@ La licencia está en `web/fonts/OFL.txt`; conservala si redistribuís la carpeta
 Plans with `version: 2` require `native_gam.contract: "native-gam-plan-v1"` and an `expires_at` no more than 120 seconds ahead. Earlier SDKs reject this plan version. The web ads module checks validity while mounted, clears ads and pending requests at expiry, and emits `plan_expired`. The host must obtain a fresh plan and attach it to resume contextual advertising; playback itself continues. Do not extend a stored plan's expiration locally.
 
 Native plans request each IMA break just before its moment, including single-request breaks. `vmap()` returns an empty schedule for these plans so a VMAP cannot retain future versioned tags. Version 1 behavior is unchanged. Native GAM rollout is limited to this web consumer; Android/TV and third-party SSAI consumers require equivalent version/expiry verification before enabling this mode.
+
+Native GAM renewal keeps graphic pacing, attempted windows and settled cuts for the lifetime
+of the same SDK session and asset version. Reuse that session when replacing an expired plan;
+creating a new session would represent a new view and reset those limits.
