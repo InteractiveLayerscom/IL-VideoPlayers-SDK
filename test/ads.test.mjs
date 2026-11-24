@@ -55,7 +55,7 @@ function harness(options = {}) {
     video.dispatchEvent(new Event(type));
     await flush();
   };
-  return { video, ads, requests, pixels, events, added, removed, at };
+  return { session, fetchImpl, video, ads, requests, pixels, events, added, removed, at };
 }
 
 test('nothing is requested without a valid, current plan', async () => {
@@ -1785,4 +1785,89 @@ test('with IMA ad rules (one request per cut) the product changes nothing in the
   assert.equal(strip(made.requests[1].adsResponse), strip(made.requests[0].adsResponse));
   plain.ads.destroy();
   withCard.ads.destroy();
+});
+
+test('native GAM plans expire while mounted and cannot request after a seek', async () => {
+  const now = Date.now;
+  let wall = now();
+  Date.now = () => wall;
+  try {
+    const h = harness({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+      expires_at: new Date(wall + 60000).toISOString() }) });
+    await h.at(40);
+    assert.equal(h.requests.length, 1);
+    wall += 60000;
+    await h.at(45, 'seeking');
+    assert.ok(h.removed.length > 0);
+    await h.at(40, 'seeked');
+    assert.equal(h.requests.length, 1);
+    assert.ok(h.events.some(e => e.type === 'plan_expired'));
+    h.ads.destroy();
+  } finally { Date.now = now; }
+});
+
+test('native GAM rejects a plan with unsupported contract or validity over two minutes', async () => {
+  for (const plan of [makePlan({ version: 2 }), makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' } })]) {
+    const h = harness({ plan });
+    await h.at(40);
+    assert.equal(h.requests.length, 0);
+    h.ads.destroy();
+  }
+});
+
+test('native GAM seeking out of a window removes its prefetched graphic immediately', async () => {
+  const h = harness({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    expires_at: new Date(Date.now() + 60000).toISOString() }) });
+  await h.at(40);
+  assert.equal(h.added.length, 1);
+  await h.at(10, 'seeking');
+  assert.equal(h.removed.length, 1);
+  h.ads.destroy();
+});
+
+test('native GAM settles contextual cuts crossed by a seek', async () => {
+  const r = await waterfallRig({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    expires_at: new Date(Date.now()+60000).toISOString(), cuts: [{ id: 'mid', at: 60, position: 'midroll', tag_url: TAG }] }) });
+  r.ads.start();
+  r.at(1, 'playing');
+  r.at(90, 'seeking');
+  r.at(90, 'seeked');
+  assert.equal(r.made.requests.length, 0);
+  r.ads.destroy();
+});
+
+test('native GAM expiry during a midroll resumes content paused by the SDK', async () => {
+  const original = Date.now;
+  let now = original();
+  Date.now = () => now;
+  try {
+    const r = await waterfallRig({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+      expires_at: new Date(now+60000).toISOString(), cuts: [{ id: 'mid', at: 60, position: 'midroll', tag_url: TAG }] }) });
+    r.ads.start();
+    r.at(60, 'playing');
+    const manager=r.made.load();
+    manager.fire('pause', {});
+    manager.fire('started', {});
+    assert.equal(r.video.paused, true);
+    now+=60000;
+    r.video.dispatchEvent(new Event('timeupdate'));
+    await ticks();
+    assert.equal(r.video.paused, false);
+    r.ads.destroy();
+  } finally { Date.now=original; }
+});
+
+
+test('native GAM renewal preserves graphic pacing in the same playback session', async () => {
+  const plan = makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    expires_at: new Date(Date.now()+60000).toISOString(), pacing: { max_per_video: 1 } });
+  const h = harness({ plan });
+  await h.at(40);
+  assert.equal(h.requests.length, 1);
+  h.ads.destroy();
+  const renewed = attachAds({ session: h.session, video: h.video, plan,
+    fetchImpl: h.fetchImpl });
+  await h.at(44);
+  assert.equal(h.requests.length, 1);
+  renewed.destroy();
 });

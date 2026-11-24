@@ -336,3 +336,14 @@ test('a scene product wins its window on AVPlay and carries Buy', async (t) => {
   assert.ok(r.cues[0].item.commerce);
   assert.ok(!r.fetched.some((url) => url.includes('doubleclick')));
 });
+
+test('AVPlay refuses native GAM v2 plans until its own scheduler supports expiry', async (t) => {
+  const r = planRig({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    cuts: [{ id: 'mid', at: 60, tag_url: GAM, position: 'midroll' }] }, () => ({ ok: true, text: async () => linear() }));
+  t.after(() => r.sdk.destroy());
+  await r.sdk.start();
+  r.avplay.time=60000;
+  r.sdk.tick();
+  await flush();
+  assert.equal(r.fetched.length, 0);
+});
