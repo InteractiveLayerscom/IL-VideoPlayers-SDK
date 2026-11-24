@@ -1786,3 +1786,41 @@ test('with IMA ad rules (one request per cut) the product changes nothing in the
   plain.ads.destroy();
   withCard.ads.destroy();
 });
+
+test('native GAM plans expire while mounted and cannot request after a seek', async () => {
+  const now = Date.now;
+  let wall = now();
+  Date.now = () => wall;
+  try {
+    const h = harness({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+      expires_at: new Date(wall + 60000).toISOString() }) });
+    await h.at(40);
+    assert.equal(h.requests.length, 1);
+    wall += 60000;
+    await h.at(45, 'seeking');
+    assert.ok(h.removed.length > 0);
+    await h.at(40, 'seeked');
+    assert.equal(h.requests.length, 1);
+    assert.ok(h.events.some(e => e.type === 'plan_expired'));
+    h.ads.destroy();
+  } finally { Date.now = now; }
+});
+
+test('native GAM rejects a plan with unsupported contract or validity over two minutes', async () => {
+  for (const plan of [makePlan({ version: 2 }), makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' } })]) {
+    const h = harness({ plan });
+    await h.at(40);
+    assert.equal(h.requests.length, 0);
+    h.ads.destroy();
+  }
+});
+
+test('native GAM seeking out of a window removes its prefetched graphic immediately', async () => {
+  const h = harness({ plan: makePlan({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
+    expires_at: new Date(Date.now() + 60000).toISOString() }) });
+  await h.at(40);
+  assert.equal(h.added.length, 1);
+  await h.at(10, 'seeking');
+  assert.equal(h.removed.length, 1);
+  h.ads.destroy();
+});

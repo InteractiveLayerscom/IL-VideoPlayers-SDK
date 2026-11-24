@@ -105,7 +105,8 @@ function readCommerce(commerce) {
 function readPlan(plan, now) {
   const scenes = plan?.scenes;
   const expires = typeof plan?.expires_at === 'string' ? Date.parse(plan.expires_at) : NaN;
-  if (plan?.version !== 1 || !(expires > now)) return null;
+  if (![1, 2].includes(plan?.version) || !(expires > now)) return null;
+  if (plan.version === 2 && (plan.native_gam?.contract !== 'native-gam-plan-v1' || expires - now > 120000)) return null;
   // A timeline this module does not know could put graphics over ads: no plan rather than a wrong one.
   if (plan.timeline != null && !stitchedTimeline(plan.timeline)) return null;
   if (scenes == null) return Array.isArray(plan.cuts) || readCommerce(plan.commerce) ? plan : null;
@@ -363,6 +364,8 @@ export function attachAds({
 } = {}) {
   const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
+  const native = valid.version === 2;
+  let expiryTimer;
   // Stitched: the ads are already in the stream. Nothing here requests or plays a video break, whatever
   // the host passed, and without a content clock the video position is stream time: no graphics either.
   const stitched = valid.timeline?.kind === 'stitched';
@@ -453,7 +456,7 @@ export function attachAds({
   // With a cut of several requests the module schedules the breaks and asks them in order;
   // every other plan keeps IMA's ad rules (one VMAP) exactly as before.
   const useIma = !stitched && linear === 'ima' && cuts.length > 0 && !!adContainer;
-  const waterfall = useIma && cuts.some((cut) => cut.requests.length > 1);
+  const waterfall = useIma && (native || cuts.some((cut) => cut.requests.length > 1));
   // token: bumped by every attempt, cancel and settle, so late IMA answers are recognised as stale.
   const wf = { cut: null, index: 0, token: 0, phase: 'idle', timer: null, holdTimer: null, dueAt: null, started: false,
     held: false, ownPause: false, adComing: false, holdSpent: false, begun: false,
@@ -594,12 +597,12 @@ export function attachAds({
     try {
       emit('request', OVERLAY, window);
       const gpt = await setUpGpt();
-      if (disposed || abort.signal.aborted) reject('aborted');
+      if (disposed || expired() || abort.signal.aborted) reject('aborted');
       const event = await new Promise((resolve, fail) => {
         abort.signal.addEventListener('abort', () => fail(new Error('timeout')));
         gptQueue(() => {
           try {
-            if (disposed || abort.signal.aborted) reject('aborted');
+            if (disposed || expired() || abort.signal.aborted) reject('aborted');
             const service = gpt.pubads();
             const slot = gpt.defineSlot(unit, [300, 250], overlay.node.id);
             if (!slot) reject('slot_unavailable');
@@ -670,7 +673,7 @@ export function attachAds({
       const res = await fetchImpl(url, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
       if (!res.ok) reject('graphic_vast_http_error');
       const ad = parseGraphicVast(await res.text(), format, window.end - Math.max(window.start, now() ?? window.start));
-      if (disposed || abort.signal.aborted) return;
+      if (disposed || expired() || abort.signal.aborted) return;
       if (!ad) return emit('no_fill', format, window);
       if (now() != null && now() >= window.end) return;
       shown.push(window);
@@ -712,11 +715,11 @@ export function attachAds({
       const href = withParams(shop.url, extra);
       emit('request', PRODUCT, window);
       const res = await fetchImpl(href, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
-      if (disposed || abort.signal.aborted) reject('aborted');
+      if (disposed || expired() || abort.signal.aborted) reject('aborted');
       // 204 (no product) and 429 (rate limit) are the same answer: nothing in this window.
       if (res.status !== 200) return emit('no_fill', PRODUCT, window);
       const card = await res.json();
-      if (disposed || abort.signal.aborted) reject('aborted');
+      if (disposed || expired() || abort.signal.aborted) reject('aborted');
       const start = Math.max(window.start, Number(card?.start));
       // A designed banner lasts what its creative says, up to the end IL verified; a plain card stays in its window.
       const designed = !!session.sceneFeatures && !!card?.scene;
@@ -773,7 +776,18 @@ export function attachAds({
     (!cue.replay || cue.onScreen || (time >= cue.start - shop.lead_ms && time < cue.end)));
 
   function sync(event) {
-    if (disposed) return;
+    if (disposed || expired()) return;
+    if (native && event?.type === 'seeking') {
+      controller?.abort();
+      controller = null;
+      productController?.abort();
+      productController = null;
+      cancelAttempt();
+      dropSlot();
+      for (const [id, cue] of cues) if (cue.onScreen) session.removeCue(id);
+      cues.clear();
+      return;
+    }
     // A stitched ad starting is a new ad break: it closes the product kept from the content.
     if (stitched && clock.inAd?.()) session.closeProduct?.();
     // No ad server is asked before the viewer has started playback in this session.
@@ -1158,6 +1172,7 @@ export function attachAds({
     }
   }
   function ask(cut, index) {
+    if (expired()) return;
     const token = ++wf.token;
     Object.assign(wf, { cut, index, phase: 'asking' });
     clearTimeout(wf.timer);
@@ -1195,6 +1210,7 @@ export function attachAds({
     ask(cut, index + 1);
   }
   function play() {
+    if (expired()) return;
     const token = wf.token;
     wf.phase = 'running';
     clearTimeout(wf.timer);
@@ -1246,7 +1262,7 @@ export function attachAds({
   function walkLoaded(event) {
     const token = event.getUserRequestContext?.()?.token;
     const manager = event.getAdsManager(video);
-    if (disposed || token !== wf.token || wf.phase !== 'asking') {
+    if (disposed || expired() || token !== wf.token || wf.phase !== 'asking') {
       try {
         manager?.destroy?.();
       } catch {
@@ -1296,7 +1312,7 @@ export function attachAds({
     try {
       await loadScript(IMA_URL);
       const sdk = globalThis.google?.ima;
-      if (disposed || ima.gaveUp) return;
+      if (disposed || expired() || ima.gaveUp) return;
       if (!sdk) reject('ima_unavailable');
       clearTimeout(ima.loadTimer);
       ima.sdk = sdk;
@@ -1440,10 +1456,18 @@ export function attachAds({
   }
   if (useIma) video.addEventListener('volumechange', syncAdVolume);
   if (useIma) void setUpIma();
-  sync();
-  return {
+  function expired() {
+    if (!native || Date.now() < Date.parse(valid.expires_at)) return false;
+    if (!disposed) {
+      api.destroy();
+      try { onEvent?.({ type: 'plan_expired' }); } catch { /* diagnostics cannot interrupt playback */ }
+    }
+    return true;
+  }
+  const api = {
     cuts,
-    vmap: () => buildVmap(cuts),
+    // Native revisions are requested just in time. A VMAP would retain future tags past expiry.
+    vmap: () => buildVmap(native ? [] : cuts),
     setBreaks(seconds) {
       if (disposed || !scenes || !Array.isArray(seconds)) return;
       windows = usableWindows({ scenes, cuts: seconds.filter(isNumber).map((at) => ({ at })) });
@@ -1458,7 +1482,7 @@ export function attachAds({
       sync();
     },
     start() {
-      if (disposed || !useIma || ima.started) return;
+      if (disposed || expired() || !useIma || ima.started) return;
       ima.started = true;
       if (!ima.sdk) {
         ima.loadTimer = setTimeout(() => {
@@ -1484,6 +1508,7 @@ export function attachAds({
     destroy() {
       if (disposed) return;
       disposed = true;
+      clearTimeout(expiryTimer);
       breakShop.deferred = null;
       releaseHeld(false);
       clearWalkTimers();
@@ -1533,4 +1558,10 @@ export function attachAds({
       cues.clear();
     },
   };
+  if (native) {
+    expiryTimer = setTimeout(expired, Math.max(0, Date.parse(valid.expires_at) - Date.now()));
+    expiryTimer.unref?.();
+  }
+  sync();
+  return api;
 }
