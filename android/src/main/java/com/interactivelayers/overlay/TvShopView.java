@@ -653,10 +653,13 @@ final class TvShopView extends LinearLayout {
         inset.leftMargin = inset.rightMargin = 2 * ring();
         footer.addView(sum, inset);
         Button finish = button(l("Continue to QR", "Continuar con el QR", "Continuar com o QR"), host::buy, Kind.PRIMARY);
-        finish.setEnabled(available());
-        if (!available()) finish.setAlpha(.42f);
+        // A variant whose cart answered 404 cannot be bought again; another variant can.
+        boolean canBuy = available() && !host.selectedGone();
+        if (host.selectedGone()) body.addView(text(host.copy[8], 1, 500), gapped(-1, -2, .65f));
+        finish.setEnabled(canBuy);
+        if (!canBuy) finish.setAlpha(.42f);
         footer.addView(finish, gapped(-1, -2, .65f - 2 * ring() / em()));
-        if (available()) focus = finish;
+        if (canBuy) focus = finish;
     }
 
     private void handoffPage() {

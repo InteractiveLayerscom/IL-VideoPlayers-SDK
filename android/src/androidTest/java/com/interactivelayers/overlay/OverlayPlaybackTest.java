@@ -865,6 +865,233 @@ public final class OverlayPlaybackTest {
         }
     }
 
+    private boolean textShown(String text) {
+        java.util.ArrayList<View> found = new java.util.ArrayList<>();
+        view.findViewsWithText(found, text, View.FIND_VIEWS_WITH_TEXT);
+        found.removeIf(item -> !item.isShown());
+        return !found.isEmpty();
+    }
+
+    private interface Probe { boolean test(); }
+
+    /** Views are read on the main thread: the test thread only waits and sends keys. */
+    private boolean onMain(Probe probe) {
+        boolean[] result = new boolean[1];
+        activity.onActivity(a -> result[0] = probe.test());
+        return result[0];
+    }
+
+    private boolean tvPanelOpen() {
+        return !buttons("Continuar con el QR").isEmpty() || !buttons("Agregar al carrito").isEmpty()
+                || !buttons("Elegir opciones").isEmpty() || !buttons("Ver detalles").isEmpty() || textShown("Esta oferta ya no está disponible.");
+    }
+
+    /** Real Back keys until the TV panel is closed (the open panel takes Back before the activity). */
+    private void tvBackUntilClosed() throws Exception {
+        for (int step = 0; step < 5 && onMain(this::tvPanelOpen); step++) remote(android.view.KeyEvent.KEYCODE_BACK);
+        assertFalse("the panel is closed", onMain(this::tvPanelOpen));
+    }
+
+    /** The TV shop of the /commerce card up to «Continuar con el QR», pressed with the cart answering `status`. */
+    private void tvCheckoutWithCart(int status, boolean single) throws Exception {
+        network.cartStatus = status;
+        activity.onActivity(a -> {
+            overlays = OverlayController.attachCommerce(view, network.url(single ? "/commerce?single=1" : "/commerce"),
+                    "tv-session", "es", "AR", true);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> onMain(() -> !buttons("Ver producto").isEmpty()));
+        activity.onActivity(a -> {
+            clickButton("Ver producto");
+            clickButton(single ? "Ver detalles" : "Elegir opciones");
+            clickButton("Agregar al carrito");
+            clickButton("Continuar con el QR");
+        });
+    }
+
+    private void tvCheckoutWithCart(int status) throws Exception { tvCheckoutWithCart(status, false); }
+
+    /** After a 404 for the selected variant: the message, no retry, focus on «Atrás»; Back to a cart that is off. */
+    private void tvVariantIsGone(String step) throws Exception {
+        await(() -> onMain(() -> textShown("Esta oferta ya no está disponible.") && buttons("Agregar al carrito").isEmpty()
+                && buttons("Continuar con el QR").isEmpty()));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> {
+            assertTrue(step, buttons("Reintentar").isEmpty());
+            assertFalse(step, textShown("No se pudo preparar el carrito. Intentá de nuevo."));
+            assertBackInPanelHasFocus(step + ", on the message");
+        });
+        // Real Back keys: the open panel takes them before the activity.
+        remote(android.view.KeyEvent.KEYCODE_BACK);
+        activity.onActivity(a -> {
+            assertFalse(step + ": no second attempt for this variant", buttons("Continuar con el QR").get(0).isEnabled());
+            assertTrue(step + ": the cart says why", textShown("Esta oferta ya no está disponible."));
+            assertBackInPanelHasFocus(step + ", on the cart");
+        });
+    }
+
+    /** From the cart, back to the details step, another size, and into its cart. */
+    private void tvChooseAndAdd(String size) {
+        remote(android.view.KeyEvent.KEYCODE_BACK);
+        activity.onActivity(a -> { clickButton(size); clickButton("Agregar al carrito"); });
+    }
+
+    // iADServer answers 404 for an expired delivery or a variant that is gone. The variant that answered 404 is off,
+    // as web says; another one can still be bought.
+    @Test public void aGoneVariantOnTvLeavesTheOthersBuyable() throws Exception {
+        tvCheckoutWithCart(404);
+        tvVariantIsGone("Talle 42");
+        network.cartStatus = 200;
+        tvChooseAndAdd("Talle 43");
+        activity.onActivity(a -> {
+            assertTrue("another variant can be bought", buttons("Continuar con el QR").get(0).isEnabled());
+            assertFalse(textShown("Esta oferta ya no está disponible."));
+            clickButton("Continuar con el QR");
+        });
+        await(() -> onMain(this::qrShown));
+        assertEquals(java.util.Arrays.asList("{\"variantId\":\"42\"}", "{\"variantId\":\"43\"}"), network.checkoutSelections);
+    }
+
+    // An expired delivery: every variant tried answers 404 and is turned off; the first stays off when chosen again;
+    // the panel still closes with Back.
+    @Test public void anExpiredDeliveryOnTvTurnsEachVariantOff() throws Exception {
+        tvCheckoutWithCart(404);
+        tvVariantIsGone("Talle 42");
+        tvChooseAndAdd("Talle 43");
+        activity.onActivity(a -> clickButton("Continuar con el QR"));
+        tvVariantIsGone("Talle 43");
+        tvChooseAndAdd("Talle 42");
+        activity.onActivity(a -> {
+            assertFalse("the first stays off", buttons("Continuar con el QR").get(0).isEnabled());
+            assertTrue(textShown("Esta oferta ya no está disponible."));
+        });
+        tvBackUntilClosed();
+        assertEquals(2, network.checkoutSelections.size());
+    }
+
+    // A product without options (one "Default Title" variant) answering 404: the message, the checkout off and staying
+    // off when the viewer comes back to the cart, and the panel closes.
+    @Test public void aSingleVariantProductOnTvAnswering404StaysOff() throws Exception {
+        tvCheckoutWithCart(404, true);
+        tvVariantIsGone("Default Title");
+        remote(android.view.KeyEvent.KEYCODE_BACK);  // to the details step
+        activity.onActivity(a -> clickButton("Agregar al carrito"));
+        activity.onActivity(a -> {
+            assertFalse("still off", buttons("Continuar con el QR").get(0).isEnabled());
+            assertTrue(textShown("Esta oferta ya no está disponible."));
+        });
+        tvBackUntilClosed();
+        assertEquals(1, network.checkoutSelections.size());
+    }
+
+    /** The remote stays usable: focus is on the panel header's back control («Atrás»), inside the open panel. */
+    private void assertBackInPanelHasFocus(String where) {
+        View focus = view.getRootView().findFocus();
+        assertNotNull(where + ": something has focus", focus);
+        assertNotNull(where + ": focus is inside the panel", ancestor(focus, CommercePanel.class));
+        assertEquals(where + ": the back control", "Atrás", String.valueOf(focus.getContentDescription()));
+    }
+
+    // Any other failure keeps today's message and its retry.
+    @Test public void anotherCartFailureOnTvStillOffersRetry() throws Exception {
+        tvCheckoutWithCart(500);
+        await(() -> onMain(() -> textShown("No se pudo preparar el carrito. Intentá de nuevo.")));
+        activity.onActivity(a -> {
+            assertEquals(1, buttons("Reintentar").size());
+            assertFalse(textShown("Esta oferta ya no está disponible."));
+        });
+    }
+
+    /** The phone panel of the /commerce card, «Comprar» pressed for the first size with the cart answering 404. */
+    private void phoneFirstVariantGone(boolean single) throws Exception {
+        network.cartStatus = 404;
+        activity.onActivity(a -> {
+            overlays = OverlayController.attachCommerce(view, network.url(single ? "/commerce?single=1" : "/commerce"),
+                    "phone-session", "es", "AR", false);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> onMain(() -> !buttons("Ver producto").isEmpty()));
+        activity.onActivity(a -> {
+            clickButton("Ver producto");
+            clickButton("Comprar");
+        });
+        await(() -> onMain(() -> textShown("Esta oferta ya no está disponible.")));
+        activity.onActivity(a -> assertFalse("no second attempt for this size", buttons("Comprar").get(0).isEnabled()));
+    }
+
+    @Test public void aGoneVariantOnThePhoneLeavesTheOthersBuyable() throws Exception {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        IntentFilter filter = new IntentFilter(Intent.ACTION_VIEW);
+        Uri continuation = Uri.parse(network.url("/continue"));
+        filter.addDataScheme("https");
+        filter.addDataAuthority(continuation.getHost(), Integer.toString(continuation.getPort()));
+        filter.addDataPath(continuation.getPath(), PatternMatcher.PATTERN_LITERAL);
+        Instrumentation.ActivityMonitor monitor = instrumentation.addMonitor(filter, null, true);
+        try {
+            phoneFirstVariantGone(false);
+            activity.onActivity(a -> {
+                clickButton("Talle 43");
+                assertTrue("another size can be bought", buttons("Comprar").get(0).isEnabled());
+                assertFalse("the message is cleared", textShown("Esta oferta ya no está disponible."));
+                network.cartStatus = 200;
+                clickButton("Comprar");
+            });
+            await(() -> monitor.getHits() == 1);
+            assertEquals(java.util.Arrays.asList("{\"variantId\":\"42\"}", "{\"variantId\":\"43\"}"), network.checkoutSelections);
+        } finally {
+            instrumentation.removeMonitor(monitor);
+        }
+    }
+
+    @Test public void anExpiredDeliveryOnThePhoneTurnsEachVariantOff() throws Exception {
+        phoneFirstVariantGone(false);
+        activity.onActivity(a -> {
+            clickButton("Talle 43");
+            clickButton("Comprar");
+        });
+        await(() -> onMain(() -> textShown("Esta oferta ya no está disponible.") && !buttons("Comprar").get(0).isEnabled()));
+        activity.onActivity(a -> {
+            clickButton("Talle 42");
+            assertFalse("the first stays off", buttons("Comprar").get(0).isEnabled());
+            assertTrue(textShown("Esta oferta ya no está disponible."));
+            assertTrue("the panel closes", overlays.closeCommercePanel());
+            assertFalse(buttons("Ver producto").isEmpty());
+        });
+        assertEquals(2, network.checkoutSelections.size());
+    }
+
+    // A product without options answering 404 on the phone: the message, «Comprar» off, also when the panel is opened
+    // again, and the panel closes.
+    @Test public void aSingleVariantProductOnThePhoneAnswering404StaysOff() throws Exception {
+        phoneFirstVariantGone(true);
+        activity.onActivity(a -> {
+            assertTrue("the panel closes", overlays.closeCommercePanel());
+            clickButton("Ver producto");
+            assertFalse("still off when opened again", buttons("Comprar").get(0).isEnabled());
+            assertTrue(textShown("Esta oferta ya no está disponible."));
+            assertTrue(overlays.closeCommercePanel());
+        });
+        assertEquals(1, network.checkoutSelections.size());
+    }
+
+    @Test public void anotherCartFailureOnThePhoneStillOffersBuy() throws Exception {
+        network.cartStatus = 500;
+        activity.onActivity(a -> {
+            overlays = OverlayController.attachCommerce(view, network.url("/commerce"), "phone-session", "es", "AR", false);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> onMain(() -> !buttons("Ver producto").isEmpty()));
+        activity.onActivity(a -> {
+            clickButton("Ver producto");
+            clickButton("Comprar");
+        });
+        await(() -> onMain(() -> textShown("No se pudo preparar el carrito. Intentá de nuevo.")));
+        activity.onActivity(a -> assertTrue(buttons("Comprar").get(0).isEnabled()));
+    }
+
     private java.util.List<View> buttons(String title) {
         java.util.ArrayList<View> matched = new java.util.ArrayList<>();
         view.findViewsWithText(matched, title, View.FIND_VIEWS_WITH_TEXT);
