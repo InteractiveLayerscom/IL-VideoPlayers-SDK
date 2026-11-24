@@ -119,3 +119,11 @@ El SDK muestra el acceso de compra si el feed devuelve el mismo creativo y entre
 ## Plan de anuncios
 
 Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.
+
+## Tipografía de la tienda
+
+Los paneles de producto de TV y de móvil usan Montserrat, la primera fuente que nombra la tienda web, con sus pesos: 500 para el texto, 600 para los botones, 650 para los encabezados y 700 para títulos y precios. En Android, la biblioteca incluye la fuente y la app no tiene que agregar nada. En la web, la tienda solo la muestra si la página ya cargó Montserrat; si no, usa la siguiente fuente de la lista. Desde Android 8.0 (API 26) se usa la fuente incluida. En versiones anteriores, o si la fuente no se puede usar, los paneles usan la fuente del sistema. Una capa de escena cuyo `fontFamily` empieza por Montserrat también recibe la fuente incluida; las demás familias se resuelven como antes.
+
+## Avisos de terceros
+
+**Montserrat** (Copyright 2024 The Montserrat.Git Project Authors) se distribuye bajo la SIL Open Font License 1.1, sin nombre de fuente reservado. El archivo `src/main/assets/interactivelayers/fonts/Montserrat[wght].ttf` es la fuente variable sin modificar del repositorio `google/fonts` (`ofl/montserrat/`, commit `06bfe0d62a98375cb09c942fa18e68bd32cff057`), SHA-256 `0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7`. La licencia completa está al lado, en `OFL.txt`, y viaja en el AAR con la fuente.

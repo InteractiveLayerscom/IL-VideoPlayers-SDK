@@ -98,7 +98,10 @@ final class SceneViews extends FrameLayout {
                 catch (NumberFormatException ignored) { weight = 400; }
                 int typeface = weight >= 600 ? Typeface.BOLD : Typeface.NORMAL;
                 if ("italic".equals(layer.fontStyle)) typeface |= Typeface.ITALIC;
-                text.setTypeface(Typeface.create(layer.fontFamily, typeface));
+                // A layer that asks for Montserrat gets the bundled font at its weight; other families as before.
+                Typeface bundled = OverlayFonts.asksForMontserrat(layer.fontFamily) ? OverlayFonts.montserrat(getContext(), weight) : null;
+                if (bundled != null) text.setTypeface(bundled, (typeface & Typeface.ITALIC) != 0 ? Typeface.ITALIC : Typeface.NORMAL);
+                else text.setTypeface(Typeface.create(layer.fontFamily, typeface));
                 text.setLineSpacing(0, layer.lineHeight);
                 text.setLetterSpacing(layer.letterSpacing / Math.max(1, layer.fontSize));
                 if (layer.maxLines > 0) {

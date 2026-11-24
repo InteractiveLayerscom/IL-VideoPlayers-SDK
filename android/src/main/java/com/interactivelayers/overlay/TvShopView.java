@@ -195,10 +195,8 @@ final class TvShopView extends LinearLayout {
 
     private int px(float ems) { return Math.round(ems * em()); }
 
-    static Typeface weight(int weight) {
-        if (Build.VERSION.SDK_INT >= 28) return Typeface.create(Typeface.DEFAULT, weight, false);
-        return weight >= 600 ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT;
-    }
+    /** The bundled Montserrat at a web CSS weight (API 26+), else the system font. */
+    Typeface weight(int weight) { return OverlayFonts.at(getContext(), weight); }
 
     /** A text in the sheet's type scale: size in em, CSS weight and line height, opacity. */
     TextView text(String value, float size, int weight, float lineHeight, float alpha, float em) {
