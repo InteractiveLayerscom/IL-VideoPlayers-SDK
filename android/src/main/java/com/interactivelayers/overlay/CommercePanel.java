@@ -58,6 +58,10 @@ final class CommercePanel extends LinearLayout {
     private int generation, photoGeneration, phonePage;
     int selection;
     private boolean expanded, disposed;
+    /** Set while the panel is held past its ad: the viewer closing it removes it instead of folding it back. */
+    Runnable onViewerClosed;
+    /** Media keys while the SDK holds the host's controller (OverlayController.mediaKey). */
+    MediaKeys mediaKeys;
     private TextView status;
     private static final int NEUTRAL = 0xff303030, SELECTED = 0xff515151, PRIMARY = 0xfff0f0f0;
     private static final int EDGE = 0xff646464;
@@ -152,10 +156,14 @@ final class CommercePanel extends LinearLayout {
         super.onMeasure(widthSpec, heightSpec);
     }
 
+    /** True while the viewer has the product open. */
+    boolean expanded() { return expanded; }
+
     boolean closeDetails() {
         if (!expanded) return false;
         if (tv && shop.back()) return true;
         if (onClose != null) onClose.run();
+        else if (onViewerClosed != null) onViewerClosed.run();
         else {
             cancelCheckout();
             clearPhotos();
@@ -329,7 +337,10 @@ final class CommercePanel extends LinearLayout {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && expanded) {
+        if (mediaKeys != null && mediaKeys.handle(event)) return true;
+        // Escape is Back for the panel, as on web: the emulator sends it for the host's Esc key.
+        int key = event.getKeyCode();
+        if ((key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_ESCAPE) && expanded) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) closeDetails();
             return true;
         }

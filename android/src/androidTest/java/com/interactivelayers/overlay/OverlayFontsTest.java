@@ -144,8 +144,14 @@ public final class OverlayFontsTest {
         OverlayFonts.measure = typeface -> 100f;
         for (int weight : new int[]{500, 600, 650, 700}) assertNull(OverlayFonts.montserrat(context(), weight));
         Typeface regular = OverlayFonts.at(context(), 500), bold = OverlayFonts.at(context(), 700);
-        assertEquals(Typeface.create(Typeface.DEFAULT, 500, false), regular);
-        assertEquals(Typeface.create(Typeface.DEFAULT, 700, false), bold);
+        // The system faces at() gives: weighted from API 28 (Typeface.create(Typeface, int, boolean)), regular and bold below.
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            assertEquals(Typeface.create(Typeface.DEFAULT, 500, false), regular);
+            assertEquals(Typeface.create(Typeface.DEFAULT, 700, false), bold);
+        } else {
+            assertSame(Typeface.DEFAULT, regular);
+            assertSame(Typeface.DEFAULT_BOLD, bold);
+        }
         panel(false, OverlayFontsTest::phoneAsOnMain);
     }
 

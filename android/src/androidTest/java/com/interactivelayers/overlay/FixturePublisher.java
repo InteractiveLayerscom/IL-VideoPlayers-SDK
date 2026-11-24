@@ -135,8 +135,15 @@ final class FixturePublisher implements Closeable {
                 cue.put("start", 1795046400000L);
                 cue.put("end", 1795046418000L);
                 cue.put("impressionUrl", url("/measure/scene"));
-                return new MockResponse().setHeader("Content-Type", "application/json")
-                        .setBody(new org.json.JSONArray().put(cue).toString());
+                org.json.JSONArray cues = new org.json.JSONArray().put(cue);
+                // A second ad with the same layout right after the first, both inside the fixture's stream: the first
+                // from 0 s to 14 s, the second from 14 s past the end of the stream (so a pause always lands inside it).
+                if ("1".equals(request.queryParameter("second"))) {
+                    cue.put("end", 1795046414000L);
+                    cues.put(new org.json.JSONObject(cue.toString()).put("id", "scene-second").put("start", 1795046414000L)
+                            .put("end", 1795046436000L).put("impressionUrl", url("/measure/scene2")));
+                }
+                return new MockResponse().setHeader("Content-Type", "application/json").setBody(cues.toString());
             } catch (org.json.JSONException e) {
                 return new MockResponse().setResponseCode(500);
             }
