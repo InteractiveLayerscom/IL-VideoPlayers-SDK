@@ -44,3 +44,7 @@ Import the web adapters as ES modules. For native apps, follow the platform guid
 | Roku | BrighterScript validated the components. The BrightScript interpreter ran tests for cue parsing, playhead timing, ad breaks, and layout. |
 | Video.js, AVPlay, and HTML5 | The adapters were tested with a test DOM and platform API test doubles. Video output on the target TVs still needs device testing. |
 | Server-stitched ads (MediaTailor) | Content clocks for hls.js, Shaka, Video.js and Safari's own HLS played a local stitched stream in Chromium and WebKit (`npm run test:browser`, needs `ffmpeg`): no graphic on any ad frame, content time read from the frames, one request and one impression per window. [Details](web/README.md#anuncios-insertados-en-el-stream-mediatailor) |
+
+## Third-party notices
+
+The Android library bundles **Montserrat** (Copyright 2024 The Montserrat.Git Project Authors) for its product panels, under the SIL Open Font License 1.1 with no Reserved Font Name. The file is the unmodified variable font from `google/fonts` (`ofl/montserrat/Montserrat[wght].ttf`, commit `06bfe0d62a98375cb09c942fa18e68bd32cff057`, SHA-256 `0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7`). The licence is next to it in `android/src/main/assets/interactivelayers/fonts/OFL.txt`. See [Tipografía de la tienda](android/README.md#tipografía-de-la-tienda).

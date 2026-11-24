@@ -108,6 +108,11 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         this.television = television;
         this.sessionId = sessionId == null ? UUID.randomUUID().toString() : sessionId;
         layer = new OverlayLayer(view, this::measure);
+        // Builds the product panels' Montserrat weights off the main thread before a panel opens (~12 ms on the emulator).
+        if (commerceLocale != null) {
+            android.content.Context context = view.getContext();
+            workers.execute(() -> OverlayFonts.warm(context));
+        }
         view.setTag(R.id.il_overlay_controller, this);
         view.addOnAttachStateChangeListener(this);
         player.addListener(this);

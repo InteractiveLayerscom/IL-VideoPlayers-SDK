@@ -357,7 +357,10 @@ final class CommercePanel extends LinearLayout {
         text.setText(value);
         text.setTextColor(foreground);
         text.setTextSize(size);
-        if (bold) text.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        // Web's shop type: Montserrat 500, bold texts 700 (web/tv-shop.css). Without it, exactly the panel as before.
+        Typeface montserrat = OverlayFonts.montserrat(getContext(), bold ? 700 : 500);
+        if (montserrat != null) text.setTypeface(montserrat);
+        else if (bold) text.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         return text;
     }
 
@@ -390,6 +393,8 @@ final class CommercePanel extends LinearLayout {
         button.setFocusableInTouchMode(tv);
         button.setText(label);
         button.setTextSize(14);
+        Typeface montserrat = OverlayFonts.montserrat(getContext(), 600);
+        if (montserrat != null) button.setTypeface(montserrat);
         button.setAllCaps(false);
         button.setMinWidth(0);
         button.setMinHeight(dp(40));
