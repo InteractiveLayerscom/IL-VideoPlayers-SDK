@@ -1,4 +1,7 @@
+import { fontChecks } from './fonts-checks.mjs';
 import { containerChecks, plainChecks, renditionChecks, stitchedChecks } from './stitched-checks.mjs';
+
+fontChecks();
 
 // Media Source players: hls.js, Shaka and Video.js (VHS) in Chromium.
 for (const player of ['hls', 'shaka', 'videojs']) {
