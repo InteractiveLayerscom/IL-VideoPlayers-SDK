@@ -49,6 +49,15 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private final OverlayLayer layer;
     private final Set<String> viewed = new HashSet<>();
     private CommercePanel commercePanel;
+    // A product the viewer opened, kept after its ad ended (web: commerce.mjs withinHold, session.mjs holding).
+    private CommercePanel heldPanel;
+    private String heldId;
+    private View heldFocus;
+    // The PlayerView controller set aside while an actionable ad is up (TV): what the host had, and whether the host
+    // changed it since (then its value wins and the SDK no longer touches it).
+    private boolean remoteHeld, hostController, hostChanged;
+    // Where focus was before the ad took it: it goes back there when the ad and its panel are gone.
+    private View focusBeforeAd;
     private SceneViews scene;
     private OverlayCue active;
     private Object lastManifest;
@@ -123,6 +132,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     public void stop() {
         checkMainThread();
         enabled = false;
+        releaseHeld();
         update();
     }
 
@@ -148,7 +158,9 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
                 || !java.util.Objects.equals(delivery, midrollDeliveryId)) {
             cancelPoll();
             if (sidecar != null) cues.clear();
+            // A new break closes a product held from an earlier ad; the end of a break keeps it (web).
             clearActive();
+            if (active) releaseHeld();
         }
         linearAd = active;
         midrollCreativeId = creative;
@@ -212,6 +224,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     /** Gives the product panel first refusal of Back while retaining the host's fallback. */
     public boolean closeCommercePanel() {
         checkMainThread();
+        if (heldPanel != null && heldPanel.closeDetails()) return true;
         return commercePanel != null && commercePanel.closeDetails();
     }
 
@@ -220,6 +233,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         if (closed) return;
         stop();
         closed = true;
+        holdRemote();
         player.removeListener(this);
         view.removeOnAttachStateChangeListener(this);
         view.setTag(R.id.il_overlay_controller, null);
@@ -238,6 +252,8 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     @Override public void onViewDetachedFromWindow(View v) {
         main.removeCallbacks(pulse);
         suspendRendering();
+        releaseHeld();
+        holdRemote();
     }
 
     @Override public void onEvents(Player player, Player.Events events) {
@@ -245,6 +261,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             cues.clear();
             lastManifest = null;
             clearActive();
+            releaseHeld();
             cancelPoll();
         } else if (sidecar != null && events.contains(Player.EVENT_POSITION_DISCONTINUITY)) {
             cues.clear();
@@ -284,6 +301,18 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private void update() {
         main.removeCallbacks(pulse);
         if (closed) return;
+        try {
+            render();
+        } finally {
+            // Whatever happened while rendering, the controller follows what is on screen.
+            holdRemote();
+        }
+        if (enabled && view.isAttachedToWindow()) main.postDelayed(pulse, scene != null ? 32 : 200);
+    }
+
+    private void render() {
+        // A video ad starting (a new break) closes a held product, unless the product belongs to that playing ad.
+        if (heldPanel != null && (linearAd || player.isPlayingAd()) && !heldId.equals(midrollDeliveryId)) releaseHeld();
         long time = programTime();
         if (time == C.TIME_UNSET) {
             suspendRendering();
@@ -299,7 +328,82 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             }
             measure();
         }
-        if (enabled && view.isAttachedToWindow()) main.postDelayed(pulse, scene != null ? 32 : 200);
+    }
+
+    /**
+     * Media3's PlayerView sees every key before its children: with its controller in use, a D-pad key only shows the
+     * controller, which then takes focus. While an ad the viewer can act on is on screen on TV, the controller is
+     * set aside so the remote reaches the ad (as web's scene keeps the keys); the host's setting comes back after.
+     */
+    private void holdRemote() {
+        boolean actionable = !closed && enabled && view.isAttachedToWindow() && isTelevision()
+                && (heldPanel != null || commercePanel != null || (scene != null && scene.hasActions()));
+        if (remoteHeld && !hostChanged && view.getUseController()) hostChanged = true;  // the host's latest value wins
+        if (actionable && !remoteHeld) {
+            // Taken at once, also from a visible controller: every key would keep the controller up and the viewer
+            // would never reach the ad. The controller goes away while the ad is up and comes back after.
+            View before = view.getRootView().findFocus();
+            focusBeforeAd = before != null && !isOverlayChild(before) ? before : null;
+            hostController = view.getUseController();
+            hostChanged = false;
+            remoteHeld = true;
+            if (hostController) view.setUseController(false);
+        } else if (!actionable && remoteHeld) {
+            remoteHeld = false;
+            if (hostController && !hostChanged) view.setUseController(true);
+            View restore = focusBeforeAd;
+            focusBeforeAd = null;
+            // Only when focus is on nothing or still on the SDK's own views: focus the host moved stays where it is.
+            View now = view.getRootView().findFocus();
+            boolean ownerless = now == null || !now.isShown() || isOverlayChild(now);
+            if (ownerless && restore != null && restore.isAttachedToWindow() && restore.isShown()) restore.requestFocus();
+        }
+        if (scene != null) scene.allowFocus(adMayTakeFocus());
+    }
+
+    /** The ad takes focus only once the remote is its own, and never from an open product. */
+    private boolean adMayTakeFocus() {
+        return remoteHeld && heldPanel == null && (commercePanel == null || !commercePanel.expanded());
+    }
+
+    /**
+     * The media keys PlayerControlView handles, with its semantics, while the SDK has set the host's controller aside
+     * (PlayerView passes them to its controller only when the controller is in use).
+     */
+    boolean mediaKey(android.view.KeyEvent event) {
+        if (!remoteHeld || !hostController || hostChanged || view.getUseController()) return false;
+        int key = event.getKeyCode();
+        boolean handled = key == android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || key == android.view.KeyEvent.KEYCODE_HEADSETHOOK
+                || key == android.view.KeyEvent.KEYCODE_MEDIA_PLAY || key == android.view.KeyEvent.KEYCODE_MEDIA_PAUSE
+                || key == android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == android.view.KeyEvent.KEYCODE_MEDIA_REWIND
+                || key == android.view.KeyEvent.KEYCODE_MEDIA_NEXT || key == android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS;
+        if (!handled) return false;
+        if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;
+        if (key == android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) {
+            if (player.getPlaybackState() != Player.STATE_ENDED && player.isCommandAvailable(Player.COMMAND_SEEK_FORWARD)) player.seekForward();
+        } else if (key == android.view.KeyEvent.KEYCODE_MEDIA_REWIND) {
+            if (player.isCommandAvailable(Player.COMMAND_SEEK_BACK)) player.seekBack();
+        } else if (event.getRepeatCount() == 0) {
+            switch (key) {
+                case android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                case android.view.KeyEvent.KEYCODE_HEADSETHOOK:
+                    androidx.media3.common.util.Util.handlePlayPauseButtonAction(player); break;
+                case android.view.KeyEvent.KEYCODE_MEDIA_PLAY: androidx.media3.common.util.Util.handlePlayButtonAction(player); break;
+                case android.view.KeyEvent.KEYCODE_MEDIA_PAUSE: androidx.media3.common.util.Util.handlePauseButtonAction(player); break;
+                case android.view.KeyEvent.KEYCODE_MEDIA_NEXT:
+                    if (player.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT)) player.seekToNext(); break;
+                case android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                    if (player.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS)) player.seekToPrevious(); break;
+                default: break;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isOverlayChild(View focused) {
+        for (View v = focused; v != null; v = v.getParent() instanceof View ? (View) v.getParent() : null)
+            if (v instanceof CommercePanel || v instanceof SceneViews) return true;
+        return false;
     }
 
     private void readManifest() {
@@ -374,16 +478,41 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         }
         clearActive();
         if (cue == null) return;
+        // The same ad back (after buffering or a pause) takes its open product back; a new card replaces a held one
+        // (web: one card at a time).
+        CommercePanel resumed = heldPanel != null && cue.id.equals(heldId) ? heldPanel : null;
+        if (resumed != null) {
+            heldPanel = null;
+            resumed.onViewerClosed = null;
+        }
         active = cue;
+        if (resumed != null && cue.scene != null) {
+            scene = new SceneViews(layer.container(), cue, network, workers, isTelevision(), secondaryVideo,
+                    secondaryVideoAudio, this::measure,
+                    commerceLocale != null ? (offer, focus) -> openOffer(cue, offer, focus) : null);
+            scene.mediaKeys = this::mediaKey;
+            updateScene(time);
+            commercePanel = resumed;
+            resumed.bringToFront();
+            return;
+        }
+        commercePanel = resumed;
         if (cue.linearCreativeId != null) {
-            commercePanel = new CommercePanel(layer.container(), cue, null, network, workers, television, () -> markOpened(cue));
+            if (commercePanel == null) {
+                commercePanel = new CommercePanel(layer.container(), cue, null, network, workers, television,
+                        () -> { releaseHeld(); markOpened(cue); });
+                commercePanel.mediaKeys = this::mediaKey;
+                keepHeldFocus();
+            }
             return;
         }
         if (cue.scene != null) {
             scene = new SceneViews(layer.container(), cue, network, workers, isTelevision(), secondaryVideo,
                     secondaryVideoAudio, this::measure,
                     commerceLocale != null ? (offer, focus) -> openOffer(cue, offer, focus) : null);
+            scene.mediaKeys = this::mediaKey;
             updateScene(time);
+            keepHeldFocus();
             return;
         }
         long request = ++imageGeneration;
@@ -400,11 +529,14 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
                 imageRequest = null;
                 if (loaded != null && currentCueIsActive()) {
                     layer.show(active, loaded);
-                    if (active.commerce != null) {
+                    keepHeldFocus();
+                    if (active.commerce != null && commercePanel == null) {
                         OverlayCue offer = active;
                         commercePanel = new CommercePanel(layer.container(), offer, loaded, network,
-                                workers, television, () -> markOpened(offer));
-                    }
+                                workers, television, () -> { releaseHeld(); markOpened(offer); });
+                        commercePanel.mediaKeys = this::mediaKey;
+                        keepHeldFocus();
+                    } else if (commercePanel != null) commercePanel.bringToFront();
                 }
             });
         });
@@ -415,12 +547,44 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         imageGeneration++;
         if (imageRequest != null) imageRequest.cancel(true);
         imageRequest = null;
+        OverlayCue ended = active;
         active = null;
-        if (commercePanel != null) commercePanel.dispose();
+        // The product the viewer has open outlives its ad: only the graphic goes (the súper lasts its window).
+        if (commercePanel != null && commercePanel.expanded() && heldPanel == null && !closed && enabled) hold(commercePanel, ended);
+        else if (commercePanel != null) commercePanel.dispose();
         commercePanel = null;
         if (scene != null) scene.dispose();
         scene = null;
         layer.clear();
+    }
+
+    /** A card appearing behind a held panel must not take the viewer's place in it. */
+    private void keepHeldFocus() {
+        if (heldPanel == null) return;
+        heldPanel.bringToFront();
+        if (!heldPanel.hasFocus() && heldFocus != null && heldFocus.isAttachedToWindow()) heldFocus.requestFocus();
+    }
+
+    private void hold(CommercePanel panel, OverlayCue cue) {
+        heldFocus = panel.findFocus();
+        heldPanel = panel;
+        heldId = cue.id;
+        panel.onViewerClosed = this::releaseHeld;
+    }
+
+    private void releaseHeld() {
+        if (heldPanel == null) return;
+        CommercePanel panel = heldPanel;
+        heldPanel = null;
+        boolean hadFocus = panel.hasFocus();
+        panel.dispose();
+        if (hadFocus) refocusAfterPanel();
+    }
+
+    /** After a panel closes: the ad's first tile, or with no ad on screen the focus from before the ad. */
+    private void refocusAfterPanel() {
+        if (scene != null && scene.focusFirst()) return;
+        if (focusBeforeAd != null && focusBeforeAd.isAttachedToWindow() && focusBeforeAd.isShown()) focusBeforeAd.requestFocus();
     }
 
     private boolean currentCueIsActive() {
@@ -440,6 +604,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
 
     private void updateScene(long time) {
         if (scene == null) return;
+        scene.allowFocus(adMayTakeFocus());
         scene.update(time - active.start, player.isPlaying());
         layer.squeezeForScene(scene.ready() && "l".equals(active.format) && !"overlay".equals(active.layout));
     }
@@ -447,12 +612,22 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private void openOffer(OverlayCue cue, OverlayScene.Offer offer, View focus) {
         if (!currentCueIsActive()) return;
         if (commercePanel != null) commercePanel.dispose();
-        commercePanel = new CommercePanel(layer.container(), offer.commerce, null, offer.imageUrl, cue.brand,
+        releaseHeld();
+        CommercePanel[] opened = new CommercePanel[1];
+        opened[0] = new CommercePanel(layer.container(), offer.commerce, null, offer.imageUrl, cue.brand,
                 network, workers, television, () -> markOpened(cue.id, offer.id, offer.commerce.viewUrl), () -> {
-                    commercePanel.dispose();
-                    commercePanel = null;
+                    // Closed by the viewer, open with its ad or held after it.
+                    CommercePanel panel = opened[0];
+                    if (heldPanel == panel) heldPanel = null;
+                    if (commercePanel == panel) commercePanel = null;
+                    panel.dispose();
+                    // Back on the tile it came from, else the ad's first tile, else the focus from before the ad.
                     if (focus.isShown()) focus.requestFocus();
+                    else refocusAfterPanel();
                 });
+        commercePanel = opened[0];
+        commercePanel.mediaKeys = this::mediaKey;
+        if (scene != null) scene.allowFocus(false);
     }
 
     private void markOpened(OverlayCue cue) { markOpened(cue.id, "", cue.commerce.viewUrl); }

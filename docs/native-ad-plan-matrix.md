@@ -23,14 +23,9 @@ Cada plataforma lee el plan de IL con las reglas de `web/ads.mjs`: pedidos orden
 - El panel de producto se recorre con el D-pad hasta el QR, y Atrás vuelve paso a paso hasta cerrarlo sin salir de la app.
 - Comprar durante el corte real de iADServer se abre con el control.
 - El foco ya no sale del panel abierto hacia los controles del reproductor de la app.
-
-Límites conocidos en TV, sin cambio en esta versión:
-
-- **La tarjeta y los controles de Media3.** Si la app usa los controles de Media3 del `PlayerView` y están visibles, el D-pad no llega al botón «Ver producto», que queda debajo de esa barra. La tarjeta toma el foco al aparecer, pero si el espectador ya tocó el control, los controles de Media3 se quedan con él. Con una app que usa sus propios controles, el recorrido funciona. Opciones:
-  - que el SDK ofrezca un punto de enganche para el foco;
-  - que la tarjeta se ubique fuera de la barra de controles mientras esté visible;
-  - que la guía de integración pida a la app de TV que resuelva este caso.
-- **Comprar durante un corte no toma el foco solo.** Cuando aparece, hace falta una tecla para llegar a él.
+- Con los controles de Media3 activos, el control remoto llega a las tarjetas y al botón de compra del midroll: mientras el anuncio está en pantalla el SDK deja los controles de lado y devuelve el valor de la app al terminar. Probado en Android TV 14, Android 15 y Android 9.
+- El panel abierto queda después de que el súper termina, hasta que el espectador lo cierra ([reglas](../android/README.md#compra-con-shopify)).
+- Comprar durante un corte toma el foco solo al aparecer: no hace falta una tecla para llegar a él.
 
 Lo que el emulador no prueba: el decodificador de video de un teléfono o una TV reales, el rendimiento, Fire TV y un control remoto físico. En el emulador, después de un anuncio de IMA en 1280x720 el contenido de 640x360 se dibujó en un cuarto de la pantalla sobre el último cuadro del anuncio. Pasó igual sin la recarga de contenido del SDK y con `TextureView`, con el decodificador `c2.goldfish.h264.decoder` del emulador. Falta confirmar en un teléfono que no pasa.
 

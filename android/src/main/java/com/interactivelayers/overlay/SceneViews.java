@@ -41,7 +41,7 @@ final class SceneViews extends FrameLayout {
     private final boolean television;
     private long elapsed;
     private boolean moving;
-    private boolean ready, drawn, disposed, focused;
+    private boolean ready, drawn, disposed, focused, focusAllowed;
 
     SceneViews(FrameLayout parent, OverlayCue cue, OverlayNetwork network, ExecutorService workers,
                boolean television, boolean secondaryVideo, boolean secondaryVideoAudio, Runnable afterDraw, OpenOffer open) {
@@ -263,8 +263,14 @@ final class SceneViews extends FrameLayout {
         }
         if (!ready) drawn = false;
         setVisibility(ready ? VISIBLE : INVISIBLE);
-        if (ready && television && !focused && initial != null) {
+        if (ready && television && focusAllowed && !focused && initial != null) {
             focused = initial.requestFocus();
+        }
+        // Focus that left the ad for nothing (a removed view, a tap that cleared it) comes back to the ad; focus the
+        // viewer gave to something else on screen stays there.
+        if (ready && television && focusAllowed && focused && initial != null && !hasFocus()) {
+            View holder = getRootView().findFocus();
+            if (holder == null || !holder.isShown()) initial.requestFocus();
         }
         invalidate();
     }
@@ -291,7 +297,34 @@ final class SceneViews extends FrameLayout {
                 best = distance;
             }
         }
-        return closest != null && closest.action.requestFocus();
+        // At the ad's edge the arrow stays in the ad, as web's scene stops it (scene.mjs): it never reaches the host's
+        // controls or another view behind the graphic.
+        if (closest != null) closest.action.requestFocus();
+        return true;
+    }
+
+    /** Media keys while the SDK holds the host's controller (OverlayController.mediaKey). */
+    MediaKeys mediaKeys;
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (mediaKeys != null && mediaKeys.handle(event)) return true;
+        return super.dispatchKeyEvent(event);
+    }
+
+    /** Set by the controller: the ad may take the remote's focus (a viewer using the host's controls keeps it). */
+    void allowFocus(boolean allowed) { focusAllowed = allowed; }
+
+    /** True when the ad has something the remote can act on (a product or a link). */
+    boolean hasActions() {
+        for (Entry entry : entries) if (entry.action != null) return true;
+        return false;
+    }
+
+    /** Focus on the ad's first actionable tile, on TV; false when it has none on screen. */
+    boolean focusFirst() {
+        if (!television || disposed) return false;
+        for (Entry entry : entries) if (entry.action != null && entry.action.isShown()) return entry.action.requestFocus();
+        return false;
     }
 
     boolean ready() { return ready; }

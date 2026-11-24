@@ -237,6 +237,338 @@ public final class OverlayPlaybackTest {
         assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/scene"));
     }
 
+    // Keys sent through the window, as a remote does: the framework's focus search and dispatch apply.
+    private static void remote(int key) {
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(key);
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    private boolean tilesShown() {
+        java.util.ArrayList<View> tiles = new java.util.ArrayList<>();
+        view.findViewsWithText(tiles, "Botines", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+        tiles.removeIf(tile -> !tile.isShown());
+        return !tiles.isEmpty();
+    }
+
+    private String focused() {
+        View focus = view.getRootView().findFocus();
+        return focus == null ? "none" : focus.getContentDescription() != null ? focus.getContentDescription().toString()
+                : focus instanceof Button ? ((Button) focus).getText().toString() : focus.getClass().getSimpleName();
+    }
+
+    private static View ancestor(View child, Class<?> type) {
+        for (View v = child; v != null; v = v.getParent() instanceof View ? (View) v.getParent() : null)
+            if (type.isInstance(v)) return v;
+        return null;
+    }
+
+    /** The scene ad up with the host's controller enabled, its first tile focused by the SDK. */
+    private void sceneUp(String feed) throws Exception {
+        activity.onActivity(a -> {
+            view.setUseController(true);
+            overlays = OverlayController.attachCommerce(view, network.url(feed), "scene-session", "es", "AR", true);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> tilesShown() && !view.getUseController() && "Botines".equals(focused()));
+    }
+
+    /** sceneUp, then the remote opens the second product («Gorra», which has options). */
+    private void productOpen(String feed) throws Exception {
+        sceneUp(feed);
+        remote(android.view.KeyEvent.KEYCODE_DPAD_RIGHT);
+        await(() -> "Gorra".equals(focused()));
+        remote(android.view.KeyEvent.KEYCODE_ENTER);
+        await(() -> buttons("Elegir opciones").size() == 1);
+    }
+
+    // The owner's rules: the súper lasts its window; the product the viewer opened stays open past it, through seeks
+    // in either direction, until the viewer closes it; Escape (the host's Esc) closes it.
+    @Test public void anOpenProductOutlivesItsSceneUntilTheViewerClosesIt() throws Exception {
+        productOpen("/scene?scene=0");
+        activity.onActivity(a -> player.seekTo(16500));
+        await(() -> !tilesShown());
+        activity.onActivity(a -> {
+            assertEquals("still open after the window", 1, buttons("Elegir opciones").size());
+            player.seekTo(3000);
+        });
+        await(() -> tilesShown());
+        activity.onActivity(a -> {
+            assertEquals("open after a seek back", 1, buttons("Elegir opciones").size());
+            player.seekTo(17500);
+        });
+        await(() -> !tilesShown());
+        activity.onActivity(a -> assertEquals("open after a seek forward", 1, buttons("Elegir opciones").size()));
+        remote(android.view.KeyEvent.KEYCODE_ESCAPE);
+        activity.onActivity(a -> {
+            assertTrue(buttons("Elegir opciones").isEmpty());
+            assertFalse(overlays.closeCommercePanel());
+        });
+        assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/scene"));
+        assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/cap"));
+    }
+
+    // A host with Media3's controller enabled and showing when the ad appears: the SDK takes the remote at once, the
+    // first tile is focused, arrows stay in the ad at its edges, OK opens, Back returns to the tile, Back on a tile is
+    // the host's, and the host's controller comes back after the ad.
+    @Test public void theRemoteReachesTheAdWithTheControllerEnabled() throws Exception {
+        activity.onActivity(a -> {
+            view.setUseController(true);
+            view.setControllerShowTimeoutMs(0);
+            view.showController();
+            overlays = OverlayController.attachCommerce(view, network.url("/scene?scene=0"), "scene-session", "es", "AR", true);
+            player.seekTo(1000);
+            player.play();
+        });
+        await(() -> tilesShown() && !view.getUseController() && "Botines".equals(focused()));
+        await(() -> !view.isControllerFullyVisible());  // its hide animation may still be running
+        remote(android.view.KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals("Gorra", focused());
+        remote(android.view.KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals("Gorra", focused());
+        remote(android.view.KeyEvent.KEYCODE_DPAD_DOWN);
+        assertEquals("Gorra", focused());
+        remote(android.view.KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> buttons("Elegir opciones").size() == 1);
+        remote(android.view.KeyEvent.KEYCODE_BACK);
+        activity.onActivity(a -> {
+            assertTrue(buttons("Elegir opciones").isEmpty());
+            assertEquals("Back returns to the tile", "Gorra", focused());
+            // Back on a tile with no panel: not taken by the ad (direct dispatch, so the host's activity is not left).
+            assertFalse(view.findFocus().dispatchKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_BACK)));
+            overlays.setLinearAdActive(true);
+        });
+        await(() -> view.getUseController());
+    }
+
+    private interface Ending { void run(); }
+
+    /** An ad with tiles up and the host's controller set aside, then `end`: the controller must be the host's again. */
+    private void controllerComesBackAfter(Ending end) throws Exception {
+        sceneUp("/scene?scene=0");
+        activity.onActivity(a -> end.run());
+        await(() -> view.getUseController());
+    }
+
+    @Test public void stopGivesTheControllerBack() throws Exception { controllerComesBackAfter(() -> overlays.stop()); }
+
+    @Test public void closeGivesTheControllerBack() throws Exception {
+        controllerComesBackAfter(() -> { overlays.close(); overlays = null; });
+    }
+
+    @Test public void detachGivesTheControllerBack() throws Exception {
+        controllerComesBackAfter(() -> ((ViewGroup) view.getParent()).removeView(view));
+    }
+
+    @Test public void aMediaChangeGivesTheControllerBack() throws Exception {
+        controllerComesBackAfter(() -> { player.setMediaItem(MediaItem.fromUri(network.url("/no-clock.m3u8"))); player.prepare(); });
+    }
+
+    // The host's latest value wins: a host that turns its controller on while the ad holds the remote keeps it on.
+    @Test public void theHostsOwnControllerChangeWins() throws Exception {
+        controllerComesBackAfter(() -> view.setUseController(true));
+        activity.onActivity(a -> {
+            overlays.setLinearAdActive(true);
+            assertTrue(view.getUseController());
+        });
+    }
+
+    // An open product does not survive a media change (the next episode) nor a detach.
+    @Test public void aMediaChangeClosesAnOpenProduct() throws Exception {
+        productOpen("/scene?scene=0");
+        activity.onActivity(a -> { player.setMediaItem(MediaItem.fromUri(network.url("/live.m3u8"))); player.prepare(); });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> assertTrue(buttons("Elegir opciones").isEmpty()));
+    }
+
+    @Test public void aDetachClosesAnOpenProduct() throws Exception {
+        productOpen("/scene?scene=0");
+        ViewGroup[] parent = new ViewGroup[1];
+        activity.onActivity(a -> { parent[0] = (ViewGroup) view.getParent(); parent[0].removeView(view); });
+        activity.onActivity(a -> parent[0].addView(view, new FrameLayout.LayoutParams(-1, -1)));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> assertTrue("not open again on re-attach", buttons("Elegir opciones").isEmpty()));
+    }
+
+    // A second ad arrives under an open product: the panel stays on top with the viewer's focused control, the new
+    // tiles do not take focus; closing it puts focus on the new ad's first tile; a product of the new ad, opened by
+    // touch while the panel is up, replaces the panel.
+    @Test public void aSecondAdArrivesUnderAnOpenProduct() throws Exception {
+        productOpen("/scene?scene=0&second=1");
+        activity.onActivity(a -> player.seekTo(13000));
+        // Both tiles of the second ad on screen (the scene brings them in over time) before the player is paused.
+        await(() -> {
+            java.util.ArrayList<View> caps = new java.util.ArrayList<>();
+            view.findViewsWithText(caps, "Gorra", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+            caps.removeIf(tile -> !tile.isShown());
+            return network.impressions.contains("/measure/scene2") && tilesShown() && !caps.isEmpty();
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> {
+            View panel = ancestor(buttons("Elegir opciones").get(0), CommercePanel.class);
+            java.util.ArrayList<View> tiles = new java.util.ArrayList<>();
+            view.findViewsWithText(tiles, "Botines", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+            View scene = ancestor(tiles.get(0), SceneViews.class);
+            ViewGroup container = (ViewGroup) panel.getParent();
+            assertSame(container, scene.getParent());
+            assertTrue("the panel draws on top", container.indexOfChild(panel) > container.indexOfChild(scene));
+            assertSame("the viewer's control keeps focus", panel, ancestor(view.getRootView().findFocus(), CommercePanel.class));
+            // Paused, the second ad stays on screen (its window is short) for the rest of the steps.
+            player.pause();
+        });
+        // Paused and ready: the ad's clock is known, so a product can open (not while the player is still buffering).
+        await(() -> player.getPlaybackState() == androidx.media3.common.Player.STATE_READY);
+    }
+
+    @Test public void closingTheHeldProductFocusesTheNewAdsFirstTile() throws Exception {
+        aSecondAdArrivesUnderAnOpenProduct();
+        remote(android.view.KeyEvent.KEYCODE_ESCAPE);
+        await(() -> buttons("Elegir opciones").isEmpty() && "Botines".equals(focused()));
+        assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/scene2"));
+    }
+
+    @Test public void aProductOfTheNewAdReplacesTheHeldOne() throws Exception {
+        aSecondAdArrivesUnderAnOpenProduct();
+        activity.onActivity(a -> {
+            View held = ancestor(buttons("Elegir opciones").get(0), CommercePanel.class);
+            java.util.ArrayList<View> tiles = new java.util.ArrayList<>();
+            view.findViewsWithText(tiles, "Botines", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+            tiles.removeIf(tile -> !tile.isShown());
+            tiles.get(0).performClick();  // by touch: the remote stays in the held panel
+            assertFalse("the held panel is gone", held.isAttachedToWindow());
+            assertEquals("one panel, the new product's", 1, buttons("Ver detalles").size() + buttons("Elegir opciones").size());
+        });
+    }
+
+    // Media keys keep working while the ad holds the host's controller, with the ad up and with a panel open.
+    @Test public void mediaKeysWorkWhileTheAdHoldsTheController() throws Exception {
+        sceneUp("/scene?scene=0");
+        remote(android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+        await(() -> !player.getPlayWhenReady());
+        remote(android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+        await(() -> player.getPlayWhenReady());
+        remote(android.view.KeyEvent.KEYCODE_ENTER);
+        await(() -> !buttons("Ver detalles").isEmpty() || !buttons("Elegir opciones").isEmpty());
+        remote(android.view.KeyEvent.KEYCODE_MEDIA_PAUSE);
+        await(() -> !player.getPlayWhenReady());
+        remote(android.view.KeyEvent.KEYCODE_MEDIA_PLAY);
+        await(() -> player.getPlayWhenReady());
+    }
+
+    // When the ad ends with a tile focused and no panel open, focus goes back to the host's view that had it before.
+    @Test public void focusReturnsToTheHostsViewWhenTheAdEnds() throws Exception {
+        Button[] host = new Button[1];
+        activity.onActivity(a -> {
+            host[0] = new Button(a);
+            host[0].setText("Host");
+            host[0].setFocusableInTouchMode(true);
+            ((ViewGroup) view.getParent().getParent()).addView(host[0], new FrameLayout.LayoutParams(200, 80, Gravity.TOP | Gravity.LEFT));
+            host[0].requestFocus();
+        });
+        sceneUp("/scene?scene=0");
+        activity.onActivity(a -> player.seekTo(17500));
+        await(() -> !tilesShown() && view.getUseController());
+        await(() -> host[0].hasFocus());
+    }
+
+    // Focus the host moved during the ad (its own menu) stays there when the ad ends.
+    @Test public void focusTheHostMovedDuringTheAdStaysWhenItEnds() throws Exception {
+        Button[] host = new Button[2];
+        activity.onActivity(a -> {
+            ViewGroup root = (ViewGroup) view.getParent().getParent();
+            for (int i = 0; i < 2; i++) {
+                host[i] = new Button(a);
+                host[i].setText(i == 0 ? "Host" : "Menu");
+                host[i].setFocusableInTouchMode(true);
+                root.addView(host[i], new FrameLayout.LayoutParams(200, 80, Gravity.TOP | (i == 0 ? Gravity.LEFT : Gravity.RIGHT)));
+            }
+            host[0].requestFocus();
+        });
+        sceneUp("/scene?scene=0");
+        activity.onActivity(a -> {
+            host[1].requestFocus();
+            player.seekTo(17500);
+        });
+        await(() -> !tilesShown() && view.getUseController());
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> assertTrue("focus stays on the host's menu", host[1].hasFocus()));
+    }
+
+    // A paused viewer inside the ad's window (Media3 would keep its controller up): the remote still reaches the ad.
+    @Test public void aPausedViewerWithTheControllerShowingReachesTheAd() throws Exception {
+        sceneUp("/scene?scene=0");
+        activity.onActivity(a -> {
+            view.setControllerShowTimeoutMs(0);
+            player.pause();
+            view.showController();
+        });
+        await(() -> !player.isPlaying() && tilesShown() && "Botines".equals(focused()));
+        activity.onActivity(a -> assertFalse(view.isControllerFullyVisible()));
+        remote(android.view.KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals("Gorra", focused());
+    }
+
+    // A tap on the video while the ad is up (the owner's click on the emulator window) neither brings the controller
+    // back nor moves focus out of the ad on TV.
+    @Test public void aTapWhileTheAdIsUpKeepsTheRemoteInTheAd() throws Exception {
+        sceneUp("/scene?scene=0");
+        int[] at = new int[2];
+        activity.onActivity(a -> view.getLocationOnScreen(at));
+        long now = android.os.SystemClock.uptimeMillis();
+        float x = at[0] + view.getWidth() / 2f, y = at[1] + view.getHeight() / 3f;
+        Instrumentation input = InstrumentationRegistry.getInstrumentation();
+        input.sendPointerSync(android.view.MotionEvent.obtain(now, now, android.view.MotionEvent.ACTION_DOWN, x, y, 0));
+        input.sendPointerSync(android.view.MotionEvent.obtain(now, now + 50, android.view.MotionEvent.ACTION_UP, x, y, 0));
+        input.waitForIdleSync();
+        activity.onActivity(a -> {
+            assertFalse(view.getUseController());
+            assertFalse(view.isControllerFullyVisible());
+        });
+        await(() -> "Botines".equals(focused()));
+        remote(android.view.KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertEquals("Gorra", focused());
+    }
+
+    // A product opened from content does not cover someone else's video ad: a break starting closes it.
+    @Test public void aBreakStartingClosesAProductOpenedFromContent() throws Exception {
+        productOpen("/scene?scene=0");
+        activity.onActivity(a -> {
+            overlays.setLinearAdActive(true, "creative-a", "delivery-a");
+            assertTrue(buttons("Elegir opciones").isEmpty());
+        });
+    }
+
+    // The «Comprar» button of a linear ad: the remote reaches it with the controller enabled; its open product stays
+    // when the ad ends; the same ad confirmed again does not close it; a new break does.
+    @Test public void theMidrollProductIsReachableAndOutlivesItsAd() throws Exception {
+        activity.onActivity(a -> {
+            view.setUseController(true);
+            overlays = OverlayController.attachCommerce(view, network.url("/midroll"), "spot-session", "es", "AR", true);
+            player.seekTo(1000);
+            player.play();
+            overlays.setLinearAdActive(true, "creative-a", "delivery-a");
+        });
+        await(() -> !buttons("Comprar").isEmpty() && !view.getUseController() && "Comprar".equals(focused()));
+        remote(android.view.KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> !buttons("Ver detalles").isEmpty());
+        activity.onActivity(a -> overlays.setLinearAdActive(true, "creative-a", "delivery-a"));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> {
+            assertEquals("the playing ad's own product stays", 1, buttons("Ver detalles").size());
+            overlays.setLinearAdActive(false);
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        activity.onActivity(a -> {
+            assertEquals("open after the ad ends", 1, buttons("Ver detalles").size());
+            assertFalse(view.getUseController());
+            overlays.setLinearAdActive(true);
+            assertTrue("a new break closes it", buttons("Ver detalles").isEmpty());
+        });
+        await(() -> view.getUseController());
+        assertEquals(1, java.util.Collections.frequency(network.impressions, "/measure/shop-view"));
+    }
+
     @Test public void sceneArtworkDecodesTheFirstGifFrame() throws Exception {
         String url = network.url("/animated.gif");
         OverlayNetwork loader = new OverlayNetwork();
