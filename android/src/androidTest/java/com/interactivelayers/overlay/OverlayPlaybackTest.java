@@ -209,7 +209,7 @@ public final class OverlayPlaybackTest {
             assertTrue(next.performClick());
             player.pause();
             clickButton("Elegir opciones");
-            clickButton("Ver fotos");
+            opener("Ver fotos").performClick();
             clickButton("›");
             assertTrue(overlays.closeCommercePanel());
             assertTrue(buttons("Roja").get(0).isSelected());
@@ -314,7 +314,7 @@ public final class OverlayPlaybackTest {
             activity.onActivity(a -> {
                 clickButton("Choose options");
                 clickButton("Large");
-                clickButton("View photos");
+                opener("View photos").performClick();
             });
             await(() -> panel[0].getWidth() == view.getWidth() && shopImageHasColor(panel[0], Color.MAGENTA));
             Instrumentation remote = InstrumentationRegistry.getInstrumentation();
@@ -325,7 +325,7 @@ public final class OverlayPlaybackTest {
             remote.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
             await(() -> panel[0].getWidth() == Math.round(view.getWidth() * .42f));
             activity.onActivity(a -> {
-                assertEquals(buttons("View photos").get(0), view.findFocus());
+                assertEquals(opener("View photos"), view.findFocus());
                 assertTrue(buttons("Large").get(0).isSelected());
             });
             await(() -> shopImageHasColor(panel[0], Color.MAGENTA));
@@ -356,8 +356,9 @@ public final class OverlayPlaybackTest {
             Instrumentation remote = InstrumentationRegistry.getInstrumentation();
             for (String stageAction : new String[]{"View details", "Add to cart"}) {
                 activity.onActivity(a -> {
-                    if (stageAction.equals("Add to cart")) clickButton("View details");
-                    clickButton("Enlarge photo");
+                    // The cover opens the viewer from its secondary action, the details step from the photo box.
+                    if (stageAction.equals("Add to cart")) { clickButton("View details"); opener("Enlarge photo").performClick(); }
+                    else clickButton("Enlarge photo");
                 });
                 await(() -> panel[0].getWidth() == view.getWidth() && shopImageHasColor(panel[0], Color.MAGENTA));
                 activity.onActivity(a -> {
@@ -367,13 +368,18 @@ public final class OverlayPlaybackTest {
                     ImageView photo = (ImageView) photos.get(0);
                     assertEquals(ImageView.ScaleType.FIT_CENTER, photo.getScaleType());
                     assertTrue(photo.getWidth() >= view.getWidth() * .90f && photo.getHeight() >= view.getHeight() * .80f);
-                    assertTrue(buttons("‹").isEmpty() && buttons("›").isEmpty());
+                    // No arrows for one photo (Back is also a "‹", as on web, so the arrows are found by name).
+                    java.util.ArrayList<View> arrows = new java.util.ArrayList<>();
+                    view.findViewsWithText(arrows, "Previous photo", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+                    view.findViewsWithText(arrows, "Next photo", View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+                    assertTrue(arrows.isEmpty() && buttons("›").isEmpty());
                 });
                 remote.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT);
                 remote.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
                 await(() -> panel[0].getWidth() == Math.round(view.getWidth() * .42f));
                 activity.onActivity(a -> {
-                    assertEquals(buttons("Enlarge photo").get(0), view.findFocus());
+                    assertEquals(stageAction.equals("Add to cart") ? opener("Enlarge photo") : buttons("Enlarge photo").get(0),
+                            view.findFocus());
                     assertEquals(1, buttons(stageAction).size());
                 });
             }
@@ -424,7 +430,8 @@ public final class OverlayPlaybackTest {
                 clickButton("Choose options");
                 View focus = buttons("Size 1").get(0);
                 assertEquals(focus, view.findFocus());
-                assertEquals(Color.BLACK, ((Button) focus).getCurrentTextColor());
+                // web: the selected value is filled with the text colour and written in the panel's background.
+                assertEquals(0xff202020, ((Button) focus).getCurrentTextColor());
                 Button buy = (Button) buttons("Add to cart").get(0);
                 assertWhiteTvAction(buy);
                 buy.setPressed(true);
@@ -531,6 +538,15 @@ public final class OverlayPlaybackTest {
         view.findViewsWithText(matched, title, View.FIND_VIEWS_WITH_TEXT);
         matched.removeIf(item -> !(item instanceof Button) || !((Button) item).getText().toString().equals(title) || !item.isShown());
         return matched;
+    }
+
+    /** The photo box that opens the viewer (web .il-tv-gallery-open), named by its caption. */
+    private View opener(String caption) {
+        java.util.ArrayList<View> matched = new java.util.ArrayList<>();
+        view.findViewsWithText(matched, caption, View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+        matched.removeIf(item -> !(item instanceof FrameLayout) || !item.isShown() || !item.isFocusable());
+        assertEquals(caption, 1, matched.size());
+        return matched.get(0);
     }
 
     private void clickButton(String title) {
