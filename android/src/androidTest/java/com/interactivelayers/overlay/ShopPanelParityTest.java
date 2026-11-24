@@ -200,14 +200,16 @@ public final class ShopPanelParityTest {
                     // A DOWN at the end changes nothing and is not taken from a page that cannot scroll further.
                     key(shop, KeyEvent.KEYCODE_DPAD_DOWN, player);
                     assertEquals(what + "focus at the end", "Elegir opciones", focused(shop));
-                    // UP returns to the top while focus stays on the action.
-                    for (int i = 0; i < 20 && scroll.getScrollY() > 0; i++) key(shop, KeyEvent.KEYCODE_DPAD_UP, player);
-                    assertEquals(what + "UP scrolled back to the top", 0, scroll.getScrollY());
-                    assertEquals(what + "focus after UP", "Elegir opciones", focused(shop));
-                    if (photo) {
-                        // At the top, UP moves into the body as before; DOWN from the photo box scrolls before leaving it.
-                        key(shop, KeyEvent.KEYCODE_DPAD_UP, player);
+                    if (!photo) {
+                        // No control in the body: UP returns to the top while focus stays on the action.
+                        for (int i = 0; i < 20 && scroll.getScrollY() > 0; i++) key(shop, KeyEvent.KEYCODE_DPAD_UP, player);
+                        assertEquals(what + "UP scrolled back to the top", 0, scroll.getScrollY());
+                        assertEquals(what + "focus after UP", "Elegir opciones", focused(shop));
+                    } else {
+                        // UP scrolls while the photo box is out of view, then focus moves into it once it shows.
+                        for (int i = 0; i < 20 && !(shop.findFocus() instanceof FrameLayout); i++) key(shop, KeyEvent.KEYCODE_DPAD_UP, player);
                         assertTrue("the photo box takes focus", shop.findFocus() instanceof FrameLayout);
+                        // DOWN from the photo box scrolls to the last line before leaving it.
                         int reached = 0;
                         for (int i = 0; i < 20 && !"Elegir opciones".equals(focused(shop)); i++) {
                             key(shop, KeyEvent.KEYCODE_DPAD_DOWN, player);
@@ -216,6 +218,50 @@ public final class ShopPanelParityTest {
                         assertEquals("DOWN from the photo box scrolled to the last line before leaving", maximum, reached);
                     }
                 }
+            } catch (Throwable e) {
+                failure[0] = e;
+            }
+        });
+        workers.shutdownNow();
+        if (failure[0] instanceof AssertionError) throw (AssertionError) failure[0];
+        if (failure[0] != null) throw new AssertionError(failure[0]);
+    }
+
+    // Details that overflow on a 1280x720 player: from «Agregar al carrito», one UP lands on the last option group in
+    // view, without the body jumping to the top. (The catalog parser keeps at most three option groups per product.)
+    @Test public void upFromTheActionReachesTheLastVisibleOptionGroup() {
+        String words = "Botella térmica de acero inoxidable con doble pared, tapa a rosca, asa de silicona y acabado mate ";
+        String[] colors = {"Negro", "Blanco", "Rojo", "Verde"}, sizes = {"350 ml", "500 ml", "750 ml", "1 l"};
+        String[] finishes = {"Acero cepillado", "Pintura mate texturada", "Esmalte brillante"};
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        Throwable[] failure = new Throwable[1];
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            try {
+                JSONArray variants = new JSONArray();
+                for (String color : colors) for (String size : sizes) for (String finish : finishes) variants.put(new JSONObject()
+                        .put("id", color + size + finish).put("label", color + " / " + size + " / " + finish).put("price", "29.00")
+                        .put("selectedOptions", new JSONArray().put(new JSONObject().put("name", "Color").put("value", color))
+                                .put(new JSONObject().put("name", "Capacidad").put("value", size))
+                                .put(new JSONObject().put("name", "Acabado").put("value", finish))));
+                OverlayCommerce offer = OverlayCommerce.parse(new JSONObject().put("title", (words + words + words).substring(0, 256))
+                        .put("price", "29.00").put("currency", "USD").put("locale", "es").put("handoffUrl", "https://ads.example/cart")
+                        .put("imageUrl", "https://shop.example/bottle.jpg").put("variants", variants));
+                Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+                FrameLayout player = new FrameLayout(context);
+                layout(player, 1280, 720);
+                CommercePanel shop = new CommercePanel(player, offer, null, null, null, new OverlayNetwork(), workers, true, () -> {}, () -> {});
+                layout(player, 1280, 720);
+                buttonIn(shop, "Elegir opciones").performClick();
+                layout(player, 1280, 720);
+                ScrollView scroll = scrollIn(shop);
+                assertTrue("the details overflow their space", scroll.canScrollVertically(1) || scroll.canScrollVertically(-1));
+                for (int i = 0; i < 30 && !"Agregar al carrito".equals(focused(shop)); i++) key(shop, KeyEvent.KEYCODE_DPAD_DOWN, player);
+                assertEquals("Agregar al carrito", focused(shop));
+                int before = scroll.getScrollY();
+                assertTrue("the body is scrolled down", before > 0);
+                key(shop, KeyEvent.KEYCODE_DPAD_UP, player);
+                assertTrue("one UP lands on the last group: " + focused(shop), java.util.Arrays.asList(finishes).contains(focused(shop)));
+                assertTrue("the body did not jump to the top", scroll.getScrollY() > 0 && scroll.getScrollY() >= before - scroll.getHeight() / 2);
             } catch (Throwable e) {
                 failure[0] = e;
             }

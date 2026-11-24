@@ -102,6 +102,15 @@ final class TvShopView extends LinearLayout {
             // footer while the body is scrolled; at the top focus moves into the body as usual.
             boolean leavesBody = down ? (inFooter ? next == null || !isInside(next, footer) : next == null || !isInside(next, body))
                     : inFooter;
+            if (up && inFooter) {
+                // A control already in view takes focus (the lowest one), so the viewer does not scroll to the top
+                // and walk back down; with none in view, UP scrolls the body.
+                View visible = lowestVisibleControl();
+                if (visible != null) {
+                    if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) visible.requestFocus();
+                    return true;
+                }
+            }
             if (leavesBody) {
                 if (event.getAction() == android.view.KeyEvent.ACTION_DOWN)
                     scroll.scrollBy(0, (down ? 1 : -1) * Math.round(scroll.getHeight() * .6f));
@@ -109,6 +118,23 @@ final class TvShopView extends LinearLayout {
             }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    /** The lowest enabled focusable body control at least partly inside the scroll viewport, or null. */
+    private View lowestVisibleControl() {
+        View lowest = null;
+        int bottom = Integer.MIN_VALUE, top = scroll.getScrollY(), end = top + scroll.getHeight();
+        android.graphics.Rect rect = new android.graphics.Rect();
+        for (View control : body.getFocusables(View.FOCUS_UP)) {
+            if (!control.isEnabled()) continue;
+            control.getDrawingRect(rect);
+            body.offsetDescendantRectToMyCoords(control, rect);
+            if (rect.bottom > top && rect.top < end && rect.bottom > bottom) {
+                bottom = rect.bottom;
+                lowest = control;
+            }
+        }
+        return lowest;
     }
 
     private static boolean isInside(View view, View ancestor) {
