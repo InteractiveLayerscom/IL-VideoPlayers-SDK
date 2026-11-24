@@ -272,10 +272,13 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
   const doc = stage.ownerDocument;
   const win = doc.defaultView;
   let current;
+  // The first control of the scene on screen: where focus goes when a product kept past its ad is closed.
+  commerce.setFocusTarget?.(() => current?.entries.find(entry => entry.action && entry.visible)?.action ?? null);
 
   function hide() {
     if (!current) return;
-    commerce.hide();
+    // An open product stays when its scene goes: only a closed card goes with it.
+    commerce.retire(current.originalFocus);
     win.cancelAnimationFrame?.(current.frame);
     current.observer?.disconnect();
     for (const entry of current.entries) entry.media?.dispose();

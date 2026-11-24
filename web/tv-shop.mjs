@@ -5,21 +5,21 @@ const labels = {
     options:'Elegir opciones', details:'Ver detalles', add:'Agregar al carrito', checkout:'Continuar con el QR',
     total:'Total', unit:'1 unidad', gallery:'Ver fotos', enlarge:'Ampliar foto', prev:'Anterior', next:'Siguiente',
     scan:'Escaneá para pagar en Shopify', back:'Volver', loading:'Preparando tu carrito…',
-    failed:'No se pudo preparar el carrito.', retry:'Reintentar', soldOut:'Sin stock', variant:'Variante',
+    failed:'No se pudo preparar el carrito.', gone:'Esta oferta ya no está disponible.', retry:'Reintentar', soldOut:'Sin stock', variant:'Variante',
   },
   en: {
     from:'From', intro:'Product', detail:'Details', photos:'Photos', cart:'Your cart', payment:'Shopify checkout',
     options:'Choose options', details:'View details', add:'Add to cart', checkout:'Continue to QR',
     total:'Total', unit:'1 item', gallery:'View photos', enlarge:'Enlarge photo', prev:'Previous', next:'Next',
     scan:'Scan to pay on Shopify', back:'Back', loading:'Preparing your cart…',
-    failed:'Could not prepare the cart.', retry:'Retry', soldOut:'Out of stock', variant:'Variant',
+    failed:'Could not prepare the cart.', gone:'This offer is no longer available.', retry:'Retry', soldOut:'Out of stock', variant:'Variant',
   },
   pt: {
     from:'A partir de', intro:'Produto', detail:'Detalhes', photos:'Fotos', cart:'Seu carrinho', payment:'Pagamento na Shopify',
     options:'Escolher opções', details:'Ver detalhes', add:'Adicionar ao carrinho', checkout:'Continuar com o QR',
     total:'Total', unit:'1 unidade', gallery:'Ver fotos', enlarge:'Ampliar foto', prev:'Anterior', next:'Próxima',
     scan:'Escaneie para pagar na Shopify', back:'Voltar', loading:'Preparando seu carrinho…',
-    failed:'Não foi possível preparar o carrinho.', retry:'Tentar novamente', soldOut:'Sem estoque', variant:'Variante',
+    failed:'Não foi possível preparar o carrinho.', gone:'Esta oferta não está mais disponível.', retry:'Tentar novamente', soldOut:'Sem estoque', variant:'Variante',
   },
 };
 
@@ -100,6 +100,9 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
   const galleryLabel = photos.length > 1 ? copy.gallery : copy.enlarge;
   let index = 0, galleryOrigin = 'detail', galleryOpener = 'gallery';
   let page = 'intro', qr = '', error = false, pending, disposed = false;
+  // iADServer answered 404 for these variants: the delivery expired or the variant is gone. Each is off for good; another
+  // variant is still tried, and any other failure still allows another try.
+  const goneVariants = new Set();
   const previous = focusRoot.activeElement;
   const root = node('div', 'il-tv-shop');
   root.setAttribute('role', 'group');
@@ -234,7 +237,7 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
     });
   }
   async function checkout() {
-    if (pending || !selected || selected.availableForSale === false) return;
+    if (pending || !selected || selected.availableForSale === false || goneVariants.has(selected)) return;
     const controller = new AbortController();
     pending = controller;
     page = 'qr'; qr = ''; error = false;
@@ -244,12 +247,13 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       if (disposed || controller.signal.aborted || pending !== controller) return;
       if (!url) throw new Error('Missing QR');
       qr = url;
-    } catch {
+    } catch (reason) {
       if (disposed || controller.signal.aborted || pending !== controller) return;
       error = true;
+      if (reason?.gone === true) goneVariants.add(selected);
     }
     pending = undefined;
-    render(error ? 'retry' : 'back');
+    render(error && !goneVariants.has(selected) ? 'retry' : 'back');
   }
   function render(key) {
     root.dataset.page = page;
@@ -338,7 +342,13 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
       showItem();
       const sum = node('div', 'il-tv-total');
       sum.append(node('strong', '', copy.total), node('strong', '', price()));
-      footer.append(sum, mainButton(copy.checkout, checkout, 'finish'));
+      if (goneVariants.has(selected)) {
+        const status = node('div', 'il-tv-status');
+        status.setAttribute('aria-live', 'polite');
+        status.append(node('p', '', copy.gone));
+        body.append(status);
+      }
+      footer.append(sum, mainButton(copy.checkout, checkout, 'finish', !goneVariants.has(selected)));
     } else {
       showItem();
       const sum = node('div', 'il-tv-total');
@@ -350,9 +360,9 @@ export function openTVShop(stage, { offer, brand = {}, locale = 'en', onClose, p
         const img = photo(qr, 'il-tv-qr', copy.scan);
         img.addEventListener('error', () => { if (img.isConnected) { qr = ''; error = true; render('retry'); } }, {once: true});
         status.append(img, node('p', '', copy.scan));
-      } else status.append(node('p', '', error ? copy.failed : copy.loading));
+      } else status.append(node('p', '', error ? (goneVariants.has(selected) ? copy.gone : copy.failed) : copy.loading));
       body.append(status);
-      if (error) footer.append(mainButton(copy.retry, checkout, 'retry'));
+      if (error && !goneVariants.has(selected)) footer.append(mainButton(copy.retry, checkout, 'retry'));
     }
     const selection = pane.querySelector('[aria-pressed="true"]:not(:disabled)')?.dataset.shopKey;
     focusKey(key ?? ({intro:'detail', detail:selection ?? 'cart', cart:'finish', qr:'back'})[page]);

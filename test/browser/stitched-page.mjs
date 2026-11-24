@@ -148,9 +148,14 @@ function sample() {
 }
 function onFrame() {
   sample();
-  video.requestVideoFrameCallback(onFrame);
+  arm();
 }
-video.requestVideoFrameCallback(onFrame);
+// WebKit can drop a pending frame callback when a seek starts about when it was registered: re-arm after a seek or a resume
+// (cancelling the one that may still be pending, so there is never more than one chain).
+let frameHandle;
+const arm = () => { frameHandle = video.requestVideoFrameCallback(onFrame); };
+for (const name of ['seeked', 'playing']) video.addEventListener(name, () => { video.cancelVideoFrameCallback(frameHandle); arm(); });
+arm();
 
 window.harness = {
   requests, samples, sample, events, segments,

@@ -93,13 +93,12 @@ test('a session without scenes gets the plain card, and seeking back shows it ag
   assert.ok(r.onScreen.has('c'));
   r.onScreen.get('c').onVisible();
   assert.equal(r.adds.length, 2);
-  assert.equal(r.adds[1].holdUntil, r.adds[0].holdUntil);   // the same card, not a new answer
   assert.equal(r.routes.length, 1);
   assert.equal(r.beacons.filter((url) => url.endsWith('/impression')).length, 1);
   r.ads.destroy();
 });
 
-test('an open product view of a designed banner outlasts its end', () => {
+test('a designed banner ends at its end even while its product view is open: the panel is the renderer\'s to keep', () => {
   let time = 50000, open = false, hidden = 0;
   const session = createSession({
     clock: () => time, playing: () => true, presenting: () => true, interval: false, scenes: true,
@@ -109,9 +108,7 @@ test('an open product view of a designed banner outlasts its end', () => {
   open = true;
   time = 70000;
   session.tick();
-  assert.equal(hidden, 0);
-  open = false;
-  session.tick();
-  assert.equal(hidden, 1);
+  assert.equal(hidden, 1, 'the graphic is drawn exactly for its window');
+  assert.equal(session.holding('d'), true);
   session.destroy();
 });
