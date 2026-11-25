@@ -91,7 +91,7 @@ Así, un fotograma a 4,5 segundos del inicio del segmento corresponde a `1700000
 
 ## Verificación
 
-Ejecutá `sh roku/verify.sh` desde la raíz del repositorio. BrighterScript valida el XML y BrightScript. El intérprete de escritorio ejecuta el componente con nodos SceneGraph y valores controlados para el decodificador y el compositor. La prueba cubre reloj UTC/relativo, parsing HLS, Super/L, carga parcial, visibilidad, impresión única, pausa, corte, seek, cambio de contenido y detach. El intérprete carece del `Task` y del plano de video físico de Roku. La reproducción HLS, la descarga HTTPS y la composición final quedan pendientes de una prueba en dispositivo.
+Ejecutá `sh roku/verify.sh` desde la raíz del repositorio. BrighterScript valida el XML y BrightScript. `roku/tests/native.brs` cubre la carga del plan, la versión 2, la renovación, la ficha por `break_url` y los cortes del host con los fixtures compartidos de `test/fixtures/native/`, servidos por un doble de red con la hora congelada. El intérprete de escritorio ejecuta el componente con nodos SceneGraph y valores controlados para el decodificador y el compositor. La prueba cubre reloj UTC/relativo, parsing HLS, Super/L, carga parcial, visibilidad, impresión única, pausa, corte, seek, cambio de contenido y detach. El intérprete carece del `Task` y del plano de video físico de Roku. La reproducción HLS, la descarga HTTPS y la composición final quedan pendientes de una prueba en dispositivo.
 
 ## Compra con Shopify
 
@@ -131,3 +131,53 @@ Al finalizar el corte, incrementá la revisión del lector y llamá a `m.il.call
 ## Plan de anuncios
 
 Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.
+
+### Pedir el plan desde el canal
+
+`loadPlan` pide `GET <origen>/il-player/app-plan?project=…&asset=…&app=roku:<id>` en un `Task` HTTPS (el mismo `ILOverlayFeedRequest`, con el certificado `common:/certs/ca-bundle.crt` y un límite de 5 segundos), lo adjunta y lo arranca. Iniciá el contenido cuando `contentReady` sea verdadero. El campo `planUrl` guarda la última URL pedida.
+
+```brightscript
+m.il.callFunc("attach", m.video, m.viewId)
+m.plan = m.video.getParent().createChild("ILAdPlanPlayer")
+m.plan.observeFieldScoped("contentReady", "onContentReady") ' m.video.control = "play"
+m.plan.observeFieldScoped("event", "onPlanEvent")
+m.plan.callFunc("loadPlan", m.il, m.video, m.viewId, "https://<consola>", projectId, assetId, "es", consent)
+```
+
+- **`app=`.** Un canal instalado en modo desarrollador envía `roku:dev`. Uno publicado envía `roku:<id del canal>` de `roAppInfo.GetID()`. Registrá ese valor como app Roku del proyecto en la Console.
+- **204.** No hay plan por ahora (o se alcanzó un límite): el contenido arranca sin anuncios y el componente no reintenta. La próxima vista vuelve a pedir.
+- **404, error de red o tiempo agotado.** El contenido arranca sin anuncios. El evento `{ type: "plan_unavailable", status, app }` trae el `app=` exacto que se envió: un 404 es la misma respuesta para proyecto, video o app desconocidos, así que revisá primero el registro de la app. `status` es 0 cuando no hubo respuesta.
+- **Sesión.** Con `loadPlan` el `sid` de iADServer es `commerce.session` del plan, y `m.viewId` sólo identifica la vista en el overlay.
+- **Versión 2.** Un plan `version: 2` (aprobación de formato nativo de Google Ad Manager) se acepta sólo con `native_gam.contract = "native-gam-plan-v1"` y `expires_at` a no más de 120 segundos. Unos 20 segundos antes de vencer, el componente vuelve a pedir con `&renew=<grant>` (el parámetro `grant` de `commerce.url`) y reemplaza el plan sin perder lo ya mostrado, intentado y cerrado, los contadores de pacing ni la sesión de compra. Si la renovación falla, al llegar a `expires_at` el plan deja de usarse, emite `{ type: "plan_expired" }` y el contenido sigue (un corte en curso devuelve el contenido).
+- **`replacePlan(plan)`.** Un host que obtiene el plan por su cuenta lo renueva con `m.plan.callFunc("replacePlan", planNuevo)`, con el mismo efecto. Devuelve `false` si el plan no es válido y conserva el actual.
+
+### Comprar durante un corte con `commerce.break_url`
+
+Si el plan trae `commerce.break_url` (HTTPS, mismo origen que `commerce.url`) y el `sid` es la sesión del plan, el componente pide la ficha él mismo cuando empieza un anuncio con `Ad@id` `il-shop-<preroll|midroll>-<entrega>` de la posición del corte, `Creative@id` y un tag de iADServer. Agrega `cut`, `tag`, `creative`, `delivery` y `locale` a la URL tal cual. Sin ese prefijo no hay producto ni llamada. **Comprar** se dibuja durante ese anuncio y se retira al completarse, saltearse, cerrarse o fallar. La impresión es la del VAST; `commerce.viewUrl` sale por `productView` cuando el espectador abre la ficha, como en las demás fichas. El campo `linearSpot` sigue publicándose para los hosts que leen el feed de la sesión; con `break_url` no hace falta leerlo. El `Ad@id` se lee del campo `adId` del anuncio de RAF.
+
+### Cortes del host (API nativa)
+
+Cuando el canal reproduce sus propios cortes con el API por corte de IL (playback creado con `"graphics": true`), el plan del host trae `cuts: []` y el componente no pide ni reproduce anuncios. El canal tiene que informar:
+
+```brightscript
+' El plan del host: GET /v1/vod/playbacks/{id}/plan, desde tu backend. Su commerce.session es el sid de cada
+' ad_tag_url estable: usalo como clave de la vista para que haya Comprar.
+key = plan.commerce.session
+m.il.callFunc("attach", m.video, key)
+m.plan.callFunc("attachPlan", m.il, m.video, key, plan, "https://<consola>", "es", consent)
+m.plan.callFunc("setBreaks", [58000, 178000])      ' posiciones de contenido en ms
+m.plan.callFunc("startPlan")
+
+' Al empezar el corte en 58 s (0 para el pre-roll):
+m.plan.callFunc("breakStarted", 58000)
+' En el callback de seguimiento de tu RAF, evento "Impression":
+m.plan.callFunc("adStarted", adTagUrl, ctx.ad)     ' adTagUrl = el ad_tag_url que pediste
+' En "Complete", "Skip", "Close" o "Error":
+m.plan.callFunc("adEnded")
+' Al volver al contenido:
+m.plan.callFunc("breakEnded")
+```
+
+Mientras el corte está activo no se dibuja nada de IL salvo **Comprar**, y las respuestas pendientes de gráficas se descartan, igual que en los cortes propios del componente. La ficha se pide con `cut=at-<ms>`. **Obligación del canal:** si no informa los cortes, el componente no puede saber que hay un anuncio en pantalla. Dibuja las gráficas sólo por el tiempo de contenido, sin Comprar, y puede dibujarlas encima de un corte que el canal no avisó.
+
+`setClock(segundos)` fija la hora del componente y existe para las pruebas.

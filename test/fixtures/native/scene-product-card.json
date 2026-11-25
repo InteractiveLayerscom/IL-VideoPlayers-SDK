@@ -1,0 +1,64 @@
+{
+  "id": "dlv_fixture_0001",
+  "format": "super",
+  "imageUrl": "https://cdn.shopify.test/apron.jpg",
+  "mimeType": "image/jpeg",
+  "impressionUrl": "https://ads.iadserver.com/events/dlv_fixture_0001/impression",
+  "commerce": {
+    "id": "gid://shopify/Product/100",
+    "title": "Cooking apron",
+    "price": "100.00",
+    "previousPrice": "125.00",
+    "currency": "USD",
+    "vendor": "Kitchen Supply",
+    "description": "Kitchen collection",
+    "imageUrl": "https://cdn.shopify.test/apron.jpg",
+    "locale": "es",
+    "handoffUrl": "https://ads.iadserver.com/commerce/offer/dlv_fixture_0001",
+    "viewUrl": "https://ads.iadserver.com/events/dlv_fixture_0001/creativeView",
+    "images": [
+      "https://cdn.shopify.test/apron.jpg",
+      "https://cdn.shopify.test/back.jpg"
+    ],
+    "variants": [
+      {
+        "id": "gid://shopify/ProductVariant/101",
+        "label": "Black / M",
+        "price": "100.00",
+        "previousPrice": "125.00",
+        "imageUrl": "https://cdn.shopify.test/back.jpg",
+        "availableForSale": true,
+        "selectedOptions": [
+          {
+            "name": "Color",
+            "value": "Black"
+          },
+          {
+            "name": "Size",
+            "value": "M"
+          }
+        ]
+      },
+      {
+        "id": "gid://shopify/ProductVariant/102",
+        "label": "Red / L",
+        "price": "95.00",
+        "availableForSale": false,
+        "selectedOptions": [
+          {
+            "name": "Color",
+            "value": "Red"
+          },
+          {
+            "name": "Size",
+            "value": "L"
+          }
+        ]
+      }
+    ]
+  },
+  "start": 0,
+  "end": 9000,
+  "window": "p1",
+  "holdUntil": 9000
+}

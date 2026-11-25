@@ -5,10 +5,17 @@
 function adPlanRead(plan as Dynamic, nowSeconds as LongInteger, origin as Dynamic, hostSid as String, consent = invalid as Dynamic) as Dynamic
     if type(plan) <> "roAssociativeArray" then return invalid
     if not adPlanIsNumber(plan.version) then return invalid
-    if plan.version <> 1 or not adPlanIsText(plan.expires_at) then return invalid
+    if (plan.version <> 1 and plan.version <> 2) or not adPlanIsText(plan.expires_at) then return invalid
     expires = adPlanIsoSeconds(plan.expires_at)
     if expires = invalid then return invalid
     if expires <= nowSeconds then return invalid
+    ' Version 2 is a short-lived native-format approval from Google Ad Manager: only its contract, and never more
+    ' than 120 s ahead, as web/ads.mjs readPlan requires.
+    if plan.version = 2
+        if type(plan.native_gam) <> "roAssociativeArray" then return invalid
+        if not adPlanIsText(plan.native_gam.contract) then return invalid
+        if plan.native_gam.contract <> "native-gam-plan-v1" or expires - nowSeconds > 120 then return invalid
+    end if
     ' Stitched windows are content time and this player has no content clock under SSAI.
     if plan.timeline <> invalid then return invalid
     ' As on the web, `scenes` that are present but unusable void the whole plan.
@@ -36,20 +43,112 @@ function adPlanRead(plan as Dynamic, nowSeconds as LongInteger, origin as Dynami
     if shopSid <> invalid then breakShop = shopSid = sid
     if type(consent) <> "roAssociativeArray" then consent = {}
     result = { cuts: adPlanCuts(plan.cuts, page, sid), windows: [], graphics: [], pacing: invalid, shop: invalid, shopWindows: [], page: page, sid: sid, breakShop: breakShop, consent: consent }
-    breaks = []
-    for each cut in result.cuts
-        breaks.push(cut.at)
-    end for
+    result.version = plan.version
+    result.expires = expires
+    result.scenes = plan.scenes
+    ' The renewal grant travels in commerce.url, whatever origin the plan was read with.
+    result.grant = ""
+    if type(plan.commerce) = "roAssociativeArray"
+        if adPlanIsText(plan.commerce.url) then result.grant = adPlanQuery(plan.commerce.url, "grant")
+    end if
+    ' Buy during an ad: IL's grant names the view's session, so only when the sid is that session (as on the web).
+    result.breakUrl = invalid
+    if shop <> invalid and breakShop
+        if adPlanIsText(shop.break_url)
+            if adPlanOrigin(shop.break_url) <> invalid and adPlanOrigin(shop.break_url) = adPlanOrigin(shop.url) then result.breakUrl = shop.break_url
+        end if
+    end if
+    if shop <> invalid then result.shop = shop
+    adPlanSetBreaks(result, [])
     if plan.scenes <> invalid
         result.pacing = plan.scenes.pacing
-        result.windows = adPlanWindows(plan.scenes.windows, plan.scenes.pacing, breaks)
         result.graphics = adPlanGraphics(plan.scenes)
     end if
-    if shop <> invalid
-        result.shop = shop
-        result.shopWindows = adPlanWindows(shop.windows, shop.pacing, breaks)
-    end if
     return result
+end function
+
+' Windows keep the plan's clearance around its own cuts and around the breaks the host says it will play.
+sub adPlanSetBreaks(read as Object, hostSeconds as Object)
+    breaks = []
+    for each cut in read.cuts
+        breaks.push(cut.at)
+    end for
+    breaks.append(hostSeconds)
+    if read.scenes <> invalid then read.windows = adPlanWindows(read.scenes.windows, read.scenes.pacing, breaks)
+    if read.shop <> invalid then read.shopWindows = adPlanWindows(read.shop.windows, read.shop.pacing, breaks)
+end sub
+
+' `url` with each [key, value] pair appended, keeping a fragment last.
+function adPlanAppend(url as String, pairs as Object) as String
+    pieces = url.split("#")
+    base = pieces[0]
+    joiner = "&"
+    if instr(1, base, "?") = 0
+        joiner = "?"
+    else if right(base, 1) = "?" or right(base, 1) = "&"
+        joiner = ""
+    end if
+    for each pair in pairs
+        base = base + joiner + pair[0] + "=" + pair[1].encodeUriComponent()
+        joiner = "&"
+    end for
+    if pieces.count() > 1 then base = base + "#" + pieces[1]
+    return base
+end function
+
+' `roku:dev` for a sideloaded channel, else `roku:<channel id>`; invalid when the id is not what IL registers.
+function adPlanAppId(channelId as Dynamic, sideloaded as Boolean) as Dynamic
+    if sideloaded then return "roku:dev"
+    if not adPlanIsText(channelId) then return invalid
+    if not createObject("roRegex", "^(dev|[0-9]{1,10}(_[0-9a-f]{1,8})?)$", "").isMatch(channelId) then return invalid
+    return "roku:" + channelId
+end function
+
+' GET <origin>/il-player/app-plan for this video and app. HTTPS only, as every plan and product URL.
+function adPlanAppPlanUrl(origin as Dynamic, project as Dynamic, asset as Dynamic, app as Dynamic, renew = "" as String) as Dynamic
+    if not adPlanIsText(origin) or not adPlanIsText(project) or not adPlanIsText(asset) or not adPlanIsText(app) then return invalid
+    base = adPlanOrigin(origin)
+    if base = invalid or project = "" or asset = "" then return invalid
+    pairs = [["project", project], ["asset", asset], ["app", app]]
+    if renew <> "" then pairs.push(["renew", renew])
+    return adPlanAppend(base + "/il-player/app-plan", pairs)
+end function
+
+' iADServer names a shop-linked ad `il-shop-<position>-<delivery id>` in VAST Ad@id.
+function adPlanShopAd(adId as Dynamic) as Dynamic
+    if not adPlanIsText(adId) then return invalid
+    match = createObject("roRegex", "^il-shop-(preroll|midroll)-([A-Za-z0-9_-]{43})$", "").match(adId)
+    if match.count() = 0 then return invalid
+    return { position: match[1], delivery: match[2] }
+end function
+
+' commerce.break_url taken verbatim, plus the identity of the ad on screen.
+function adPlanBreakCardUrl(breakUrl as String, cutId as String, tag as String, creativeId as String, delivery as String, locale as String) as String
+    return adPlanAppend(breakUrl, [["cut", cutId], ["tag", tag], ["creative", creativeId], ["delivery", delivery], ["locale", locale]])
+end function
+
+' The card of exactly this delivery and creative, timed by the ad rather than by the paused content's clock.
+function adPlanBreakCard(body as Dynamic, creativeId as String, delivery as String) as Dynamic
+    if not adPlanIsText(body) then return invalid
+    card = parseJson(body)
+    if type(card) <> "roAssociativeArray" then return invalid
+    if not adPlanIsText(card.id) or not adPlanIsText(card.linearCreativeId) or not adPlanIsText(card.format) then return invalid
+    if card.id <> delivery or card.linearCreativeId <> creativeId or card.format <> "midroll" then return invalid
+    cue = {}
+    cue.append(card)
+    cue.start = 0
+    cue["end"] = 9007199254740991#
+    return cue
+end function
+
+' What an ad's own player reports: RAF's ad (Ad@id, Creative@id) and the iADServer tag that produced it.
+function adPlanRafShop(ad as Dynamic, tagUrl as Dynamic) as Dynamic
+    if type(ad) <> "roAssociativeArray" then return invalid
+    if not adPlanIsText(ad.adId) or not adPlanIsText(ad.creativeId) then return invalid
+    if ad.creativeId = "" then return invalid
+    tag = ""
+    if adPlanCanonical("iadserver", tagUrl) <> invalid then tag = adPlanQuery(tagUrl, "tag")
+    return { adId: ad.adId, creativeId: ad.creativeId, tag: tag }
 end function
 
 ' Seconds since the epoch for an ISO 8601 date with `Z` or a `+hh:mm` / `-hh:mm` offset, or invalid.
@@ -179,7 +278,9 @@ function adPlanCut(cut as Dynamic, page as Dynamic, sid as String) as Dynamic
         end if
     end for
     if requests.count() = 0 then return invalid
-    return { id: cut.id, at: cut.at, requests: requests }
+    position = ""
+    if adPlanIsText(cut.position) then position = cut.position
+    return { id: cut.id, at: cut.at, position: position, requests: requests }
 end function
 
 function adPlanSetQuery(url as String, key as String, value as String) as String
@@ -635,9 +736,16 @@ end function
 ' RAF's tracking callback: each ad that starts sets the identity, or clears it for an ad without a shop.
 sub adPlanTrack(top as Object, eventType = "" as Dynamic, ctx = invalid as Dynamic)
     if top.cancelled = true then return
+    ' The card follows the ad: it leaves on complete, skip, close or error.
+    if eventType = "Complete" or eventType = "Skip" or eventType = "Close" or eventType = "Error"
+        top.spot = {}
+        return
+    end if
     if eventType <> "Impression" or type(ctx) <> "roAssociativeArray" then return
     spot = adPlanRafSpot(ctx.ad)
     if spot = invalid then spot = {}
+    shop = adPlanRafShop(ctx.ad, top.adTag)
+    if shop <> invalid then spot.shop = shop
     top.spot = spot
 end sub
 
@@ -648,6 +756,9 @@ function adPlanRunBreak(requests as Object, ads as Object, view as Dynamic, top 
     ' late must not ask again, draw an ad over the content or fire impressions.
     for each request in requests
         if top.cancelled = true then return "break_error"
+        ' Only an iADServer tag names the `tag` the break card is asked with.
+        top.adTag = ""
+        if request.provider = "iadserver" then top.adTag = request.tagUrl
         ads.setAdUrl(request.tagUrl)
         pods = ads.getAds()
         if top.cancelled = true then return "break_error"

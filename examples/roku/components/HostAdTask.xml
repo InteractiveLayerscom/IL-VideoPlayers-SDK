@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="HostAdTask" extends="Task">
+    <interface>
+        <field id="tagUrl" type="string" />
+        <field id="view" type="node" />
+        <field id="adStart" type="assocarray" alwaysNotify="true" />
+        <field id="adEnd" type="boolean" alwaysNotify="true" />
+        <field id="done" type="boolean" alwaysNotify="true" />
+        <field id="filled" type="boolean" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/HostAdTask.brs" />
+</component>
