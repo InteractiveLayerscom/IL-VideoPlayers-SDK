@@ -826,4 +826,25 @@ public final class NativePlanTest {
         second.renewed(renewedV2(NOW + 110000));
         assertFalse(other.events.contains("plan_renewed"));
     }
+
+    @Test public void anAnswerArrivingAfterExpiryBeforeAnyPulseIsNotDrawn() throws Exception {
+        // The app was in the background past expires_at: the first thing that runs on return is a late answer.
+        AdPlanDriverTest.FakeHost slow = new AdPlanDriverTest.FakeHost() {
+            final List<Runnable> held = new ArrayList<>();
+            @Override public void foreground(Runnable task) { held.add(task); }
+            { pendingAnswers = held; }
+        };
+        slow.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        slow.replies.put(ORIGIN + "/il-player/scene-product", "");
+        JSONObject v2 = new JSONObject(fixture("host-plan.json")).put("version", 2).put("expires_at", "2026-11-02T16:02:00Z")
+                .put("native_gam", new JSONObject().put("contract", "native-gam-plan-v1"));
+        AdPlanDriver driver = new AdPlanDriver(slow, read(v2.toString()), "es");
+        driver.start(null);
+        slow.position = 1000;
+        driver.tick();
+        slow.now = NOW + 120000;
+        for (Runnable task : new ArrayList<>(slow.pendingAnswers)) task.run();
+        assertTrue(slow.cues.isEmpty());
+        assertTrue(slow.events.contains("plan_expired"));
+    }
 }

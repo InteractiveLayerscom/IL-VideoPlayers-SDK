@@ -330,7 +330,7 @@ final class AdPlanDriver {
     // TRUE filled, FALSE empty, null timed out.
     private void displayAnswered(Object request, Boolean answer) {
         if (closed || request == null || request != displayRequest) return;
-        if (expired) answer = null;
+        if (checkExpired()) answer = null;
         displayRequest = null;
         host.cancel(displayExpired);
         AdPlan.Window window = pendingDisplay;
@@ -352,7 +352,7 @@ final class AdPlanDriver {
         if (closed) return;
         schedule.pending.remove(window);
         graphicBusy = false;
-        if (expired) return;
+        if (checkExpired()) return;
         if (answer == null || breakOn()) {
             emit("error", graphic.format, window.id);
         } else if (answer.imageUrl == null) {
@@ -398,7 +398,7 @@ final class AdPlanDriver {
         if (closed) return;
         schedule.pending.remove(window);
         productBusy = false;
-        if (expired) return;
+        if (checkExpired()) return;
         if (card == null || breakOn()) {
             schedule.products.put(window.id, "empty");
             emit(empty ? "no_fill" : "error", "scene_product", window.id);
@@ -733,7 +733,7 @@ final class AdPlanDriver {
     }
 
     void hostAdStarted(String tagUrl, String adId, String creativeId) {
-        if (closed || !hostBreak || expired) return;
+        if (closed || !hostBreak || checkExpired()) return;
         hostBreakElapsedMs = 0;
         shopAdStarted("at-" + hostBreakAtMs, hostBreakAtMs == 0 ? "preroll" : "midroll", tagUrl, adId, creativeId);
     }
@@ -796,7 +796,7 @@ final class AdPlanDriver {
             OverlayCue card = body == null || body.isEmpty() ? null : AdPlan.breakCue(body, creativeId, delivery);
             boolean none = body != null && body.isEmpty();
             host.foreground(() -> {
-                if (closed || token != shopToken || !breakOn()) return;
+                if (closed || token != shopToken || !breakOn() || checkExpired()) return;
                 if (card == null) {
                     emit(none ? "no_fill" : "error", "break_product", cutParam);
                     return;
