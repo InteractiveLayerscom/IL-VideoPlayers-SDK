@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test helper: keeps every event a player emits, not only the last one. -->
+<component name="EventLog" extends="Group">
+    <interface>
+        <function name="watch" />
+        <field id="events" type="array" />
+    </interface>
+    <script type="text/brightscript"><![CDATA[
+        sub watch(player as Object)
+            m.top.events = []
+            player.observeFieldScoped("event", "onEvent")
+        end sub
+        sub onEvent(event as Object)
+            list = m.top.events
+            list.push(event.getData())
+            m.top.events = list
+        end sub
+    ]]></script>
+</component>
