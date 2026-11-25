@@ -702,15 +702,14 @@ test('renewal: never two in flight; a missed slot still before expiry goes out a
   assert.ok(!events.some((e) => e.type === 'plan_renew_failed'));
 });
 
-test('renewal: an answer at expiry sends no further request; one plan_renew_failed with the last reason', async (t) => {
+test('renewal: an answer at expiry is ignored silently; plan_renew_failed never follows plan_expired', async (t) => {
   frozenClock(t, ['Date', 'setTimeout']);
   const v2 = fixture('app-plan-v2.json');
+  // keepPlanRenewed alone: an answer at expiry sends nothing more and says nothing.
   const held = heldRenewals(v2);
-  const events = [];
-  const replaced = [];
-  // keepPlanRenewed on its own (attachAppAds would already have stopped it at expiry with plan_expired).
-  keepPlanRenewed(v2, (next) => replaced.push(next) > 0, { origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP,
-    fetchImpl: held.fetchImpl, timeoutMs: 1e9, onEvent: (e) => events.push(e) });
+  const alone = [];
+  keepPlanRenewed(v2, () => assert.fail('no replace'), { origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP,
+    fetchImpl: held.fetchImpl, timeoutMs: 1e9, onEvent: (e) => alone.push(e) });
   t.mock.timers.tick(100000);
   await flush();
   t.mock.timers.tick(20000);
@@ -719,6 +718,67 @@ test('renewal: an answer at expiry sends no further request; one plan_renew_fail
   t.mock.timers.tick(10000);
   await flush();
   assert.equal(held.asked.length, 1);
-  assert.deepEqual(replaced, []);
-  assert.deepEqual(events.filter((e) => e.type === 'plan_renew_failed'), [{ type: 'plan_renew_failed', reason: 'http_204' }]);
+  assert.ok(!alone.some((e) => e.type === 'plan_renew_failed'));
+  // Through attachAppAds: the order is plan_expired with nothing after it.
+  t.mock.timers.reset();
+  frozenClock(t, ['Date', 'setTimeout']);
+  const attached = heldRenewals(v2);
+  const events = [];
+  const video = Object.assign(new EventTarget(), { currentTime: 0, paused: true });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video,
+    fetchImpl: attached.fetchImpl, timeoutMs: 1e9, onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  t.mock.timers.tick(100000);
+  await flush();
+  t.mock.timers.tick(20000);
+  attached.release();
+  await flush();
+  const types = events.map((e) => e.type).filter((type) => type.startsWith('plan_'));
+  assert.deepEqual(types, ['plan_expired']);
+});
+
+test('renewal: a plan that expires before any attempt emits only plan_expired', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = { ...fixture('app-plan-v2.json'), expires_at: new Date(NOW + 3000).toISOString() };
+  const held = heldRenewals(v2);
+  const events = [];
+  const video = Object.assign(new EventTarget(), { currentTime: 0, paused: true });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video,
+    fetchImpl: held.fetchImpl, timeoutMs: 1e9, onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  await flush();
+  t.mock.timers.tick(5000);
+  await flush();
+  assert.ok(held.asked.length <= 1);
+  assert.deepEqual(events.map((e) => e.type).filter((type) => type.startsWith('plan_')), ['plan_expired']);
+});
+
+test('after replacePlan with a renewed plan, GAM requests on the app route still carry msid and an', async (t) => {
+  frozenClock(t, ['Date']);
+  const v2 = fixture('app-plan-v2.json');
+  const graphics = [];
+  const video = Object.assign(new EventTarget(), { currentTime: 0, paused: true, played: { length: 0 } });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/il-player/app-plan') return new Response(JSON.stringify(v2));
+    if (url.hostname === 'pubads.g.doubleclick.net') { graphics.push(url); return new Response(superVast); }
+    return new Response(null, { status: 204 });
+  };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video, fetchImpl,
+    appParams: { msid: 'com.example.ildemo.tizen', an: 'IL Demo' } });
+  cleanups.push(() => ads.destroy());
+  assert.equal(ads.replacePlan(renewedV2(v2, NOW)), true);
+  const gam = ads.cuts.flatMap((cut) => cut.requests).filter((request) => request.provider === 'gam');
+  assert.ok(gam.length > 0);
+  for (const request of gam) {
+    assert.equal(new URL(request.tagUrl).searchParams.get('msid'), 'com.example.ildemo.tizen');
+    assert.equal(new URL(request.tagUrl).searchParams.get('an'), 'IL Demo');
+  }
+  video.currentTime = 11; video.paused = false; video.dispatchEvent(new Event('playing'));
+  await flush();
+  assert.ok(graphics.length > 0);
+  assert.ok(graphics.every((url) => url.searchParams.get('msid') === 'com.example.ildemo.tizen' && url.searchParams.get('an') === 'IL Demo'));
 });

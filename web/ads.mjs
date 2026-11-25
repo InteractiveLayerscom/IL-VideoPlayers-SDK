@@ -497,14 +497,14 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
   };
   // Up to three tries before expiry (RENEW_ATTEMPTS_MS ahead of it); one plan_renew_failed only after the last.
   // The next attempt is armed only after the previous answer arrived, so never two are in flight.
-  const arm = (current, attempt = 0, lastReason = 'refused') => {
+  const arm = (current, attempt = 0) => {
     clearTimeout(timer);
     if (stopped || current?.version !== 2) return;
     const own = attempt === 0 ? ++generation : generation;
     const expires = Date.parse(current.expires_at);
-    // A retry whose slot is at or past expiry is not sent: the renewal has failed. A missed slot still before
-    // expiry goes out at once.
-    if (attempt > 0 && Date.now() >= expires) return say({ type: 'plan_renew_failed', reason: lastReason });
+    // At or after expiry plan_expired is the event: nothing more is sent or said. A missed slot still before expiry
+    // goes out at once.
+    if (Date.now() >= expires) return;
     timer = setTimeout(async () => {
       let grant = null;
       try {
@@ -516,16 +516,17 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
       const next = await loadAppPlan({ origin, project, asset, app, renew: grant ?? undefined, fetchImpl, timeoutMs,
         onEvent: (event) => {
           if (event?.type === 'plan_unavailable') reason = event.reason;
-          say(event);
+          // An answer after expiry or stop says nothing, not even why it failed.
+          if (!stopped && own === generation && Date.now() < expires) say(event);
         } });
       if (stopped || own !== generation) return;
-      // An answer that arrives after the plan expired is ignored.
-      if (Date.now() >= expires) return say({ type: 'plan_renew_failed', reason: next ? 'late' : reason });
+      // An answer that arrives at or after expiry is ignored, without an event (plan_expired is the event).
+      if (Date.now() >= expires) return;
       if (next && replace(next)) {
         say({ type: 'plan_renewed', version: next.version });
         return arm(next);
       }
-      if (attempt + 1 < RENEW_ATTEMPTS_MS.length) return arm(current, attempt + 1, reason);
+      if (attempt + 1 < RENEW_ATTEMPTS_MS.length) return arm(current, attempt + 1);
       say({ type: 'plan_renew_failed', reason });
     }, Math.max(0, expires - RENEW_ATTEMPTS_MS[attempt] - Date.now()));
     timer.unref?.();
