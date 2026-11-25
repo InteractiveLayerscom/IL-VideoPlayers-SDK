@@ -22,6 +22,12 @@ sub main()
     testRafFallback()
     testExactWindow()
     testSessionWarning()
+    testNoLeak()
+    testHostGuard()
+    testHostOwnsVideo()
+    testPositions()
+    testVersionSwap()
+    testExpiryMs()
     if m.failures = 0 then print "ROKU_NATIVE_OK " + m.checks.toStr()
 end sub
 
@@ -38,6 +44,23 @@ end sub
 function fixtureText(name as String) as String
     return readAsciiFile("pkg:/tests/native/" + name).replace("http://localhost:8000", m.origin)
 end function
+
+function lastUrl() as String
+    return createObject("roSGScreen").getGlobalNode().lastPlanUrl
+end function
+
+' No grant, renew value or plan URL may leave the component through its events or fields.
+sub noGrant(s as Object, label as String)
+    published = formatJson(s.player.event) + s.player.planUrl
+    for each name in ["app-plan-v1.json", "app-plan-v2.json", "app-plan-renewed.json", "host-plan.json"]
+        grant = adPlanQuery(fixture(name).commerce.url, "grant")
+        if instr(1, published, grant) > 0 or instr(1, published, grant.encodeUriComponent()) > 0
+            check(false, label)
+            return
+        end if
+    end for
+    check(instr(1, published, "grant=") = 0 and instr(1, published, "renew=") = 0, label)
+end sub
 
 function fixture(name as String) as Object
     return parseJson(fixtureText(name))
@@ -153,7 +176,7 @@ sub testRenewal()
     check(s.player.event.type = "request" and s.player.event.format = "super" and s.player.event.window = "p1", "the window goes to a graphic")
     s.player.callFunc("renewPlan")
     v1 = fixture("app-plan-v1.json")
-    check(s.player.planUrl = m.origin + "/il-player/app-plan?project=" + m.project + "&asset=" + m.asset + "&app=roku%3Adev&renew=" + adPlanQuery(v1.commerce.url, "grant").encodeUriComponent(), "renewal sends the current grant")
+    check(lastUrl() = m.origin + "/il-player/app-plan?project=" + m.project + "&asset=" + m.asset + "&app=roku%3Adev&renew=" + adPlanQuery(v1.commerce.url, "grant").encodeUriComponent(), "renewal sends the current grant")
     s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 200, body: fixtureText("app-plan-renewed.json") })
     check(s.player.event.type = "plan_renewed", "the renewed plan is swapped in")
     at(s, 0.75)
@@ -166,7 +189,7 @@ sub testRenewal()
     v2.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v2.json") })
     check(v2.player.findNode("ilPlanRenew").duration = 100, "a v2 plan is renewed 20 s before it expires")
     v2.player.callFunc("renewPlan")
-    check(adPlanQuery(v2.player.planUrl, "renew") = adPlanQuery(fixture("app-plan-v2.json").commerce.url, "grant"), "the v2 renewal sends its grant")
+    check(adPlanQuery(lastUrl(), "renew") = adPlanQuery(fixture("app-plan-v2.json").commerce.url, "grant"), "the v2 renewal sends its grant")
     v2.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 204 })
     check(v2.overlay.linearBreak, "a failed renewal keeps the current plan")
     v2.player.callFunc("stopPlan")
@@ -216,7 +239,7 @@ sub testBreakCard()
     s.player.callFunc("applySpot", shopSpot("preroll", ""))
     check(s.player.event.type = "break_start", "an ad from a GAM tag asks nothing")
     s.player.callFunc("applySpot", shopSpot("preroll", "T_pre"))
-    check(s.player.event.format = "break_product" and s.player.event.url = v1.commerce.break_url + "&cut=pre&tag=T_pre&creative=cr1&delivery=" + m.delivery + "&locale=es", "the reader's own break asks the card of the playing ad")
+    check(s.player.event.format = "break_product" and lastUrl() = v1.commerce.break_url + "&cut=pre&tag=T_pre&creative=cr1&delivery=" + m.delivery + "&locale=es", "the reader's own break asks the card of the playing ad")
     s.player.callFunc("receive", { sessionId: m.key, revision: 1, status: 200, body: fixtureText("break-product-card-page.json") })
     check(s.player.event.type = "fill" and s.overlay.findNode("ilCommerce").visible, "Buy is drawn during the ad")
     s.player.callFunc("applySpot", {})
@@ -258,7 +281,7 @@ sub testHostBreaks()
     check(s.player.event.type = "error", "a GAM ad asks no card")
     tag = "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&cue_seconds=58&sid=ed4c7d84521a3bc4faba519c687146f0"
     s.player.callFunc("adStarted", tag, { adId: "il-shop-midroll-" + m.delivery, creativeId: "cr1", tracking: [] })
-    check(s.player.event.format = "break_product" and s.player.event.url = host.commerce.break_url + "&cut=at-58000&tag=T_mid&creative=cr1&delivery=" + m.delivery + "&locale=es", "the reported ad asks its card with cut=at-<ms>")
+    check(s.player.event.format = "break_product" and lastUrl() = host.commerce.break_url + "&cut=at-58000&tag=T_mid&creative=cr1&delivery=" + m.delivery + "&locale=es", "the reported ad asks its card with cut=at-<ms>")
     s.player.callFunc("receive", { sessionId: m.key, revision: 2, status: 200, body: fixtureText("break-product-card.json") })
     check(s.overlay.findNode("ilCommerce").visible and s.overlay.findNode("ilArt").visible = false, "Buy is drawn for the reported ad and nothing else")
     s.player.callFunc("adEnded")
@@ -273,7 +296,7 @@ sub testHostBreaks()
     pre = hostStage(fixture("host-plan.json"))
     pre.player.callFunc("breakStarted", 0)
     pre.player.callFunc("adStarted", tag, { adId: "il-shop-preroll-" + m.delivery, creativeId: "cr1", tracking: [] })
-    check(adPlanQuery(pre.player.event.url, "cut") = "at-0", "a host pre-roll is at-0")
+    check(adPlanQuery(lastUrl(), "cut") = "at-0", "a host pre-roll is at-0")
     pre.player.callFunc("breakEnded")
     pre.player.callFunc("stopPlan")
 
@@ -373,11 +396,11 @@ sub testRafFallback()
     impression = [{ event: "Impression", url: "https://ads.iadserver.com/events/" + m.delivery + "/impression" }]
     a = hostAtBreak()
     a.player.callFunc("adStarted", tag, { adId: "il-shop-midroll-" + m.delivery, creativeId: "cr1", tracking: [] })
-    check(a.player.event.format = "break_product" and adPlanQuery(a.player.event.url, "delivery") = m.delivery, "RAF's adId with il-shop- asks the card")
+    check(a.player.event.format = "break_product" and adPlanQuery(lastUrl(), "delivery") = m.delivery, "RAF's adId with il-shop- asks the card")
     a.player.callFunc("stopPlan")
     b = hostAtBreak()
     b.player.callFunc("adStarted", tag, { creativeId: "cr1", tracking: impression })
-    check(b.player.event.format = "break_product" and adPlanQuery(b.player.event.url, "delivery") = m.delivery and adPlanQuery(b.player.event.url, "cut") = "at-58000", "without adId the iADServer impression names the delivery")
+    check(b.player.event.format = "break_product" and adPlanQuery(lastUrl(), "delivery") = m.delivery and adPlanQuery(lastUrl(), "cut") = "at-58000", "without adId the iADServer impression names the delivery")
     b.player.callFunc("receive", { sessionId: m.key, revision: 1, status: 200, body: fixtureText("break-product-card.json") })
     check(b.overlay.findNode("ilCommerce").visible, "the fallback card is drawn")
     b.player.callFunc("stopPlan")
@@ -391,7 +414,7 @@ sub testRafFallback()
     r.player.callFunc("attachPlan", r.overlay, r.video, "178311e8ffa4791646c0d0f6c728aa73", fixture("app-plan-v1.json"), m.origin, "es")
     r.player.callFunc("startPlan")
     r.player.callFunc("applySpot", { creativeId: "cr1", deliveryId: m.delivery, shop: { adId: "", creativeId: "cr1", tag: "T_pre", impressionDelivery: m.delivery } })
-    check(adPlanQuery(r.player.event.url, "cut") = "pre", "the reader's own break uses the fallback with its cut id")
+    check(adPlanQuery(lastUrl(), "cut") = "pre", "the reader's own break uses the fallback with its cut id")
     r.player.callFunc("stopPlan")
 end sub
 
@@ -413,4 +436,132 @@ sub testSessionWarning()
     ok = hostStage(fixture("host-plan.json"))
     check(ok.player.event = invalid or ok.player.event.type <> "buy_unavailable", "with the plan's session there is no warning")
     ok.player.callFunc("stopPlan")
+end sub
+
+sub testNoLeak()
+    s = stage()
+    s.player.callFunc("loadPlan", s.overlay, s.video, "view-1", m.origin, m.project, m.asset, "es")
+    noGrant(s, "no grant after the load request")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v1.json") })
+    s.player.callFunc("applySpot", shopSpot("preroll", "T_pre"))
+    check(adPlanQuery(lastUrl(), "grant") <> "", "the break card is still asked with its grant")
+    noGrant(s, "no grant in the break card request event")
+    s.player.callFunc("receive", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("break-product-card-page.json") })
+    noGrant(s, "no grant in the break card fill event")
+    s.player.callFunc("finishBreak", "break_end")
+    at(s, 0.5)
+    s.player.callFunc("planTick")
+    check(s.player.event.format = "scene_product" and adPlanQuery(lastUrl(), "window") = "p1", "the scene card is asked")
+    noGrant(s, "no grant in the scene card request event")
+    s.player.callFunc("renewPlan")
+    check(adPlanQuery(lastUrl(), "renew") <> "", "the renewal is sent with its grant")
+    noGrant(s, "no grant in planUrl after renewal")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 200, body: fixtureText("app-plan-renewed.json") })
+    noGrant(s, "no grant in the renewal event")
+    s.player.callFunc("stopPlan")
+    e = stage()
+    e.player.callFunc("loadPlan", e.overlay, e.video, "view-1", m.origin, m.project, m.asset, "es")
+    e.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 404 })
+    noGrant(e, "no grant in plan_unavailable")
+    check(e.player.event.reason = 404 and e.player.event.app = "roku:dev", "plan_unavailable carries the status as reason and the raw app id")
+    l = stage()
+    l.player.callFunc("loadPlan", l.overlay, l.video, "view-1", "http://localhost:8000", m.project, m.asset, "es")
+    check(l.player.event.reason = "request" and l.player.event.app = "roku:dev", "a request refused locally says so with the app id")
+end sub
+
+sub testHostGuard()
+    s = hostStage(fixture("host-plan.json"))
+    s.player.callFunc("breakStarted", 58000)
+    check(not s.player.callFunc("breakGuardAt", 129000) and s.overlay.linearBreak, "a host break may run up to 130 s")
+    check(s.player.callFunc("breakGuardAt", 130000), "a host break that never ends is closed at 130 s")
+    check(s.player.event.type = "break_error" and s.player.event.cut = "at-58000" and not s.overlay.linearBreak, "the guard says so and leaves the break")
+    at(s, 15.5)
+    s.player.callFunc("planTick")
+    check(s.player.event.type = "request", "graphics resume after the guard")
+    s.player.callFunc("stopPlan")
+end sub
+
+sub testHostOwnsVideo()
+    s = hostStage(fixture("host-plan.json"))
+    s.video.visible = false
+    s.video.control = "stop"
+    s.player.callFunc("breakStarted", 58000)
+    s.player.callFunc("stopPlan")
+    check(not s.video.visible and s.video.control = "stop" and not s.overlay.linearBreak, "stopPlan in a host break leaves the host's video alone")
+    s.player.callFunc("attachPlan", s.overlay, s.video, m.key, fixture("host-plan.json"), m.origin, "es")
+    s.player.callFunc("startPlan")
+    s.player.callFunc("breakStarted", 178000)
+    check(s.player.event.type = "break_start" and s.player.event.cut = "at-178000", "a reused node is not left in a stale break")
+    s.player.callFunc("loadPlan", s.overlay, s.video, m.key, m.origin, m.project, m.asset, "es")
+    check(not s.video.visible, "a second loadPlan during a host break leaves the host's video alone")
+end sub
+
+sub testPositions()
+    s = hostStage(fixture("host-plan.json"))
+    s.player.callFunc("breakStarted", -1)
+    check(s.player.event.type = "break_refused" and not s.overlay.linearBreak, "a negative position is refused")
+    inf = 1.0e308 * 10
+    s.player.callFunc("breakStarted", inf)
+    check(s.player.event.type = "break_refused" and not s.overlay.linearBreak, "an infinite position is refused")
+    s.player.callFunc("breakStarted", 58000.6)
+    check(s.player.event.cut = "at-58001", "a fractional position rounds to the nearest millisecond")
+    s.player.callFunc("stopPlan")
+end sub
+
+sub testVersionSwap()
+    s = stage()
+    s.player.callFunc("loadPlan", s.overlay, s.video, "view-1", m.origin, m.project, m.asset, "es")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v2.json") })
+    timer = s.player.findNode("ilPlanRenew")
+    check(timer.control = "start", "a loaded v2 plan schedules its renewal")
+    s.player.callFunc("renewPlan")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 200, body: fixtureText("app-plan-renewed.json") })
+    check(s.player.event.type = "plan_renewed" and s.player.event.version = 1 and timer.control = "stop", "a v1 answer ends the approval and stops renewing")
+    s.player.callFunc("stopPlan")
+    t = stage()
+    t.player.callFunc("loadPlan", t.overlay, t.video, "view-1", m.origin, m.project, m.asset, "es")
+    t.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v1.json") })
+    timer = t.player.findNode("ilPlanRenew")
+    check(timer.control = "stop", "a v1 plan is not renewed")
+    t.player.callFunc("renewPlan")
+    t.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 200, body: fixtureText("app-plan-v2.json") })
+    check(t.player.event.version = 2 and timer.control = "start" and timer.duration = 100, "a v2 answer to a v1 plan schedules renewal")
+    t.player.callFunc("stopPlan")
+
+    g = stage()
+    g.player.callFunc("loadPlan", g.overlay, g.video, "view-1", m.origin, m.project, m.asset, "es")
+    g.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v1.json") })
+    g.player.callFunc("finishBreak", "break_end")
+    at(g, 0.5)
+    g.player.callFunc("planTick")
+    g.player.callFunc("receive", { sessionId: "view-1", revision: 1, status: 204 })
+    g.player.callFunc("receive", { sessionId: "view-1", revision: 2, status: 200, body: vastSuper() })
+    at(g, 1.0)
+    g.overlay.callFunc("setClockAnchor", "view-1", { positionSeconds: 0, programTimeMs: 0, clipId: 7 })
+    check(g.overlay.findNode("ilPrimary").getChildCount() = 1, "the graphic of p1 is on screen")
+    other = fixture("app-plan-renewed.json")
+    other.scenes.windows = [{ id: "z9", start_ms: 200000, end_ms: 210000 }]
+    other.commerce.windows = []
+    g.player.callFunc("replacePlan", other)
+    check(g.overlay.findNode("ilPrimary").getChildCount() = 0, "a cue whose window left the new plan is removed at the swap")
+    g.player.callFunc("stopPlan")
+end sub
+
+function vastSuper() as String
+    image = "https://c.example/s.png"
+    return "<VAST version=""4.0""><Ad><InLine><Impression>https://t.example/i</Impression><Creatives><Creative><NonLinearAds><NonLinear width=""600"" height=""90""><StaticResource creativeType=""image/png"">" + image + "</StaticResource></NonLinear></NonLinearAds></Creative></Creatives></InLine></Ad></VAST>"
+end function
+
+sub testExpiryMs()
+    plan = fixture("app-plan-v2.json")
+    plan.expires_at = "2026-11-02T16:01:59.500Z"
+    s = stage("5990561fda4bd75154be4c4465d8d2b6")
+    s.player.callFunc("attachPlan", s.overlay, s.video, "5990561fda4bd75154be4c4465d8d2b6", plan, m.origin, "es")
+    s.player.callFunc("startPlan")
+    s.player.callFunc("setClock", m.now + 119.4#)
+    s.player.callFunc("planTick")
+    check(s.overlay.linearBreak, "the plan holds until expires_at")
+    s.player.callFunc("setClock", m.now + 119.6#)
+    s.player.callFunc("planTick")
+    check(s.player.event.type = "plan_expired", "expiry is compared in milliseconds")
 end sub

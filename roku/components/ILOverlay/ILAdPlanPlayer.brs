@@ -18,9 +18,15 @@ sub setClock(seconds as Dynamic)
 end sub
 
 function planNow() as LongInteger
-    if m.fixedNow <> invalid then return m.fixedNow
+    if m.fixedNow <> invalid then return int(m.fixedNow)
     clock = createObject("roDateTime")
     return clock.asSeconds()
+end function
+
+function planNowMs() as Double
+    if m.fixedNow <> invalid then return m.fixedNow * 1000#
+    clock = createObject("roDateTime")
+    return clock.asSeconds() * 1000# + clock.getMilliseconds()
 end function
 
 ' Requests IL's plan for this video and app, then attaches and starts it. Without a plan (204, 404, a network
@@ -28,16 +34,24 @@ end function
 function loadPlan(overlay as Object, video as Object, sessionId as String, origin as Dynamic, project as Dynamic, asset as Dynamic, locale = "en" as String, consent = invalid as Dynamic) as Boolean
     stopPlan()
     info = createObject("roAppInfo")
+    raw = "roku:dev"
+    if not info.isDev() then raw = "roku:" + info.getID()
     app = adPlanAppId(info.getID(), info.isDev())
     url = invalid
-    if app <> invalid then url = adPlanAppPlanUrl(origin, project, asset, app)
-    m.load = { overlay: overlay, video: video, sessionId: sessionId, origin: origin, project: project, asset: asset, locale: locale, consent: consent, app: app, renewing: false }
+    reason = "app_id"
+    if app <> invalid
+        url = adPlanAppPlanUrl(origin, project, asset, app)
+        reason = "request"
+    end if
+    m.load = { overlay: overlay, video: video, sessionId: sessionId, origin: origin, project: project, asset: asset, locale: locale, consent: consent, app: raw, renewing: false }
     if url = invalid
         m.load = invalid
-        m.top.event = { type: "plan_unavailable", status: 0, app: app }
+        m.top.event = { type: "plan_unavailable", status: 0, app: raw, reason: reason }
         m.top.contentReady = true
         return false
     end if
+    ' The first request carries no grant; renewals (with &renew=) are never published.
+    m.top.planUrl = url
     requestPlan(url)
     return true
 end function
@@ -45,7 +59,6 @@ end function
 sub requestPlan(url as String)
     cancelLoad(false)
     m.loadRevision = m.loadRevision + 1
-    m.top.planUrl = url
     m.loader = createObject("roSGNode", "ILOverlayFeedRequest")
     m.loader.observeFieldScoped("result", "onPlanResult")
     ' Bounded like the reader's other requests: a slow console never holds the content for long.
@@ -92,7 +105,7 @@ sub receivePlan(result as Dynamic)
         end if
     end if
     ' 404 is the same answer for an unknown project, video or app: the app id sent is what to check first.
-    m.top.event = { type: "plan_unavailable", status: result.status, app: load.app }
+    m.top.event = { type: "plan_unavailable", status: result.status, app: load.app, reason: result.status }
     m.load = invalid
     m.top.contentReady = true
 end sub
@@ -124,15 +137,34 @@ function replacePlan(plan as Dynamic) as Boolean
     if read = invalid then return false
     if m.hostBreaks <> invalid then adPlanSetBreaks(read, m.hostBreaks)
     m.plan = read
-    m.top.event = { type: "plan_renewed" }
+    ' What the old plan derived goes; per-view state (shown, attempted, settled, products, measure) stays.
+    ' A cue on screen stays only while its window is still in the new plan, and a break in progress finishes.
+    kept = []
+    for each cue in m.planCues
+        if planHasWindow(cue.window) then kept.push(cue)
+    end for
+    m.planCues = kept
+    if m.breakCard = invalid then m.overlay.callFunc("setPlanCues", m.sessionId, kept)
+    m.top.event = { type: "plan_renewed", version: read.version }
+    ' A v1 answer ends the approval: no more renewals. A v2 answer is renewed in turn (when loaded here).
     scheduleRenewal()
     return true
+end function
+
+function planHasWindow(id as Dynamic) as Boolean
+    if not adPlanIsText(id) then return false
+    for each list in [m.plan.windows, m.plan.shopWindows]
+        for each window in list
+            if window.id = id then return true
+        end for
+    end for
+    return false
 end function
 
 ' A version 2 plan is not used past `expires_at`, as `plan_expired` on the web.
 function planExpired() as Boolean
     if m.plan = invalid then return false
-    if m.plan.version <> 2 or planNow() < m.plan.expires then return false
+    if m.plan.version <> 2 or planNowMs() < m.plan.expiresMs then return false
     if m.inBreak
         if m.hostBreak then breakEnded() else finishBreak("break_error")
     end if
@@ -219,8 +251,11 @@ sub stopPlan()
         m.breakCard = invalid
         m.overlay.planBreak = false
         m.overlay.callFunc("setLinearAd", false, invalid)
-        m.video.visible = true
+        ' The host owns its video during its own break: the reader never shows it through the host's ad.
+        if not m.hostBreak then m.video.visible = true
     end if
+    m.inBreak = false
+    m.hostBreak = false
     if m.breakTask <> invalid
         m.breakTask.unobserveFieldScoped("spot")
         m.breakTask.unobserveFieldScoped("result")
@@ -389,7 +424,7 @@ sub receiveGraphic(context as Object, result as Object)
         emit("fill", context.format, window.id)
         format = "super"
         if context.format = "l_shape" then format = "l"
-        cue = { id: "il-ads-" + window.id, format: format, start: window.start, imageUrl: ad.imageUrl, mimeType: ad.mimeType }
+        cue = { id: "il-ads-" + window.id, format: format, start: window.start, imageUrl: ad.imageUrl, mimeType: ad.mimeType, window: window.id }
         cue["end"] = window["end"]
         m.measure[cue.id] = { urls: ad.impressions, format: context.format, window: window.id }
         m.planCues.push(cue)
@@ -424,6 +459,7 @@ sub receiveProduct(context as Object, result as Object)
         item.delete("impressionUrl")
     end if
     m.measure[item.id] = { urls: urls, format: "scene_product", window: window.id }
+    item.window = window.id
     m.planCues.push(item)
     m.overlay.callFunc("setPlanCues", m.sessionId, m.planCues)
 end sub
@@ -499,6 +535,11 @@ end sub
 ' True when the guard ended the break.
 function breakGuardAt(elapsedMs as Integer) as Boolean
     if m.plan = invalid or not m.inBreak then return false
+    if m.hostBreak
+        if elapsedMs < 130000 then return false
+        endHostBreak("break_error")
+        return true
+    end if
     if elapsedMs < 130000 and (m.spotSeen or elapsedMs < 10000) then return false
     if m.breakTask <> invalid
         m.breakTask.cancelled = true
@@ -557,7 +598,7 @@ end function
 sub askBreakCard(shop as Object)
     m.breakToken = m.breakToken + 1
     url = adPlanBreakCardUrl(m.plan.breakUrl, m.cut.id, shop.tag, shop.creativeId, shop.delivery, planLocale())
-    m.top.event = { type: "request", format: "break_product", window: m.cut.id, url: url }
+    emit("request", "break_product", m.cut.id)
     planCall("breakCard", url, 6000, { shop: shop, token: m.breakToken })
 end sub
 
@@ -601,8 +642,17 @@ end sub
 
 ' While the app's break is on, IL draws nothing but Buy, and pending graphic answers are discarded.
 sub breakStarted(atMs as Dynamic)
-    if m.plan = invalid or m.inBreak or not adPlanIsNumber(atMs) then return
-    if atMs < 0 or planExpired() then return
+    if m.plan = invalid or m.inBreak then return
+    ' The server takes only digits: a negative, NaN or infinite position is refused once, with no call.
+    finite = false
+    if adPlanIsNumber(atMs)
+        finite = atMs = atMs and atMs >= 0 and atMs < 9007199254740991#
+    end if
+    if not finite
+        m.top.event = { type: "break_refused", reason: "position" }
+        return
+    end if
+    if planExpired() then return
     ms& = int(atMs + 0.5)
     position = "midroll"
     if ms& = 0 then position = "preroll"
@@ -624,6 +674,9 @@ sub breakStarted(atMs as Dynamic)
     m.overlay.planBreak = true
     m.overlay.callFunc("setLinearAd", true, invalid)
     emitBreak("break_start", m.cut)
+    ' Safety net for a host that never calls breakEnded: the same 130 s limit as the reader's own breaks.
+    m.breakClock = createObject("roTimespan")
+    m.guard.control = "start"
 end sub
 
 ' `ad` is the ad object of the app's own RAF tracking callback (ctx.ad), `adTagUrl` the tag it was requested with.
@@ -642,14 +695,20 @@ sub adEnded()
 end sub
 
 sub breakEnded()
+    endHostBreak("break_end")
+end sub
+
+sub endHostBreak(outcome as String)
     if m.plan = invalid or not m.hostBreak then return
+    m.guard.control = "stop"
+    m.breakClock = invalid
     dropBreakCard()
     m.hostBreak = false
     m.inBreak = false
     m.overlay.planBreak = false
     m.overlay.callFunc("setLinearAd", false, invalid)
     m.top.linearSpot = {}
-    emitBreak("break_end", m.cut)
+    emitBreak(outcome, m.cut)
 end sub
 
 sub onBreakResult(event as Object)

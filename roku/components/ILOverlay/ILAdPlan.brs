@@ -46,6 +46,7 @@ function adPlanRead(plan as Dynamic, nowSeconds as LongInteger, origin as Dynami
     result = { cuts: adPlanCuts(plan.cuts, page, sid), windows: [], graphics: [], pacing: invalid, shop: invalid, shopWindows: [], page: page, sid: sid, breakShop: breakShop, consent: consent }
     result.version = plan.version
     result.expires = expires
+    result.expiresMs = adPlanIsoMs(plan.expires_at)
     result.scenes = plan.scenes
     ' The renewal grant travels in commerce.url, whatever origin the plan was read with.
     result.grant = ""
