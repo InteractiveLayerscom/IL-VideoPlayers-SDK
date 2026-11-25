@@ -28,6 +28,8 @@ sub main()
     testPositions()
     testVersionSwap()
     testExpiryMs()
+    testRenewRetries()
+    testUnreadable()
     if m.failures = 0 then print "ROKU_NATIVE_OK " + m.checks.toStr()
 end sub
 
@@ -573,4 +575,59 @@ sub testExpiryMs()
     s.player.callFunc("setClock", m.now + 119.6#)
     s.player.callFunc("planTick")
     check(s.player.event.type = "plan_expired", "expiry is compared in milliseconds")
+end sub
+
+function countType(s as Object, kind as String) as Integer
+    total = 0
+    for each event in s.log.events
+        if event.type = kind then total = total + 1
+    end for
+    return total
+end function
+
+sub testRenewRetries()
+    s = stage()
+    s.player.callFunc("loadPlan", s.overlay, s.video, "view-1", m.origin, m.project, m.asset, "es")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v2.json") })
+    timer = s.player.findNode("ilPlanRenew")
+    check(timer.duration = 100, "the first renewal is 20 s before expiry")
+    s.player.callFunc("renewPlan")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 0, timedOut: true })
+    check(timer.duration = 108 and timer.control = "start" and countType(s, "plan_renew_failed") = 0, "a failed renewal retries 12 s before expiry without reporting")
+    s.player.callFunc("renewPlan")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 3, status: 200, body: fixtureText("app-plan-v2.json") })
+    check(countType(s, "plan_renewed") = 1 and countType(s, "plan_renew_failed") = 0, "the second attempt succeeds: renewed once, no failure")
+    check(timer.duration = 100, "the next cycle starts again at 20 s")
+    s.player.callFunc("stopPlan")
+
+    f = stage()
+    f.player.callFunc("loadPlan", f.overlay, f.video, "view-1", m.origin, m.project, m.asset, "es")
+    f.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v2.json") })
+    timer = f.player.findNode("ilPlanRenew")
+    f.player.callFunc("renewPlan")
+    f.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 204 })
+    f.player.callFunc("renewPlan")
+    f.player.callFunc("receivePlan", { sessionId: "view-1", revision: 3, status: 0 })
+    check(timer.duration = 115 and countType(f, "plan_renew_failed") = 0, "the third attempt is 5 s before expiry")
+    f.player.callFunc("renewPlan")
+    f.player.callFunc("receivePlan", { sessionId: "view-1", revision: 4, status: 404 })
+    check(countType(f, "plan_renew_failed") = 1 and f.player.event.reason = "http_404", "after the third failure plan_renew_failed comes once with the last reason")
+    f.player.callFunc("setClock", m.now + 120)
+    f.player.callFunc("planTick")
+    check(f.player.event.type = "plan_expired" and countType(f, "plan_renew_failed") = 1, "then the plan expires")
+end sub
+
+sub testUnreadable()
+    stitched = fixture("app-plan-v1.json")
+    stitched.timeline = { kind: "stitched", pdt_origin: "2026-11-02T15:00:00Z" }
+    s = stage()
+    s.player.callFunc("loadPlan", s.overlay, s.video, "view-1", m.origin, m.project, m.asset, "es")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: formatJson(stitched) })
+    check(s.player.event.type = "plan_unavailable" and s.player.event.status = 200 and s.player.event.reason = "stitched" and s.player.contentReady, "a stitched plan is unavailable with reason stitched")
+    for each body in ["{", formatJson({ version: 9 })]
+        b = stage()
+        b.player.callFunc("loadPlan", b.overlay, b.video, "view-1", m.origin, m.project, m.asset, "es")
+        b.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: body })
+        check(b.player.event.status = 200 and b.player.event.reason = "invalid", "an unreadable 200 is unavailable with reason invalid")
+    end for
 end sub
