@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="MainScene" extends="Scene">
+    <interface>
+        <field id="config" type="assocarray" onChange="start" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
+    <children>
+        <Video id="video" width="1280" height="720" />
+        <Label id="status" translation="[40, 30]" width="1200" />
+    </children>
+</component>
