@@ -786,5 +786,26 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertFalse(events.contains { $0.type == "plan_renewed" || $0.type == "plan_renew_failed" })
         XCTAssertTrue(reader.schedule.plan.native, "the late plan was not adopted")
     }
+    func testAPlanThatExpiresBeforeAnyRenewalAttemptSaysOnlyExpired() async throws {
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v1"))])
+        let loaded = await load(overlay: overlay())
+        let reader = try XCTUnwrap(loaded)
+        var release: CheckedContinuation<Void, Never>?
+        // The first wait outlasts the plan (an app suspended past expiry, for example).
+        reader.renewalSleep = { [weak self] _ in
+            self?.clock = NativeFixtures.frozenNow.addingTimeInterval(130)
+            await withCheckedContinuation { release = $0 }
+        }
+        FixtureNetwork.reset([:])
+        XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("app-plan-v2")))
+        try await waitFor({ release != nil }, "the first wait")
+        reader.advance(nowMs: 60500)
+        XCTAssertEqual(events.map(\.type), ["plan_expired"])
+        release?.resume()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(events.map(\.type), ["plan_expired"], "no plan_renew_failed without an attempt")
+        XCTAssertFalse(FixtureNetwork.seen.contains { $0.contains("&renew=") })
+        reader.stop()
+    }
 }
 #endif

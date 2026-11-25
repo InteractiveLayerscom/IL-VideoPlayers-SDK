@@ -236,10 +236,9 @@ public final class ILAdPlanPlayer {
         }
     }
 
-    /// A version 2 plan from `load` is asked again about 20 s before it expires, with `renew` so IL keeps the
-    /// same commerce session. A renewal that fails lets the plan expire: playback goes on without ads.
-    /// Seconds before `expires_at` at which a version 2 plan is asked again: a single 204, timeout or network blip
-    /// must not end the view, so up to three attempts, stopping at the first success.
+    /// Seconds before `expires_at` at which a version 2 plan from `load` is asked again, with `renew` so IL keeps the
+    /// same commerce session: a single 204, timeout or network blip must not end the view, so up to three attempts,
+    /// stopping at the first success. If all fail, the plan expires and playback goes on without ads.
     static let renewalOffsets: [TimeInterval] = [20, 12, 5]
 
     private func scheduleRenewal() {
@@ -248,15 +247,18 @@ public final class ILAdPlanPlayer {
         let expiresAt = plan.expiresAt
         let target = plan.renewGrant.map { URL(string: AdPlan.setQuery(base.absoluteString, "renew", $0)) ?? base } ?? base
         renewal = Task { [weak self] in
-            var reason = "network"
+            // The last real failure; nil while no attempt has been made.
+            var reason: String?
             for offset in Self.renewalOffsets {
-                guard let self, !Task.isCancelled, !self.closed else { return }
+                // The reader is only borrowed between waits: one the app drops without stop() is not kept alive.
+                guard let (sleep, wait) = { () -> ((TimeInterval) async -> Void, TimeInterval)? in
+                    guard let self, !Task.isCancelled, !self.closed else { return nil }
+                    return (self.renewalSleep, expiresAt.timeIntervalSince(self.now()) - offset)
+                }() else { return }
                 // A slot at or past expiry sends nothing more; one merely missed but still before expiry goes at once.
-                if self.now() >= expiresAt { break }
-                let sleep = self.renewalSleep
-                let wait = expiresAt.timeIntervalSince(self.now()) - offset
+                if wait + offset <= 0 { break }
                 await sleep(max(0, wait))
-                guard !Task.isCancelled, !self.closed else { return }
+                guard let self, !Task.isCancelled, !self.closed else { return }
                 if self.now() >= expiresAt { break }
                 let configuration = URLSessionConfiguration.ephemeral
                 configuration.protocolClasses = self.session.configuration.protocolClasses
@@ -274,8 +276,9 @@ public final class ILAdPlanPlayer {
                     reason = Self.failureReason(answer)
                 }
             }
-            // Once, after the last attempt; never the URL: it carries the grant.
-            guard let self, !Task.isCancelled, !self.closed else { return }
+            // Once, after the last attempt that failed; never the URL: it carries the grant. With no attempt made,
+            // plan_expired alone says what happened.
+            guard let reason, let self, !Task.isCancelled, !self.closed else { return }
             self.emit("plan_renew_failed", reason, "")
         }
     }
