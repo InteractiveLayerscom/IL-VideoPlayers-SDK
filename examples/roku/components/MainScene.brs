@@ -43,7 +43,7 @@ end sub
 sub startHost(config as Object)
     m.relay = createObject("roSGNode", "RelayTask")
     m.relay.observeFieldScoped("response", "onRelay")
-    relay("playback", "/playback", { asset: config.asset })
+    relay("playback", "/playback", { asset_id: config.asset })
 end sub
 
 sub relay(kind as String, path as String, body as Object)
@@ -129,7 +129,7 @@ end sub
 ' A stable tag without an ad: ask the next step of this break, exactly as the per-break API says.
 sub onHostAdsDone()
     if not m.ads.filled and m.step.steps_left <> invalid and m.step.steps_left > 0
-        relay("next", "/break/next", { playback_id: m.playbackId, cue_seconds: m.breakMs / 1000, after_step: m.step.step })
+        relay("next", "/break/next", { playback_id: m.playbackId, opportunity_id: m.step.opportunity_id, after_step: m.step.step })
         return
     end if
     endHostBreak()
