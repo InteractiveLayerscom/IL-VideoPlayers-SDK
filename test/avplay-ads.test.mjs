@@ -337,13 +337,24 @@ test('a scene product wins its window on AVPlay and carries Buy', async (t) => {
   assert.ok(!r.fetched.some((url) => url.includes('doubleclick')));
 });
 
-test('AVPlay refuses native GAM v2 plans until its own scheduler supports expiry', async (t) => {
-  const r = planRig({ version: 2, native_gam: { contract: 'native-gam-plan-v1' },
-    cuts: [{ id: 'mid', at: 60, tag_url: GAM, position: 'midroll' }] }, () => ({ ok: true, text: async () => linear() }));
-  t.after(() => r.sdk.destroy());
-  await r.sdk.start();
-  r.avplay.time=60000;
-  r.sdk.tick();
+test('AVPlay plays a native GAM v2 plan while it is valid and starts no break once it expired', async (t) => {
+  const v2 = (expires) => ({ version: 2, native_gam: { contract: 'native-gam-plan-v1' }, expires_at: new Date(Date.now() + expires).toISOString(),
+    cuts: [{ id: 'mid', at: 60, tag_url: GAM, position: 'midroll' }] });
+  const valid = planRig(v2(100000), () => ({ ok: true, text: async () => linear() }));
+  t.after(() => valid.sdk.destroy());
+  await valid.sdk.start();
+  valid.avplay.time = 60000;
+  valid.sdk.tick();
   await flush();
-  assert.equal(r.fetched.length, 0);
+  assert.equal(valid.fetched.length, 1);
+  assert.ok(valid.fetched[0].startsWith('https://pubads.g.doubleclick.net/gampad/ads?'));
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const late = planRig(v2(1000), () => ({ ok: true, text: async () => linear() }));
+  t.after(() => late.sdk.destroy());
+  await late.sdk.start();
+  t.mock.timers.tick(1000);
+  late.avplay.time = 60000;
+  late.sdk.tick();
+  await flush();
+  assert.equal(late.fetched.length, 0);
 });

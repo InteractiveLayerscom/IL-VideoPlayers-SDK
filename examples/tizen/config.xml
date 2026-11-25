@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal Samsung TV web app for the IL example. Replace the package/application id with your own (Tizen Studio
+     generates one) and register `tizen:<application id>` in IL's console. Declare every origin the app calls. -->
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="http://example.com/ILDemo" version="1.0.0" viewmodes="maximized">
+  <tizen:application id="AbCdEfGhIj.ILDemo" package="AbCdEfGhIj" required_version="6.0"/>
+  <content src="index.html"/>
+  <name>IL Demo</name>
+  <feature name="http://tizen.org/feature/screen.size.all"/>
+  <tizen:profile name="tv-samsung"/>
+  <tizen:privilege name="http://tizen.org/privilege/internet"/>
+  <!-- IL's console (app plan and product cards), the relay of mode 2, the ad servers and the media/CDN hosts. -->
+  <access origin="https://console.example" subdomains="true"/>
+  <access origin="https://relay.example" subdomains="true"/>
+  <access origin="https://ads.iadserver.com" subdomains="true"/>
+  <access origin="https://pubads.g.doubleclick.net" subdomains="true"/>
+  <access origin="https://media.example" subdomains="true"/>
+  <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>
+</widget>

@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>IL Demo</title>
+<link rel="stylesheet" href="sdk/player.css">
+<style>html, body { margin: 0; width: 1920px; height: 1080px; background: #000; overflow: hidden; }</style>
+<div id="stage" style="position:relative;width:1920px;height:1080px">
+  <object id="av" type="application/avplayer" style="position:absolute;inset:0;width:1920px;height:1080px"></object>
+</div>
+<pre id="log" style="position:absolute;left:24px;bottom:24px;color:#fff;font:20px monospace;max-height:300px;overflow:hidden"></pre>
+<script src="$WEBAPIS/webapis/webapis.js"></script>
+<script src="settings.js"></script>
+<script type="module" src="main.mjs"></script>
