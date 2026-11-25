@@ -41,8 +41,23 @@ public final class ILAdPlanPlayer {
 
     private let overlay: ILOverlayPlayerView
     private let player: AVPlayer
-    private let plan: AdPlan
-    private var schedule: AdPlan.Schedule
+    private var plan: AdPlan
+    private(set) var schedule: AdPlan.Schedule
+    private var planJSON: Data
+    private let planOrigin: String?
+    private let sessionID: String
+    private var hostBreaks: [Int64] = []
+    /// Set once a version 2 plan expired: nothing of it is used until `replacePlan` brings a current one.
+    private var expired = false
+    /// Where `load` asked for the plan, for the renewal of a version 2 plan.
+    private var loadURL: URL?
+    private var renewal: Task<Void, Never>?
+    /// The break the host reports it is playing (`breakStarted`), as the break-card `cut`: `at-<ms>`.
+    private var hostCut: AdPlan.Cut?
+    /// Bumped by every ad start and end: a card that answers late for an ad already gone is dropped.
+    private var spotToken = 0
+    /// The wall clock. Replaced in tests, which run on the fixtures' frozen time.
+    let now: () -> Date
     private let locale: String
     private let events: Events?
     private let engine: ILLinearAdEngine?
@@ -84,11 +99,15 @@ public final class ILAdPlanPlayer {
 
     init?(overlay: ILOverlayPlayerView, player: AVPlayer, planJSON: Data, planOrigin: String?, sessionID: String,
           locale: String, engine: ILLinearAdEngine?, displaySlot: ILDisplayAdSlot?,
-          sessionConfiguration: URLSessionConfiguration, events: Events?) {
-        guard let plan = AdPlan.read(planJSON, now: Date(), origin: planOrigin, sessionID: sessionID) else { return nil }
+          sessionConfiguration: URLSessionConfiguration, events: Events?, now: @escaping () -> Date = Date.init) {
+        guard let plan = AdPlan.read(planJSON, now: now(), origin: planOrigin, sessionID: sessionID) else { return nil }
         self.overlay = overlay
         self.player = player
         self.plan = plan
+        self.planJSON = planJSON
+        self.planOrigin = planOrigin
+        self.sessionID = sessionID
+        self.now = now
         schedule = AdPlan.Schedule(plan: plan)
         self.locale = locale
         self.events = events
@@ -111,9 +130,235 @@ public final class ILAdPlanPlayer {
         if let preroll = schedule.join(positionMs: positionMs) { await runBreak(preroll) }
     }
 
+    /// What `load` reports through `events` when it gets no plan: `plan_no_content` (204, ask again on the next
+    /// view), `plan_not_found` (404: unknown project, video or app — check that the `app` value, given as the
+    /// event's id, is registered in the Console) and `plan_error` (network, timeout or an unusable plan).
+    public static let planTimeoutSeconds: TimeInterval = 5
+
+    /// Requests the plan of `asset` from IL (`GET <origin>/il-player/app-plan?project=…&asset=…&app=apple:<bundle id>`)
+    /// and attaches it. Nil means play without ads: no plan right now, an unknown project/video/app, a network failure,
+    /// or more than `planTimeoutSeconds` without an answer. Then call `start()` as with the other initialiser.
+    public static func load(overlay: ILOverlayPlayerView, player: AVPlayer, origin: String, project: String, asset: String,
+                            sessionID: String = "", locale: String = "en", linearEngine: ILLinearAdEngine? = nil,
+                            displaySlot: ILDisplayAdSlot? = nil, events: Events? = nil) async -> ILAdPlanPlayer? {
+        await load(overlay: overlay, player: player, origin: origin, project: project, asset: asset, sessionID: sessionID,
+                   locale: locale, engine: linearEngine, displaySlot: displaySlot, appID: Bundle.main.bundleIdentifier ?? "",
+                   sessionConfiguration: .ephemeral, events: events)
+    }
+
+    static func load(overlay: ILOverlayPlayerView, player: AVPlayer, origin: String, project: String, asset: String,
+                     sessionID: String, locale: String, engine: ILLinearAdEngine?, displaySlot: ILDisplayAdSlot?, appID: String,
+                     sessionConfiguration: URLSessionConfiguration, events: Events?,
+                     now: @escaping () -> Date = Date.init) async -> ILAdPlanPlayer? {
+        let app = "apple:" + appID
+        guard let url = planURL(origin: origin, project: project, asset: asset, app: app) else {
+            events?("plan_error", nil, app)
+            return nil
+        }
+        guard let (status, data) = await fetchPlan(url, configuration: sessionConfiguration) else {
+            events?("plan_error", nil, app)
+            return nil
+        }
+        switch status {
+        case 200: break
+        // No plan right now: play without ads and ask again on the next view, never in a loop.
+        case 204: events?("plan_no_content", nil, app); return nil
+        // Unknown project, video or app give the same 404: the `app` value sent is what to check first.
+        case 404: events?("plan_not_found", nil, app); return nil
+        default: events?("plan_error", nil, app); return nil
+        }
+        guard let reader = ILAdPlanPlayer(overlay: overlay, player: player, planJSON: data, planOrigin: AdPlan.origin(url.absoluteString),
+                                          sessionID: sessionID, locale: locale, engine: engine, displaySlot: displaySlot,
+                                          sessionConfiguration: sessionConfiguration, events: events, now: now) else {
+            events?("plan_error", nil, app)
+            return nil
+        }
+        reader.loadURL = url
+        reader.scheduleRenewal()
+        return reader
+    }
+
+    /// The app-plan URL, HTTPS only, as every plan and product URL of this SDK.
+    static func planURL(origin: String, project: String, asset: String, app: String) -> URL? {
+        guard var parts = URLComponents(string: origin), parts.scheme?.lowercased() == "https", parts.host?.isEmpty == false,
+              parts.user == nil, parts.password == nil else { return nil }
+        parts.path = "/il-player/app-plan"
+        parts.fragment = nil
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~:")
+        let encode = { (value: String) in value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "" }
+        parts.percentEncodedQuery = "project=" + encode(project) + "&asset=" + encode(asset) + "&app=" + encode(app)
+        return parts.url
+    }
+
+    private static func fetchPlan(_ url: URL, configuration: URLSessionConfiguration) async -> (Int, Data)? {
+        configuration.timeoutIntervalForRequest = planTimeoutSeconds
+        // The whole transfer: a slow plan never holds the content longer than this.
+        configuration.timeoutIntervalForResource = planTimeoutSeconds
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        guard let (data, response) = try? await session.data(for: request), let http = response as? HTTPURLResponse else { return nil }
+        return (http.statusCode, data)
+    }
+
+    /// A version 2 plan from `load` is asked again about 20 s before it expires, with `renew` so IL keeps the
+    /// same commerce session. A renewal that fails lets the plan expire: playback goes on without ads.
+    private func scheduleRenewal() {
+        renewal?.cancel()
+        guard plan.native, let base = loadURL else { return }
+        let wait = plan.expiresAt.timeIntervalSince(now()) - 20
+        let target = plan.renewGrant.map { URL(string: AdPlan.setQuery(base.absoluteString, "renew", $0)) ?? base } ?? base
+        renewal = Task { [weak self] in
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            guard !Task.isCancelled, let self, !self.closed else { return }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = self.session.configuration.protocolClasses
+            guard let (status, data) = await Self.fetchPlan(target, configuration: configuration), !self.closed else { return }
+            if status == 200, self.replacePlan(data) { return }
+            self.emit("plan_renew_failed", nil, String(status))
+        }
+    }
+
+    /// Swaps in a fresh plan for the same video — a renewed version 2 plan, or any plan the host obtained again —
+    /// and keeps this view's state: breaks played, windows attempted and shown, products asked, pacing and the session.
+    /// False when the plan is unusable; the current one then stays (and still expires on its own).
+    @discardableResult
+    public func replacePlan(_ json: Data) -> Bool {
+        guard !closed, let next = AdPlan.read(json, now: now(), origin: planOrigin, sessionID: sessionID, breaks: hostBreaks) else { return false }
+        planJSON = json
+        adopt(next)
+        if loadURL != nil { scheduleRenewal() }
+        return true
+    }
+
+    private func adopt(_ next: AdPlan) {
+        var kept = AdPlan.Schedule(plan: next)
+        kept.settled = schedule.settled
+        kept.attempted = schedule.attempted
+        kept.products = schedule.products
+        kept.shown = schedule.shown
+        kept.pending = schedule.pending
+        kept.overlayAvailable = schedule.overlayAvailable
+        plan = next
+        schedule = kept
+        expired = false
+    }
+
+    /// The version 2 approval is over: what it drew goes, pending answers are dropped, nothing new starts.
+    private func checkExpiry() -> Bool {
+        if expired { return true }
+        guard plan.native, now() >= plan.expiresAt else { return false }
+        expired = true
+        engine?.cancel()
+        display?.clear()
+        displayLive = nil
+        planCues = []
+        overlay.setPlanCues([])
+        emit("plan_expired", nil, "")
+        return true
+    }
+
+    // MARK: Host-driven breaks
+
+    /// The positions (content seconds) of the breaks the app itself plays, so graphics keep the plan's clearance.
+    public func setBreaks(_ positions: [TimeInterval]) {
+        guard !closed else { return }
+        hostBreaks = positions.filter { $0.isFinite && $0 >= 0 }.map { Int64(($0 * 1000).rounded()) }
+        if let next = AdPlan.read(planJSON, now: now(), origin: planOrigin, sessionID: sessionID, breaks: hostBreaks) {
+            adopt(next)
+        }
+    }
+
+    /// The app started one of its own breaks at `position` (content seconds; 0 for a pre-roll). Until `breakEnded()`
+    /// nothing of IL's is drawn except Buy for a reported ad, and answers still pending are dropped.
+    public func breakStarted(at position: TimeInterval) {
+        guard !closed, !inBreak else { return }
+        let ms = position.isFinite && position > 0 ? Int64((position * 1000).rounded(.down)) : 0
+        let cut = AdPlan.Cut(id: "at-\(ms)", atMs: ms, requests: [])
+        hostCut = cut
+        beginBreak(cut.id)
+    }
+
+    /// An ad of the app's break started, identified by the tag it requested and the VAST `Ad@id` and `Creative@id`
+    /// (with IMA: `IMAAd.adId` and `IMAAd.creativeID`). An `il-shop-` ad gets its Buy card.
+    public func adStarted(tagURL: String?, adID: String?, creativeID: String?) {
+        guard !closed, inBreak, let cut = hostCut else { return }
+        spotStarted(cut: cut, tagURL: tagURL, adID: adID, creativeID: creativeID)
+    }
+
+    /// The same, from the raw VAST XML of the ad that started.
+    public func adStarted(tagURL: String?, vastXML: String) {
+        let identity = AdPlan.adIdentity(vastXML)
+        adStarted(tagURL: tagURL, adID: identity.adID, creativeID: identity.creativeID)
+    }
+
+    /// The ad reported by `adStarted` completed, was skipped or failed: its card goes.
+    public func adEnded() {
+        guard !closed, inBreak, hostCut != nil else { return }
+        spotEnded()
+    }
+
+    public func breakEnded() {
+        guard !closed, inBreak, let cut = hostCut else { return }
+        hostCut = nil
+        finishBreak(cut.id, complete: true)
+    }
+
+    private func beginBreak(_ id: String) {
+        inBreak = true
+        firedQuartiles.removeAll()
+        if displayLive != nil { display?.setVisible(false) }
+        overlay.setLinearAdBreak(true)
+        emit("break_start", nil, id)
+    }
+
+    private func finishBreak(_ id: String, complete: Bool) {
+        spotEnded()
+        currentAd = nil
+        inBreak = false
+        overlay.setLinearAdBreak(false)
+        emit(complete ? "break_end" : "break_error", nil, id)
+    }
+
+    /// One ad of a break started, from the reader's own break or the app's: with `commerce.break_url` and an
+    /// `il-shop-` ad of this break's position, its card is asked and Buy drawn while it plays (web/ads.mjs shopAdStarted).
+    private func spotStarted(cut: AdPlan.Cut, tagURL: String?, adID: String?, creativeID: String?) {
+        spotEnded()
+        let tag = tagURL.map { AdPlan.query($0, "tag") } ?? ""
+        guard overlay.commerceEnabled, let delivery = AdPlan.shopDelivery(adID: adID, position: cut.position), !tag.isEmpty,
+              let creativeID, OverlayCue.validIdentifier(creativeID),
+              let target = plan.breakCardURL(cut: cut.id, tag: tag, creative: creativeID, delivery: delivery, locale: locale) else { return }
+        overlay.setLinearAdBreak(true, creativeID: creativeID, deliveryID: delivery)
+        let token = spotToken
+        emit("request", "break_product", cut.id)
+        Task {
+            guard let (status, data) = await body(target), !closed, token == spotToken, inBreak else { return }
+            guard status == 200, let card = AdPlan.breakCue(data, creative: creativeID, delivery: delivery) else {
+                emit("no_fill", "break_product", cut.id)
+                return
+            }
+            emit("fill", "break_product", cut.id)
+            planCues.append(card)
+            overlay.setPlanCues(planCues)
+        }
+    }
+
+    private func spotEnded() {
+        spotToken += 1
+        let kept = planCues.filter { $0.format != .midroll }
+        if kept.count != planCues.count {
+            planCues = kept
+            overlay.setPlanCues(kept)
+        }
+        if inBreak, overlay.midrollIdentity != nil { overlay.setLinearAdBreak(true) }
+    }
+
     public func stop() {
         guard !closed else { return }
         closed = true
+        renewal?.cancel()
         if let observer { player.removeTimeObserver(observer) }
         observer = nil
         session.invalidateAndCancel()
@@ -142,7 +387,8 @@ public final class ILAdPlanPlayer {
     private func emit(_ type: String, _ format: String?, _ id: String) { events?(type, format, id) }
 
     private func tick() {
-        guard !closed else { return }
+        // The periodic observer also fires when time jumps, so a seek checks the expiry too.
+        guard !closed, !checkExpiry() else { return }
         if inBreak { trackQuartiles(); return }
         guard player.timeControlStatus == .playing else {
             if displayLive != nil { display?.setVisible(false) }
@@ -152,7 +398,7 @@ public final class ILAdPlanPlayer {
     }
 
     func advance(nowMs now: Int64) {
-        guard !closed, !inBreak else { return }
+        guard !closed, !checkExpiry(), !inBreak else { return }
         if let due = schedule.dueCut(nowMs: now) {
             Task { await runBreak(due) }
             return
@@ -181,6 +427,8 @@ public final class ILAdPlanPlayer {
     }
 
     private func body(_ url: URL) async -> (Int, Data)? {
+        // A task queued before stop() must not use the invalidated session.
+        guard !closed else { return nil }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
@@ -216,6 +464,7 @@ public final class ILAdPlanPlayer {
             guard !closed else { return }
             schedule.pending.removeAll { $0 == window }
             graphicBusy = false
+            guard !checkExpiry() else { return }
             switch answer {
             case .noFill: emit("no_fill", graphic.format, window.id)
             case .ad(let ad) where !inBreak && positionMs < window.end:
@@ -257,7 +506,7 @@ public final class ILAdPlanPlayer {
         displayRequest += 1
         schedule.pending.removeAll { $0 == window }
         graphicBusy = false
-        if filled == true, !inBreak, positionMs < window.end {
+        if filled == true, !inBreak, !checkExpiry(), positionMs < window.end {
             schedule.shown.append(window)
             displayLive = window
             emit("fill", Self.overlayFormat, window.id)
@@ -284,6 +533,7 @@ public final class ILAdPlanPlayer {
             guard !closed else { return }
             schedule.pending.removeAll { $0 == window }
             productBusy = false
+            guard !checkExpiry() else { return }
             guard let card, !inBreak else {
                 schedule.products[window.id] = "empty"
                 emit(empty ? "no_fill" : "error", "scene_product", window.id)
@@ -338,21 +588,18 @@ public final class ILAdPlanPlayer {
 
     private func runBreak(_ cut: AdPlan.Cut) async {
         schedule.settled.insert(cut.id)
-        inBreak = true
-        firedQuartiles.removeAll()
-        if displayLive != nil { display?.setVisible(false) }
         let content = player.currentItem
         let resumeAt = player.currentTime()
         let resumeRate = player.rate
         breakContent = (content, resumeAt)
         player.pause()
-        overlay.setLinearAdBreak(true)
-        emit("break_start", nil, cut.id)
+        beginBreak(cut.id)
         let deadline = Date().addingTimeInterval(holdSeconds)
         var found: AdPlan.LinearAd?
         var complete = false
         var engineDone = false
-        for request in cut.requests where found == nil && !engineDone && !closed && Date() < deadline {
+        var foundRequest: AdPlan.Request?
+        for request in cut.requests where found == nil && !engineDone && !closed && !expired && Date() < deadline {
             emit("break_request", request.provider, cut.id)
             let tag = AdPlan.correlated(request.tagURL)
             var outcome = ILLinearAdOutcome.unavailable
@@ -371,7 +618,7 @@ public final class ILAdPlanPlayer {
                 outcome = await engine.playAd(tagURL: tag, adsResponse: fetched?.vast, deadline: deadline) { [weak self] in
                     started.value = true
                     guard let self, !self.closed else { return }
-                    self.overlay.setLinearAdBreak(true, creativeID: spot?.creativeID, deliveryID: spot?.deliveryID)
+                    self.adBegan(spot, request: request, cut: cut)
                 }
                 backstop.cancel()
                 guard !closed else { return }
@@ -382,6 +629,7 @@ public final class ILAdPlanPlayer {
             case .noFill: emit("break_no_fill", request.provider, cut.id)
             case .unavailable:
                 found = engine == nil || fetched != nil ? fetched?.ad : await linearAd(tag, deadline: deadline)?.ad
+                foundRequest = request
                 if found == nil, !closed { emit("break_no_fill", request.provider, cut.id) }
             }
         }
@@ -391,7 +639,7 @@ public final class ILAdPlanPlayer {
             if let playMedia {
                 complete = await playMedia(found, media)
             } else {
-                complete = await play(found, media: media, deadline: deadline)
+                complete = await play(found, media: media, deadline: deadline, request: foundRequest, cut: cut)
             }
             guard !closed else { return }
             // The ad leaves the player before graphics are allowed back.
@@ -399,15 +647,23 @@ public final class ILAdPlanPlayer {
             if resumeAt.seconds > 0 { _ = await player.seek(to: resumeAt, toleranceBefore: .zero, toleranceAfter: .zero) }
             guard !closed else { return }
         }
-        currentAd = nil
         breakContent = nil
-        inBreak = false
-        overlay.setLinearAdBreak(false)
-        emit(complete ? "break_end" : "break_error", nil, cut.id)
+        finishBreak(cut.id, complete: complete)
         if resumeRate > 0 { player.rate = resumeRate }
     }
 
-    private func play(_ ad: AdPlan.LinearAd, media: URL, deadline: Date) async -> Bool {
+    /// The reader's own ad started: Buy through `commerce.break_url` when the plan has it, otherwise the identity of
+    /// the VAST `iADServerShop` extension for a host that attached the session feed.
+    private func adBegan(_ spot: AdPlan.LinearAd?, request: AdPlan.Request?, cut: AdPlan.Cut) {
+        if plan.breakURL != nil {
+            spotStarted(cut: cut, tagURL: request?.provider == "iadserver" ? request?.tagURL : nil,
+                        adID: spot?.adID, creativeID: spot?.linearCreativeID)
+        } else {
+            overlay.setLinearAdBreak(true, creativeID: spot?.creativeID, deliveryID: spot?.deliveryID)
+        }
+    }
+
+    private func play(_ ad: AdPlan.LinearAd, media: URL, deadline: Date, request: AdPlan.Request?, cut: AdPlan.Cut) async -> Bool {
         let item = AVPlayerItem(url: media)
         currentAd = ad
         // An MP4 that shows no first frame by the hold deadline releases the break.
@@ -436,8 +692,7 @@ public final class ILAdPlanPlayer {
                         counted = true
                         self.beacon(ad.impressions)
                         self.beacon(ad.tracking["start"])
-                        self.overlay.setLinearAdBreak(true, creativeID: self.plan.breakShop ? ad.creativeID : nil,
-                                                      deliveryID: self.plan.breakShop ? ad.deliveryID : nil)
+                        self.adBegan(self.plan.breakShop ? ad : nil, request: request, cut: cut)
                     }
                     let now = Date()
                     let seconds = item.currentTime().seconds
