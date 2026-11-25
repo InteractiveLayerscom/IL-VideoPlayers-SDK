@@ -19,6 +19,9 @@ sub main()
     testRafShop()
     testNoBreakUrl()
     testNoPageForChannel()
+    testRafFallback()
+    testExactWindow()
+    testSessionWarning()
     if m.failures = 0 then print "ROKU_NATIVE_OK " + m.checks.toStr()
 end sub
 
@@ -357,4 +360,57 @@ sub testNoPageForChannel()
     gam = read.cuts[1].requests[0].tagUrl
     graphic = adPlanGraphicTag(read.graphics[0].tagUrl, "super", invalid, read.page)
     check(read.page = invalid and adPlanQuery(gam, "url") = "" and adPlanQuery(gam, "description_url") = "" and adPlanQuery(graphic, "url") = "", "an app plan sends no page parameters to GAM")
+end sub
+
+function hostAtBreak() as Object
+    s = hostStage(fixture("host-plan.json"))
+    s.player.callFunc("breakStarted", 58000)
+    return s
+end function
+
+sub testRafFallback()
+    tag = "https://ads.iadserver.com/gampad/ads?tag=T_mid"
+    impression = [{ event: "Impression", url: "https://ads.iadserver.com/events/" + m.delivery + "/impression" }]
+    a = hostAtBreak()
+    a.player.callFunc("adStarted", tag, { adId: "il-shop-midroll-" + m.delivery, creativeId: "cr1", tracking: [] })
+    check(a.player.event.format = "break_product" and adPlanQuery(a.player.event.url, "delivery") = m.delivery, "RAF's adId with il-shop- asks the card")
+    a.player.callFunc("stopPlan")
+    b = hostAtBreak()
+    b.player.callFunc("adStarted", tag, { creativeId: "cr1", tracking: impression })
+    check(b.player.event.format = "break_product" and adPlanQuery(b.player.event.url, "delivery") = m.delivery and adPlanQuery(b.player.event.url, "cut") = "at-58000", "without adId the iADServer impression names the delivery")
+    b.player.callFunc("receive", { sessionId: m.key, revision: 1, status: 200, body: fixtureText("break-product-card.json") })
+    check(b.overlay.findNode("ilCommerce").visible, "the fallback card is drawn")
+    b.player.callFunc("stopPlan")
+    c = hostAtBreak()
+    c.player.callFunc("adStarted", tag, { creativeId: "cr1", tracking: [{ event: "Impression", url: "https://ads.other.example/events/" + m.delivery + "/impression" }] })
+    check(c.player.event.type = "break_start", "another ad server's ad asks nothing")
+    c.player.callFunc("adStarted", tag, { creativeId: "cr1", tracking: [{ event: "Impression", url: "https://ads.iadserver.com/events/short/impression" }] })
+    check(c.player.event.type = "break_start", "a delivery that is not 43 characters asks nothing")
+    c.player.callFunc("stopPlan")
+    r = stage("178311e8ffa4791646c0d0f6c728aa73")
+    r.player.callFunc("attachPlan", r.overlay, r.video, "178311e8ffa4791646c0d0f6c728aa73", fixture("app-plan-v1.json"), m.origin, "es")
+    r.player.callFunc("startPlan")
+    r.player.callFunc("applySpot", { creativeId: "cr1", deliveryId: m.delivery, shop: { adId: "", creativeId: "cr1", tag: "T_pre", impressionDelivery: m.delivery } })
+    check(adPlanQuery(r.player.event.url, "cut") = "pre", "the reader's own break uses the fallback with its cut id")
+    r.player.callFunc("stopPlan")
+end sub
+
+sub testExactWindow()
+    plan = fixture("app-plan-v2.json")
+    plan.expires_at = "2026-11-02T16:02:00.000Z"
+    check(adPlanRead(plan, m.now, m.origin, "") <> invalid, "120.0 s ahead is accepted")
+    plan.expires_at = "2026-11-02T16:02:00.5Z"
+    check(adPlanRead(plan, m.now, m.origin, "") = invalid, "120.5 s ahead is refused")
+    plan.expires_at = "2026-11-02T13:02:00.001-03:00"
+    check(adPlanRead(plan, m.now, m.origin, "") = invalid, "120.001 s ahead with an offset is refused")
+end sub
+
+sub testSessionWarning()
+    s = stage("my-view")
+    s.player.callFunc("attachPlan", s.overlay, s.video, "my-view", fixture("host-plan.json"), m.origin, "es")
+    check(s.player.event.type = "buy_unavailable" and s.player.event.reason = "session", "a host plan attached with another session says Buy is unavailable")
+    s.player.callFunc("stopPlan")
+    ok = hostStage(fixture("host-plan.json"))
+    check(ok.player.event = invalid or ok.player.event.type <> "buy_unavailable", "with the plan's session there is no warning")
+    ok.player.callFunc("stopPlan")
 end sub

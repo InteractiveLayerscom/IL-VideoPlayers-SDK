@@ -14,7 +14,8 @@ function adPlanRead(plan as Dynamic, nowSeconds as LongInteger, origin as Dynami
     if plan.version = 2
         if type(plan.native_gam) <> "roAssociativeArray" then return invalid
         if not adPlanIsText(plan.native_gam.contract) then return invalid
-        if plan.native_gam.contract <> "native-gam-plan-v1" or expires - nowSeconds > 120 then return invalid
+        ' Exact to the millisecond, as the web: 120.5 s ahead is refused.
+        if plan.native_gam.contract <> "native-gam-plan-v1" or adPlanIsoMs(plan.expires_at) - nowSeconds * 1000# > 120000 then return invalid
     end if
     ' Stitched windows are content time and this player has no content clock under SSAI.
     if plan.timeline <> invalid then return invalid
@@ -144,11 +145,19 @@ end function
 ' What an ad's own player reports: RAF's ad (Ad@id, Creative@id) and the iADServer tag that produced it.
 function adPlanRafShop(ad as Dynamic, tagUrl as Dynamic) as Dynamic
     if type(ad) <> "roAssociativeArray" then return invalid
-    if not adPlanIsText(ad.adId) or not adPlanIsText(ad.creativeId) then return invalid
+    ' RAF's documented ad structure lists optional `adId`, `creativeId` and `creativeAdId` strings
+    ' (https://developer.roku.com/docs/developer-program/advertising/integrating-roku-advertising-framework.md,
+    ' "Ad Structure"). `adId` is read as VAST Ad@id; Roku does not say so in words, hence the fallback in the player.
+    if not adPlanIsText(ad.creativeId) then return invalid
     if ad.creativeId = "" then return invalid
+    adId = ""
+    if adPlanIsText(ad.adId) then adId = ad.adId
     tag = ""
     if adPlanCanonical("iadserver", tagUrl) <> invalid then tag = adPlanQuery(tagUrl, "tag")
-    return { adId: ad.adId, creativeId: ad.creativeId, tag: tag }
+    result = { adId: adId, creativeId: ad.creativeId, tag: tag }
+    spot = adPlanRafSpot(ad)
+    if spot <> invalid then result.impressionDelivery = spot.deliveryId
+    return result
 end function
 
 ' Seconds since the epoch for an ISO 8601 date with `Z` or a `+hh:mm` / `-hh:mm` offset, or invalid.
@@ -163,6 +172,14 @@ function adPlanIsoSeconds(text as String) as Dynamic
         if match[4] = "+" then seconds& = seconds& - offset& else seconds& = seconds& + offset&
     end if
     return seconds&
+end function
+
+' Milliseconds since the epoch, with the fractional seconds that adPlanIsoSeconds drops.
+function adPlanIsoMs(text as String) as Double
+    ms# = adPlanIsoSeconds(text) * 1000#
+    fraction = createObject("roRegex", "T\d\d:\d\d:\d\d\.(\d+)", "").match(text)
+    if fraction.count() > 1 then ms# = ms# + val(left(fraction[1] + "00", 3))
+    return ms#
 end function
 
 function adPlanRandomId() as String
@@ -745,7 +762,9 @@ sub adPlanTrack(top as Object, eventType = "" as Dynamic, ctx = invalid as Dynam
     spot = adPlanRafSpot(ctx.ad)
     if spot = invalid then spot = {}
     shop = adPlanRafShop(ctx.ad, top.adTag)
-    if shop <> invalid then spot.shop = shop
+    if shop <> invalid
+        if shop.adId <> "" or shop.impressionDelivery <> invalid then spot.shop = shop
+    end if
     top.spot = spot
 end sub
 

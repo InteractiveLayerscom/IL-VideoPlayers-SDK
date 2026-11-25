@@ -153,6 +153,10 @@ function adoptPlan(overlay as Object, video as Object, sessionId as String, host
     if read = invalid then return false
     m.plan = read
     m.hostSid = hostSid
+    ' Buy during a break needs the plan's session as the sid: say so once instead of failing silently.
+    if read.shop <> invalid and read.breakUrl = invalid and not read.breakShop and adPlanIsText(read.shop.break_url)
+        m.top.event = { type: "buy_unavailable", reason: "session" }
+    end if
     m.origin = origin
     m.consent = consent
     m.hostBreaks = invalid
@@ -535,11 +539,19 @@ end sub
 ' and a creative, as on the web. Anything else plays without a card and without a call.
 function breakShopIdentity(ad as Dynamic) as Dynamic
     if m.plan.breakUrl = invalid or type(ad) <> "roAssociativeArray" then return invalid
-    match = adPlanShopAd(ad.adId)
-    if match = invalid or m.cut = invalid then return invalid
-    if match.position <> m.cut.position or not adPlanIsText(ad.tag) or not adPlanIsText(ad.creativeId) then return invalid
+    if m.cut = invalid or not adPlanIsText(ad.tag) or not adPlanIsText(ad.creativeId) then return invalid
     if ad.tag = "" or ad.creativeId = "" then return invalid
-    return { creativeId: ad.creativeId, delivery: match.delivery, tag: ad.tag }
+    match = adPlanShopAd(ad.adId)
+    if match <> invalid
+        if match.position <> m.cut.position then return invalid
+        return { creativeId: ad.creativeId, delivery: match.delivery, tag: ad.tag }
+    end if
+    ' Without an `il-shop-` id on RAF's ad, the delivery of iADServer's own impression URL
+    ' (https://ads.iadserver.com/events/{delivery}/impression) is used, with the break's position. IL answers 204
+    ' to anything that is not a shop delivery of this session and tag; other ad servers never get here.
+    if not adPlanIsText(ad.impressionDelivery) then return invalid
+    if not createObject("roRegex", "^[A-Za-z0-9_-]{43}$", "").isMatch(ad.impressionDelivery) then return invalid
+    return { creativeId: ad.creativeId, delivery: ad.impressionDelivery, tag: ad.tag }
 end function
 
 sub askBreakCard(shop as Object)
