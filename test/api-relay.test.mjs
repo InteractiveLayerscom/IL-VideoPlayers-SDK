@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRelay } from '../examples/api-relay.mjs';
+import { request as httpsRequest } from 'node:https';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { createRelay, redact } from '../examples/api-relay.mjs';
 
 const FIXTURES = new URL('./fixtures/native/', import.meta.url).pathname;
+const file = (name) => JSON.parse(readFileSync(join(FIXTURES, name), 'utf8'));
 
 async function listen(options) {
   const lines = [];
@@ -25,11 +29,11 @@ async function listen(options) {
 test('fixtures mode answers the playback, both breaks and the app routes, and logs every request line', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'relay-static-'));
   await writeFile(join(dir, 'clip.mp4'), 'not really a video');
-  const r = await listen({ fixtures: FIXTURES, staticDir: dir, publicOrigin: 'https://relay.test' });
+  const r = await listen({ fixtures: FIXTURES, staticDir: dir, publicBase: 'https://relay.test' });
   try {
     const playback = await r.call('POST', '/playback', { asset_id: 'asset-40edc822d6f24974a9af51695a88184b' });
     assert.equal(playback.status, 200);
-    assert.equal(playback.body.playback_id, 'playback-46071ee5ad2d4b9f997a7407937c2ca7');
+    assert.equal(playback.body.playback_id, file('playback-created.json').playback_id);
     assert.deepEqual(playback.body.plan.cuts, []);
     assert.ok(playback.body.plan.commerce.url.startsWith('https://relay.test/il-player/scene-product?'));
     assert.equal(playback.headers.get('access-control-allow-origin'), '*');
@@ -48,7 +52,7 @@ test('fixtures mode answers the playback, both breaks and the app routes, and lo
     assert.equal(v1.body.version, 1);
     assert.equal((await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&v=2')).body.version, 2);
     const renewed = await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&renew=g');
-    assert.equal(renewed.body.commerce.session, '178311e8ffa4791646c0d0f6c728aa73');
+    assert.equal(renewed.body.commerce.session, file('app-plan-renewed.json').commerce.session);
     assert.equal((await r.call('GET', '/il-player/scene-product?x=1&window=p1&locale=es')).body.id, 'dlv_fixture_0001');
     assert.equal((await r.call('GET', '/il-player/break-product?x=1&cut=at-58000')).body.format, 'midroll');
     const clip = await r.call('GET', '/clip.mp4');
@@ -57,7 +61,7 @@ test('fixtures mode answers the playback, both breaks and the app routes, and lo
     assert.equal((await r.call('GET', '/../package.json')).status, 404);
 
     assert.ok(r.lines.some((line) => line.endsWith('POST /break')));
-    assert.ok(r.lines.some((line) => line.endsWith('GET /il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&renew=g')));
+    assert.ok(r.lines.some((line) => line.endsWith('GET /il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&renew=REDACTED')));
   } finally {
     await r.close();
   }
@@ -68,7 +72,7 @@ test('--v2 serves the version 2 plan by default', async () => {
   try {
     const plan = await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo');
     assert.equal(plan.body.version, 2);
-    // Without --public-origin the fixture origin becomes the relay's own.
+    // Without --public-base the product URLs move to the relay's own origin.
     assert.ok(plan.body.commerce.url.startsWith(`${r.base}/il-player/scene-product?`));
   } finally {
     await r.close();
@@ -146,4 +150,67 @@ test('an upstream error comes back with its status, an unreachable backend as 50
 
 test('the relay refuses to start without a backend or fixtures', () => {
   assert.throws(() => createRelay({}), /IL_API_BASE/);
+});
+
+test('fixtures mode serves live expiries and product URLs on the relay; the files stay unchanged', async () => {
+  const r = await listen({ fixtures: FIXTURES, publicBase: 'https://relay.test:8443' });
+  try {
+    const before = readFileSync(new URL('./fixtures/native/app-plan-v2.json', import.meta.url), 'utf8');
+    const now = Date.now();
+    const ahead = (plan) => Date.parse(plan.expires_at) - now;
+    const v1 = (await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo')).body;
+    const v2 = (await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&v=2')).body;
+    const renewedV2 = (await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&v=2&renew=g')).body;
+    const host = (await r.call('POST', '/playback', { asset_id: 'a' })).body.plan;
+    for (const plan of [v1, host]) assert.ok(ahead(plan) > 14 * 60000 && ahead(plan) <= 15 * 60000 + 1000);
+    for (const plan of [v2, renewedV2]) assert.ok(ahead(plan) > 110000 && ahead(plan) <= 121000);
+    assert.equal(renewedV2.version, 2);
+    for (const plan of [v1, v2, host]) {
+      assert.ok(plan.commerce.url.startsWith('https://relay.test:8443/il-player/scene-product?project='));
+      assert.ok(plan.commerce.break_url.startsWith('https://relay.test:8443/il-player/break-product?project='));
+    }
+    // Everything else in the body is the fixture's.
+    const file = JSON.parse(before);
+    assert.deepEqual({ ...v2, expires_at: 0, commerce: { ...v2.commerce, url: 0, break_url: 0 } },
+      { ...file, expires_at: 0, commerce: { ...file.commerce, url: 0, break_url: 0 } });
+    assert.equal(readFileSync(new URL('./fixtures/native/app-plan-v2.json', import.meta.url), 'utf8'), before);
+  } finally {
+    await r.close();
+  }
+});
+
+test('the request log never carries grant or renew values', async () => {
+  assert.equal(redact('/il-player/break-product?project=p&grant=1.2.3&cut=at-0'), '/il-player/break-product?project=p&grant=REDACTED&cut=at-0');
+  const r = await listen({ fixtures: FIXTURES });
+  try {
+    await r.call('GET', '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo&renew=secret-grant-value');
+    await r.call('GET', '/il-player/scene-product?project=p&grant=another-secret&window=p1');
+    const log = r.lines.join('\n');
+    assert.ok(!log.includes('secret-grant-value') && !log.includes('another-secret'));
+    assert.ok(log.includes('renew=REDACTED') && log.includes('grant=REDACTED'));
+  } finally {
+    await r.close();
+  }
+});
+
+test('--cert/--key serve HTTPS and the default public base is https://<Host>', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-tls-'));
+  // A throwaway self-signed certificate (needs openssl), trusted only by this request.
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'),
+    '-days', '1', '-subj', '/CN=localhost'], { stdio: 'ignore' });
+  const server = createRelay({ fixtures: FIXTURES, cert: readFileSync(join(dir, 'cert.pem')), key: readFileSync(join(dir, 'key.pem')), log: () => {} });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const body = await new Promise((resolve, reject) => {
+      httpsRequest({ host: '127.0.0.1', port: server.address().port, path: '/il-player/app-plan?project=p&asset=a&app=tizen:AbCdEfGhIj.Demo',
+        ca: readFileSync(join(dir, 'cert.pem')), servername: 'localhost', headers: { Host: 'localhost:9443' } }, (res) => {
+        let text = '';
+        res.on('data', (chunk) => { text += chunk; });
+        res.on('end', () => resolve(JSON.parse(text)));
+      }).on('error', reject).end();
+    });
+    assert.ok(body.commerce.url.startsWith('https://localhost:9443/il-player/scene-product?'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

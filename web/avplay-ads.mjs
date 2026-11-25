@@ -108,7 +108,7 @@ function breakShopAllowed(plan, planOrigin, sessionId) {
 // values ({ gdpr, gdpr_consent, us_privacy, gpp, gpp_sid }) the host's CMP holds, added to each break request.
 export function attachAvPlayAds({
   avplay, session, plan, contentUrl, listener, getDisplayRect, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, clock, planOrigin, sessionId, Parser = globalThis.DOMParser, tickMs = TICK_MS, reopenContent, consent,
+  stage, clock, planOrigin, sessionId, Parser = globalThis.DOMParser, tickMs = TICK_MS, reopenContent, consent, appParams,
   isVisible = () => globalThis.document?.visibilityState !== 'hidden',
 } = {}) {
   if (!avplay || !session || typeof getDisplayRect !== 'function') throw new Error('Provide avplay, the session and getDisplayRect');
@@ -161,7 +161,7 @@ export function attachAvPlayAds({
       }
     }
   };
-  const ads = attachAds({ session, video, plan, pageUrl, fetchImpl, onEvent, stage, clock, planOrigin, sessionId });
+  const ads = attachAds({ session, video, plan, pageUrl, fetchImpl, onEvent, stage, clock, planOrigin, sessionId, appParams });
   const settled = new Set();
   let disposed = false;
   let started = false;
@@ -404,37 +404,42 @@ export function tizenAppId(tizen = globalThis.tizen) {
 // timeout, a TV that refuses the cross-origin read) resolves null: play the content without ads. A version 2 plan is
 // renewed before it expires with renew=<grant>, keeping the view's state.
 export async function attachAvPlayAppAds({ origin, project, asset, app, timeoutMs, ...options } = {}) {
-  const appValue = app ?? (tizenAppId() ? `tizen:${tizenAppId()}` : null);
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  const params = { origin, project, asset, app: appValue, fetchImpl, onEvent: options.onEvent, timeoutMs };
-  let plan = null;
-  try {
-    plan = await loadAppPlan(params);
-  } catch {
-    // An app value the route cannot take (planUrl refuses it) is the same as no plan.
+  const say = (event) => {
     try {
-      options.onEvent?.({ type: 'plan_unavailable', app: appValue, status: null, reason: 'invalid_app' });
+      options.onEvent?.(event);
     } catch {
       // Diagnostics must never break playback.
     }
-  }
-  // A server-insertion project answers the stitched plan (`timeline`); this reader has no content clock for AVPlay
-  // and plays without IL ads, as IL's contract says native readers do for now.
-  if (plan?.timeline != null) {
-    try {
-      options.onEvent?.({ type: 'plan_unavailable', app: appValue, status: 200, reason: 'stitched' });
-    } catch {
-      // Diagnostics must never break playback.
-    }
+  };
+  const id = app === undefined ? tizenAppId() : null;
+  const appValue = app ?? (id ? `tizen:${id}` : null);
+  // Outside a Tizen app, without `app`, there is no id to send: refused here, never the page route.
+  if (typeof appValue !== 'string') {
+    say({ type: 'plan_unavailable', app: null, status: 0, reason: 'app_id' });
     return null;
   }
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const params = { origin, project, asset, app: appValue, fetchImpl, onEvent: options.onEvent, timeoutMs };
+  const plan = await loadAppPlan(params);
   if (!plan) return null;
-  const ads = attachAvPlayAds({ ...options, plan, planOrigin: new URL(origin).origin });
-  const stop = keepPlanRenewed(plan, (next) => ads.replacePlan(next), params);
-  const destroy = ads.destroy;
-  ads.destroy = () => {
-    stop();
+  // A server-insertion project answers the stitched plan (`timeline`); this reader has no content clock for AVPlay
+  // and plays without IL ads, as IL's contract says native readers do for now.
+  if (plan.timeline != null) {
+    say({ type: 'plan_unavailable', app: appValue, status: 200, reason: 'stitched' });
+    return null;
+  }
+  const sdk = attachAvPlayAds({ ...options, plan, planOrigin: new URL(origin).origin });
+  const replace = sdk.replacePlan;
+  const renewal = keepPlanRenewed(plan, (next) => replace(next), params);
+  sdk.replacePlan = (next) => {
+    const ok = replace(next);
+    if (ok) renewal.rearm(next);
+    return ok;
+  };
+  const destroy = sdk.destroy;
+  sdk.destroy = () => {
+    renewal();
     destroy();
   };
-  return ads;
+  return sdk;
 }

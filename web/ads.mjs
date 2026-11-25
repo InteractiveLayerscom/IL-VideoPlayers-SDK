@@ -205,7 +205,20 @@ export function pacingAllows(window, shown, pacing) {
     : other.start - window.start >= MIN_START_SPACING_MS && other.start >= window.end + gap);
 }
 
-export function graphicTag(tagUrl, format, targeting, pageUrl) {
+// Google's VAST parameters for an app's direct calls: `msid` (store id) and `an` (human-readable app name). Only
+// the values the host gives; nothing is guessed from the platform's application id.
+function appIdentity(params) {
+  const clean = (value) => (typeof value === 'string' && value.trim() && value.length <= 200 ? value.trim() : null);
+  const msid = clean(params?.msid);
+  const an = clean(params?.an);
+  return msid || an ? { msid, an } : null;
+}
+function withApp(url, app) {
+  if (app?.msid && !url.searchParams.has('msid')) url.searchParams.set('msid', app.msid);
+  if (app?.an && !url.searchParams.has('an')) url.searchParams.set('an', app.an);
+}
+
+export function graphicTag(tagUrl, format, targeting, pageUrl, app) {
   if (!graphicTagAllowed(tagUrl)) reject('invalid_graphic_tag');
   const url = new URL(tagUrl);
   const params = new URLSearchParams(url.searchParams.get('cust_params') || '');
@@ -218,6 +231,7 @@ export function graphicTag(tagUrl, format, targeting, pageUrl) {
     url.searchParams.set('url', pageUrl);
     url.searchParams.set('description_url', pageUrl);
   }
+  withApp(url, app);
   return url.href;
 }
 
@@ -227,25 +241,26 @@ function withParams(href, extra) {
   return base + (!base.includes('?') ? '?' : /[?&]$/.test(base) ? '' : '&') + extra + (fragment != null ? '#' + fragment : '');
 }
 
-function requestTag(provider, tagUrl, pageUrl, sid) {
+function requestTag(provider, tagUrl, pageUrl, sid, app) {
   const url = new URL(tagUrl);
   if (provider === 'gam' && pageUrl) {
     url.searchParams.set('url', pageUrl);
     url.searchParams.set('description_url', pageUrl);
   }
+  if (provider === 'gam') withApp(url, app);
   if (provider === 'iadserver' && sid) url.searchParams.set('sid', sid);
   return url.href;
 }
 
 // The plan's video breaks, in time order, for any ad player. Each keeps its allowed requests in
 // plan order; a plan without `requests` has one GAM request per cut, from `tag_url`.
-export function planCuts(cuts, pageUrl, sid) {
+export function planCuts(cuts, pageUrl, sid, app) {
   return (Array.isArray(cuts) ? cuts : [])
     .filter((cut) => typeof cut?.id === 'string' && isNumber(cut.at) && cut.at >= 0)
     .map((cut) => {
       const source = Array.isArray(cut.requests) ? cut.requests : [{ provider: 'gam', tag_url: cut.tag_url }];
       const requests = source.filter((entry) => cutRequestAllowed(entry?.provider, entry?.tag_url)).slice(0, MAX_REQUESTS)
-        .map((entry) => Object.freeze({ provider: entry.provider, tagUrl: requestTag(entry.provider, entry.tag_url, pageUrl, sid) }));
+        .map((entry) => Object.freeze({ provider: entry.provider, tagUrl: requestTag(entry.provider, entry.tag_url, pageUrl, sid, app) }));
       return requests.length
         ? { id: cut.id, at: cut.at, position: cut.position, tagUrl: requests[0].tagUrl, requests: Object.freeze(requests) }
         : null;
@@ -371,16 +386,19 @@ export function planUrl({ origin, project, asset, app, renew } = {}) {
   return `${parsed.origin}/il-player/app-plan?${query}&app=${encodeURIComponent(app)}${renewal}`;
 }
 
-// `onEvent` hears `plan_unavailable` when no plan comes back: `status` 204 (none right now; ask again on the next
-// view, never in a loop), 404 (unknown project, video or app: check `app` first, the answer is identical), or
-// `reason` 'timeout' / 'network'. `timeoutMs` bounds the request; content never waits for a plan longer than that.
+// `onEvent` hears `plan_unavailable` { app, status, reason } when an app-route load (or any load given a timeout)
+// ends without a plan: `app` is the exact value sent, `status` the HTTP status (0 without a response), `reason`
+// 'http_<status>' (204: none right now, ask again on the next view, never in a loop; 404: unknown project, video or app,
+// all with the same answer, so check `app` first), 'timeout', 'network' or 'invalid_plan'. `timeoutMs` bounds the
+// request; content never waits for a plan longer than that. No event carries the plan URL or its grants.
 export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal, onEvent, timeoutMs } = {}) {
   let app = null;
   let timer;
   const abort = new AbortController();
-  const unavailable = (extra) => {
+  const unavailable = (status, reason) => {
+    if (app === null && timer === undefined) return;
     try {
-      onEvent?.({ type: 'plan_unavailable', app, ...extra });
+      onEvent?.({ type: 'plan_unavailable', app, status, reason });
     } catch {
       // Diagnostics must never break playback.
     }
@@ -398,16 +416,30 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal, onEv
       if (signal?.aborted) abort.abort();
       timer = setTimeout(() => abort.abort(new Error('timeout')), timeoutMs);
     }
-    const response = await fetchImpl(target, { method: 'GET', credentials: 'omit', redirect: 'error',
-      signal: timer === undefined ? signal : abort.signal });
-    if (response.status !== 200) {
-      unavailable({ status: response.status });
+    let response;
+    try {
+      response = await fetchImpl(target, { method: 'GET', credentials: 'omit', redirect: 'error',
+        signal: timer === undefined ? signal : abort.signal });
+    } catch {
+      unavailable(0, abort.signal.aborted ? 'timeout' : 'network');
       return null;
     }
-    const plan = JSON.parse(await response.text());
+    if (response.status !== 200) {
+      unavailable(response.status, `http_${response.status}`);
+      return null;
+    }
+    let plan = null;
+    try {
+      plan = JSON.parse(await response.text());
+    } catch {
+      plan = null;
+    }
     // Version 2 (a short-lived native GAM approval) only under the rules attachAds applies.
     if (!plan || typeof plan !== 'object' || Array.isArray(plan) || ![1, 2].includes(plan.version) ||
-        (plan.version === 2 && !readPlan(plan, Date.now()))) return null;
+        (plan.version === 2 && !readPlan(plan, Date.now()))) {
+      unavailable(200, 'invalid_plan');
+      return null;
+    }
     // Remembering where it came from never costs the plan: without it the page-origin / planOrigin rule applies.
     try {
       planOrigins.set(plan, resolved.origin);
@@ -416,24 +448,45 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal, onEv
     }
     return plan;
   } catch {
-    if (app !== null || timer !== undefined) unavailable({ status: null, reason: abort.signal.aborted ? 'timeout' : 'network' });
     return null;
   } finally {
     clearTimeout(timer);
   }
 }
 
-// The app route in one call: loads the plan (bounded), attaches, and keeps a version 2 plan renewed about
-// RENEW_AHEAD_MS before it expires with `renew=<grant>`, so the same commerce session and the per-view state carry on.
-export function loadAppPlan({ origin, project, asset, app, renew, fetchImpl = globalThis.fetch, onEvent, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
-  return loadPlan(planUrl({ origin, project, asset, app, renew }), { fetchImpl, onEvent, timeoutMs });
+// The app route, bounded. An application id the route cannot take is refused here (reason 'app_id'), and an
+// origin, project or asset that cannot make a URL too (reason 'request'): both resolve null, never throw.
+export async function loadAppPlan({ origin, project, asset, app, renew, fetchImpl = globalThis.fetch, onEvent, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  let url;
+  try {
+    url = planUrl({ origin, project, asset, app, renew });
+  } catch (error) {
+    try {
+      onEvent?.({ type: 'plan_unavailable', app: typeof app === 'string' ? app : null, status: 0,
+        reason: /^app /.test(error?.message ?? '') ? 'app_id' : 'request' });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+    return null;
+  }
+  return loadPlan(url, { fetchImpl, onEvent, timeoutMs });
 }
 
-// Re-requests a version 2 plan before it expires and hands it to `replace`. Returns the function that stops it.
+// Re-requests a version 2 plan RENEW_AHEAD_MS before it expires, with `renew=<grant of commerce.url>` (same commerce
+// session), and hands it to `replace`. A version 1 answer is adopted and ends the renewals. Returns stop(), which also
+// has rearm(plan) for a plan the host swapped in itself (a version 2 one starts renewals again).
 export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fetchImpl = globalThis.fetch, onEvent, timeoutMs } = {}) {
   let timer = null;
   let stopped = false;
+  const say = (event) => {
+    try {
+      onEvent?.(event);
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  };
   const arm = (current) => {
+    clearTimeout(timer);
     if (stopped || current?.version !== 2) return;
     timer = setTimeout(async () => {
       let grant = null;
@@ -444,33 +497,42 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
       }
       const next = await loadAppPlan({ origin, project, asset, app, renew: grant ?? undefined, fetchImpl, onEvent, timeoutMs });
       if (stopped) return;
-      if (next && replace(next)) return arm(next);
-      try {
-        onEvent?.({ type: 'plan_renew_failed' });
-      } catch {
-        // Diagnostics must never break playback.
+      if (next && replace(next)) {
+        say({ type: 'plan_renewed', version: next.version });
+        return arm(next);
       }
+      say({ type: 'plan_renew_failed' });
     }, Math.max(0, Date.parse(current.expires_at) - RENEW_AHEAD_MS - Date.now()));
     timer.unref?.();
   };
   arm(plan);
-  return () => {
+  const stop = () => {
     stopped = true;
     clearTimeout(timer);
   };
+  stop.rearm = arm;
+  return stop;
 }
 
+// `appParams` ({ msid, an }): the app's store id and human-readable name, added to Google Ad Manager VAST requests
+// (graphics and GAM breaks) when the tag does not carry them. Only what the host passes; nothing is derived.
 export async function attachAppAds({ origin, project, asset, app, timeoutMs, ...options } = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const params = { origin, project, asset, app, fetchImpl, onEvent: options.onEvent, timeoutMs };
   const plan = await loadAppPlan(params);
   if (!plan) return inert;
   const ads = attachAds({ ...options, plan });
-  if (ads === inert || plan.version !== 2) return ads;
-  const stop = keepPlanRenewed(plan, (next) => ads.replacePlan(next), params);
+  if (ads === inert) return ads;
+  const renewal = keepPlanRenewed(plan, (next) => replace(next), params);
+  const replace = ads.replacePlan;
+  ads.replacePlan = (next) => {
+    const ok = replace(next);
+    if (ok) renewal.rearm(next);
+    return ok;
+  };
   const destroy = ads.destroy;
   ads.destroy = () => {
-    stop();
+    renewal();
     destroy();
   };
   return ads;
@@ -478,11 +540,11 @@ export async function attachAppAds({ origin, project, asset, app, timeoutMs, ...
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock, planOrigin,
+  stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock, planOrigin, appParams,
 } = {}) {
   let valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
-  const native = valid.version === 2;
+  let native = valid.version === 2;
   let view = nativeViews.get(session);
   if (view && (view.asset !== valid.asset_id || view.version !== valid.asset_version)) view = null;
   if (native && !view) {
@@ -522,7 +584,10 @@ export function attachAds({
   // otherwise the plan's commerce.session is the sid, so breaks and products share one session.
   const sid = typeof sessionId === 'string' && sessionId ? sessionId
     : typeof shop?.session === 'string' && SID.test(shop.session) ? shop.session : randomId();
-  const cutsOf = (checked) => Object.freeze(stitched ? [] : planCuts(checked.cuts, page, sid).map(Object.freeze));
+  // App route only (attachAppAds / attachAvPlayAppAds): the app's identity on GAM requests, as Google asks of
+  // direct VAST calls from connected TV, only when the host supplied it. The page route never gets it.
+  const app = appIdentity(appParams);
+  const cutsOf = (checked) => Object.freeze(stitched ? [] : planCuts(checked.cuts, page, sid, app).map(Object.freeze));
   let cuts = cutsOf(valid);
   // The Buy button during an ad: IL's grant names the view's session, and iADServer ties the delivery to that session,
   // so a host with its own view id gets the ad without the card.
@@ -539,14 +604,19 @@ export function attachAds({
   let breakUrl = breakUrlOf();
   // kept: the card of an ad that ended while its product was open; deferred: the end of the break, run once it closes.
   const breakShop = { token: 0, id: null, abort: null, spot: false, kept: null, deferred: null, poll: null };
-  const scenes = valid.scenes;
-  const unit = scenes?.overlay?.ad_unit;
-  const overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
-    !!stage?.ownerDocument;
-  const graphics = scenes ? servableFormats(scenes) : [];
-  // The overlay takes its place in plan order among the scene graphics.
-  const formats = !overlayServable ? graphics : [...new Set(scenes.formats)]
-    .flatMap((format) => format === OVERLAY ? [{ format }] : graphics.filter((graphic) => graphic.format === format));
+  // Everything below is derived from the plan and rebuilt when replacePlan swaps it; per-view state is not.
+  let scenes, unit, overlayServable, graphics, formats;
+  const deriveScenes = () => {
+    scenes = valid.scenes;
+    unit = scenes?.overlay?.ad_unit;
+    overlayServable = !!scenes && scenes.formats.includes(OVERLAY) && typeof unit === 'string' && OVERLAY_UNIT.test(unit) &&
+      !!stage?.ownerDocument;
+    graphics = scenes ? servableFormats(scenes) : [];
+    // The overlay takes its place in plan order among the scene graphics.
+    formats = !overlayServable ? graphics : [...new Set(scenes.formats)]
+      .flatMap((format) => format === OVERLAY ? [{ format }] : graphics.filter((graphic) => graphic.format === format));
+  };
+  deriveScenes();
   // The stage is measured when a window is due, so a stage laid out after attach still counts.
   const servableNow = () => overlayServable && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1]
     ? formats : graphics;
@@ -560,20 +630,32 @@ export function attachAds({
   // A stitched ad on screen (content time unknown) counts as a break.
   const breakOn = () => inBreak || hostBreak || now() == null;
   const overlay = { node: null, gpt: null, ready: null, slot: null, pending: null, live: null, viewed: false };
-  let windows = scenes ? usableWindows(valid) : [];
+  // Break positions the host reported (setBreaks, breakStarted). A host plan's windows are only clear of the breaks IL
+  // itself would place, so the clearance around the host's own breaks comes from these; null: the plan's cuts.
+  let hostPositions = null;
+  const breakPlan = () => hostPositions ? { ...valid, timeline: undefined, cuts: [...hostPositions].map((at) => ({ at })) } : valid;
+  let windows, shopOn, shopWindows, shopIds;
   // The scene product needs a session that renders commerce (attachHtmlVideo({ commerce })); without it nothing
   // about it is requested.
-  const shopOn = !!shop && !!session.commerce;
-  const shopWindows = shopOn ? usableWindows(valid, shop) : [];
-  const shopIds = new Set(shopOn ? shop.windows.map((window) => window?.id) : []);
+  const deriveWindows = () => {
+    windows = scenes ? usableWindows(breakPlan(), scenes) : [];
+    shopOn = !!shop && !!session.commerce;
+    shopWindows = shopOn ? usableWindows(breakPlan(), shop) : [];
+    shopIds = new Set(shopOn ? shop.windows.map((window) => window?.id) : []);
+  };
+  deriveWindows();
   // Per window: 'pending', 'filled' or 'empty' (204, 429, error or timeout: free for a graphic).
   const products = new Map();
   let productController = null;
   const pendingWindows = new Set();
   // Pacing counts graphics and products shown, and the ones being asked for.
   const committed = () => [...shown, ...pendingWindows];
-  const pacing = scenes?.pacing;
-  const minMs = scenes ? ms(pacing.min_seconds) : 0;
+  let pacing, minMs;
+  const derivePacing = () => {
+    pacing = scenes?.pacing;
+    minMs = scenes ? ms(pacing.min_seconds) : 0;
+  };
+  derivePacing();
   const attempted = view?.attempted ?? new Set();
   const shown = view?.shown ?? [];
   const cues = new Map();
@@ -798,7 +880,7 @@ export function attachAds({
     controller = abort;
     const timeout = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const url = graphicTag(tagUrl, format, window.targeting, page);
+      const url = graphicTag(tagUrl, format, window.targeting, page, app);
       emit('request', format, window);
       const res = await fetchImpl(url, { signal: abort.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' });
       if (!res.ok) reject('graphic_vast_http_error');
@@ -1598,6 +1680,25 @@ export function attachAds({
   }
   if (useIma) video.addEventListener('volumechange', syncAdVolume);
   if (useIma) void setUpIma();
+  let hostGuard = null;
+  const refuse = () => {
+    try {
+      onEvent?.({ type: 'break_refused', reason: 'position' });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  };
+  // Buy during a break needs the plan's commerce.session as the sid: a host with its own view id is told once.
+  let buyNoted = false;
+  function sayBuyUnavailable() {
+    if (buyNoted || !shop || typeof shop.break_url !== 'string' || sid === shop.session) return;
+    buyNoted = true;
+    try {
+      onEvent?.({ type: 'buy_unavailable', reason: 'session' });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  }
   function expired() {
     if (!native || Date.now() < Date.parse(valid.expires_at)) return false;
     if (!disposed) {
@@ -1615,8 +1716,9 @@ export function attachAds({
     // Native revisions are requested just in time. A VMAP would retain future tags past expiry.
     vmap: () => buildVmap(native ? [] : cuts),
     setBreaks(seconds) {
-      if (disposed || !scenes || !Array.isArray(seconds)) return;
-      windows = usableWindows({ scenes, cuts: seconds.filter(isNumber).map((at) => ({ at })) });
+      if (disposed || !Array.isArray(seconds)) return;
+      hostPositions = new Set(seconds.filter((at) => isNumber(at) && at >= 0));
+      deriveWindows();
       sync();
     },
     setBreakActive(active) {
@@ -1629,37 +1731,68 @@ export function attachAds({
     },
     // A renewed version 2 plan of the same video and version replaces this one in place: what was shown, attempted
     // and settled, pacing, the commerce session and anything on screen stay; only expiry, grants and tags change.
+    // A renewed plan of the same video and version replaces this one in place. Everything derived from the plan
+    // (cuts, scene windows and formats, commerce URLs, expiry) is rebuilt; per-view state stays: what was shown,
+    // attempted and settled, pacing, product answers, the commerce session and anything on screen. A version 1 answer
+    // to a version 2 plan is adopted (no expiry timer any more); a version 2 answer to a version 1 plan starts one.
+    // How video breaks are played (IMA ad rules or the module's own walk) stays what attach chose.
     replacePlan(next) {
-      if (disposed || !native) return false;
+      if (disposed) return false;
       const fresh = readPlan(next, Date.now());
-      if (fresh?.version !== 2 || fresh.asset_id !== valid.asset_id || fresh.asset_version !== valid.asset_version ||
+      if (!fresh || fresh.asset_id !== valid.asset_id || fresh.asset_version !== valid.asset_version ||
           (fresh.timeline?.kind === 'stitched') !== stitched) return false;
       const nextShop = shopOf(next, fresh);
       // A product path already running cannot lose its URLs mid-view.
       if (shopOn && !nextShop) return false;
       valid = fresh;
+      native = fresh.version === 2;
+      if (native && !nativeViews.has(session)) {
+        nativeViews.set(session, { asset: valid.asset_id, version: valid.asset_version, shown, attempted, settled: settledCuts });
+      }
       shop = nextShop;
       breakUrl = breakUrlOf();
       cuts = cutsOf(fresh);
+      deriveScenes();
+      deriveWindows();
+      derivePacing();
       clearTimeout(expiryTimer);
-      expiryTimer = setTimeout(expired, Math.max(0, Date.parse(valid.expires_at) - Date.now()));
-      expiryTimer.unref?.();
+      if (native) {
+        expiryTimer = setTimeout(expired, Math.max(0, Date.parse(valid.expires_at) - Date.now()));
+        expiryTimer.unref?.();
+      }
+      sayBuyUnavailable();
       sync();
       return true;
     },
     // Host-driven breaks: the app's own ad player plays a break at content second `at` (0 for a pre-roll). Until
-    // breakEnded() nothing of IL's is drawn over it but the Buy button of the ad reported with setBreakAd().
-    // `cut` ({ id, position }) names a plan cut when an adapter of this package plays one of the plan's breaks.
+    // breakEnded() nothing of IL's is drawn over it but the Buy button of the ad reported with setBreakAd(). The
+    // position also joins the clearance positions (cut_clearance_seconds). `cut` ({ id, position }) names a plan cut
+    // when an adapter of this package plays one of the plan's breaks itself.
     breakStarted(at, cut) {
-      if (disposed || expired() || !isNumber(at) || at < 0) return;
+      if (disposed || expired()) return;
+      if (!isNumber(at) || at < 0) return refuse();
       const id = typeof cut?.id === 'string' && cut.id ? cut.id : `at-${ms(at)}`;
       if (hostCut?.id === id) return;
       if (breakShop.deferred || breakShop.kept) releaseHeld(false);
       if (hostCut) clearBreakShop();
       else session.closeProduct?.();
-      hostCut = { id, at, position: cut?.position ?? (at === 0 ? 'preroll' : 'midroll') };
+      hostCut = { id, at, position: cut?.position ?? (ms(at) === 0 ? 'preroll' : 'midroll') };
       hostBreak = true;
       breakShop.spot = false;
+      if (!cut) {
+        if (!hostPositions?.has(at)) {
+          hostPositions = new Set([...(hostPositions ?? []), at]);
+          deriveWindows();
+        }
+        // Safety net: a break the host never ends stops blocking graphics after the module's own break limit.
+        clearTimeout(hostGuard);
+        hostGuard = setTimeout(() => {
+          if (disposed || hostCut?.id !== id) return;
+          emitBreak('break_error', hostCut);
+          api.breakEnded();
+        }, BREAK_WATCHDOG_MS);
+        hostGuard.unref?.();
+      }
       stage?.classList?.add('il-ad-playing');
       session.setLinearAd(true);
       updateOverlay(now());
@@ -1669,6 +1802,7 @@ export function attachAds({
     // (IMA: getAdId(), getCreativeId()) or the VAST XML itself. Buy is drawn when IL has the product of that delivery.
     setBreakAd({ at, tagUrl, adId, creativeId, vastXml } = {}) {
       if (disposed || expired()) return;
+      if (at !== undefined && !(isNumber(at) && at >= 0)) return refuse();
       if (isNumber(at) && hostCut?.at !== at) api.breakStarted(at);
       if (!hostCut) return;
       if (typeof vastXml === 'string') ({ adId, creativeId } = vastIdentity(vastXml));
@@ -1685,6 +1819,7 @@ export function attachAds({
     },
     breakEnded() {
       if (disposed || !hostCut) return;
+      clearTimeout(hostGuard);
       // A product the viewer has open stays (keepOpen) until closed; resuming the content is the host's.
       clearBreakShop();
       breakShop.spot = false;
@@ -1723,6 +1858,7 @@ export function attachAds({
       if (disposed) return;
       disposed = true;
       clearTimeout(expiryTimer);
+      clearTimeout(hostGuard);
       breakShop.deferred = null;
       releaseHeld(false);
       clearWalkTimers();
@@ -1782,6 +1918,7 @@ export function attachAds({
     expiryTimer = setTimeout(expired, Math.max(0, Date.parse(valid.expires_at) - Date.now()));
     expiryTimer.unref?.();
   }
+  sayBuyUnavailable();
   sync();
   return api;
 }

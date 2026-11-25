@@ -1,8 +1,8 @@
 {
-  "asset_id": "asset-40edc822d6f24974a9af51695a88184b",
+  "asset_id": "asset-a0a377d6c8214c1498674e53c97721d2",
   "asset_version": "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc",
   "commerce": {
-    "break_url": "http://localhost:8000/il-player/break-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.178311e8ffa4791646c0d0f6c728aa73.600687f5743c48db.4dcba3919b8dc03db03d06fdf95fb8f489b26a9ff2e86ae03cd9a1019f36777a",
+    "break_url": "http://localhost:8000/il-player/break-product?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2&grant=1793639100.31fd74b20d30ef0688bb8b51c2e156fc.8d8b2d2ca8a5362e.f488105b9067103825054b0208174b4efa5be87c51d1203a49aedcef1e48a094",
     "kind": "scene_product",
     "lead_ms": 5000,
     "pacing": {
@@ -12,7 +12,7 @@
       "max_seconds": null,
       "min_seconds": 1.5
     },
-    "url": "http://localhost:8000/il-player/scene-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.178311e8ffa4791646c0d0f6c728aa73.600687f5743c48db.4dcba3919b8dc03db03d06fdf95fb8f489b26a9ff2e86ae03cd9a1019f36777a",
+    "url": "http://localhost:8000/il-player/scene-product?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2&grant=1793639100.31fd74b20d30ef0688bb8b51c2e156fc.8d8b2d2ca8a5362e.f488105b9067103825054b0208174b4efa5be87c51d1203a49aedcef1e48a094",
     "windows": [
       {
         "end_ms": 9000,
@@ -45,7 +45,7 @@
         "start_ms": 235000
       }
     ],
-    "session": "178311e8ffa4791646c0d0f6c728aa73"
+    "session": "31fd74b20d30ef0688bb8b51c2e156fc"
   },
   "cuts": [
     {
@@ -56,7 +56,7 @@
       "requests": [
         {
           "provider": "iadserver",
-          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_pre&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=0"
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_pre&output=vast&vid=asset-a0a377d6c8214c1498674e53c97721d2&cue_seconds=0"
         }
       ]
     },
@@ -68,7 +68,7 @@
       "requests": [
         {
           "provider": "iadserver",
-          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=58"
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-a0a377d6c8214c1498674e53c97721d2&cue_seconds=58"
         },
         {
           "provider": "gam",
@@ -97,7 +97,7 @@
       "requests": [
         {
           "provider": "iadserver",
-          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=239"
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-a0a377d6c8214c1498674e53c97721d2&cue_seconds=239"
         },
         {
           "provider": "gam",
@@ -108,7 +108,7 @@
   ],
   "duration": 300.0,
   "expires_at": "2026-11-02T16:15:00.000Z",
-  "revision": "ab970cf290b9a95658d6767b53a1ce784eca0e458f9d56b1395fdf03fed49cc7",
+  "revision": "05589d9882a4b733ee99bc563c1ad9590edb760292322238d22e141df0fcb7ad",
   "scenes": {
     "formats": [
       "super",
@@ -146,7 +146,7 @@
         "start_ms": 0,
         "targeting": {
           "ilayers_context": "deportes",
-          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+          "ilayers_link": "049f47d11c7562ad30867ff026335eb1,1ab8642307e0de107184a9548dd9acb1"
         }
       },
       {
@@ -163,7 +163,7 @@
         "start_ms": 50000,
         "targeting": {
           "ilayers_context": "deportes",
-          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+          "ilayers_link": "049f47d11c7562ad30867ff026335eb1,1ab8642307e0de107184a9548dd9acb1"
         }
       },
       {
@@ -188,7 +188,7 @@
         "start_ms": 235000,
         "targeting": {
           "ilayers_context": "deportes",
-          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+          "ilayers_link": "049f47d11c7562ad30867ff026335eb1,1ab8642307e0de107184a9548dd9acb1"
         }
       }
     ]

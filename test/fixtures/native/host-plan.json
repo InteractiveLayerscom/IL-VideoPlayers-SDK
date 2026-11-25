@@ -1,10 +1,10 @@
 {
-  "asset_id": "asset-40edc822d6f24974a9af51695a88184b",
+  "asset_id": "asset-a0a377d6c8214c1498674e53c97721d2",
   "asset_version": "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc",
   "cuts": [],
   "duration": 300.0,
   "expires_at": "2026-11-02T16:15:00.000Z",
-  "revision": "ab970cf290b9a95658d6767b53a1ce784eca0e458f9d56b1395fdf03fed49cc7",
+  "revision": "05589d9882a4b733ee99bc563c1ad9590edb760292322238d22e141df0fcb7ad",
   "scenes": {
     "formats": [
       "super",
@@ -42,7 +42,7 @@
         "start_ms": 0,
         "targeting": {
           "ilayers_context": "deportes",
-          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+          "ilayers_link": "049f47d11c7562ad30867ff026335eb1,1ab8642307e0de107184a9548dd9acb1"
         }
       },
       {
@@ -59,7 +59,7 @@
         "start_ms": 50000,
         "targeting": {
           "ilayers_context": "deportes",
-          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+          "ilayers_link": "049f47d11c7562ad30867ff026335eb1,1ab8642307e0de107184a9548dd9acb1"
         }
       },
       {
@@ -84,7 +84,7 @@
         "start_ms": 235000,
         "targeting": {
           "ilayers_context": "deportes",
-          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+          "ilayers_link": "049f47d11c7562ad30867ff026335eb1,1ab8642307e0de107184a9548dd9acb1"
         }
       }
     ]
@@ -100,7 +100,7 @@
       "max_seconds": null,
       "min_seconds": 1.5
     },
-    "url": "http://localhost:8000/il-player/scene-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.ed4c7d84521a3bc4faba519c687146f0.600687f5743c48db.73a5ef9e68291ac2ae8b542ecb5fa9030971aff72de2797ffeba9d5829b5394f&host=1",
+    "url": "http://localhost:8000/il-player/scene-product?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2&grant=1793639100.a1443784d8c5306265cc64d6ab475db2.8d8b2d2ca8a5362e.a80cbd90319b866051c0c7bdf4b5272255396f7ba71cc7be7f2b8b0eec18381c&host=1",
     "windows": [
       {
         "end_ms": 9000,
@@ -133,7 +133,7 @@
         "start_ms": 235000
       }
     ],
-    "break_url": "http://localhost:8000/il-player/break-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.ed4c7d84521a3bc4faba519c687146f0.600687f5743c48db.73a5ef9e68291ac2ae8b542ecb5fa9030971aff72de2797ffeba9d5829b5394f&host=1",
-    "session": "ed4c7d84521a3bc4faba519c687146f0"
+    "break_url": "http://localhost:8000/il-player/break-product?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2&grant=1793639100.a1443784d8c5306265cc64d6ab475db2.8d8b2d2ca8a5362e.a80cbd90319b866051c0c7bdf4b5272255396f7ba71cc7be7f2b8b0eec18381c&host=1",
+    "session": "a1443784d8c5306265cc64d6ab475db2"
   }
 }

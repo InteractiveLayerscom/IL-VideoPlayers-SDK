@@ -22,7 +22,7 @@ Todo se fija al compilar, en `settings.js`: `mode`, `consoleOrigin`, `relayUrl`,
 
 1. Copiá el SDK dentro de la app: `cp -R ../../web sdk` (desde esta carpeta). La app importa `./sdk/index.mjs` y `./sdk/avplay-ads.mjs`. Para motores de TV antiguos pasá `sdk/` por el transpilador de tu app.
 2. Abrí la carpeta en Tizen Studio como proyecto web de TV (o `tizen package -t wgt -s <perfil de certificado>` desde `~/tizen-studio/tools/ide/bin`), firmá con tu certificado de Samsung e instalá en un televisor en modo desarrollador (`sdb connect <ip>`, `tizen install -n ILDemo.wgt`).
-3. Para el modo `host` sin backend: `node examples/api-relay.mjs --fixtures test/fixtures/native --public-origin https://relay.example` detrás de un origen HTTPS de confianza local (las URL de plan y producto tienen que ser HTTPS; nunca uses un túnel público). Con backend real: `IL_API_BASE=https://console.example IL_API_KEY=… node examples/api-relay.mjs`.
+3. Para el modo `host` sin backend: `node examples/api-relay.mjs --fixtures test/fixtures/native --cert cert.pem --key key.pem --public-base https://<ip de tu Mac>:8787` con un certificado de confianza local (las URL de producto tienen que ser HTTPS y del origen del plan; nunca uses un túnel público). En ese modo el relay sirve los planes con `expires_at` vigente y las URL de producto apuntando a sí mismo; las concesiones de los fixtures están vencidas, pero el relay contesta las rutas de producto sin verificarlas. Poné `consoleOrigin` y `relayUrl` en ese mismo origen. Con backend real: `IL_API_BASE=https://console.example IL_API_KEY=… node examples/api-relay.mjs`.
 
 ## Qué mirar
 

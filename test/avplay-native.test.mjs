@@ -148,7 +148,7 @@ test('tizenAppId reads the application id; attachAvPlayAppAds builds the app rou
     fetchImpl: async (url) => { urls.push(url); return new Response(null, { status: 404 }); } });
   assert.equal(result, null);
   assert.equal(urls[0], `${CONSOLE}/il-player/app-plan?project=${PROJECT}&asset=${ASSET}&app=tizen%3AAbCdEfGhIj.ILDemo`);
-  assert.deepEqual(events, [{ type: 'plan_unavailable', app: 'tizen:AbCdEfGhIj.ILDemo', status: 404 }]);
+  assert.deepEqual(events, [{ type: 'plan_unavailable', app: 'tizen:AbCdEfGhIj.ILDemo', status: 404, reason: 'http_404' }]);
 });
 
 test('attachAvPlayAppAds attaches a loaded plan and renews a version 2 plan with renew=<grant>', async (t) => {
@@ -185,4 +185,78 @@ test('attachAvPlayAppAds plays without IL ads when the app route answers a stitc
     session: {}, getDisplayRect: () => ({}), onEvent: (e) => events.push(e), fetchImpl: async () => new Response(JSON.stringify(stitched)) });
   assert.equal(result, null);
   assert.deepEqual(events, [{ type: 'plan_unavailable', app: 'tizen:AbCdEfGhIj.ILDemo', status: 200, reason: 'stitched' }]);
+});
+
+test('destroy, expiry and replacement during a host break never close, open, prepare, seek, play or pause AVPlay', async (t) => {
+  const v2 = fixture('app-plan-v2.json');
+  v2.cuts = [];
+  for (const action of ['destroy', 'replace', 'expire']) {
+    t.mock.timers.reset();
+    const r = rig(t, { plan: structuredClone(v2) });
+    r.avplay.state = 'PLAYING';
+    const before = r.avplay.calls.length;
+    const touched = [];
+    for (const name of ['prepareAsync', 'seekTo', 'play', 'pause', 'setDisplayRect']) {
+      const original = r.avplay[name];
+      r.avplay[name] = (...args) => { touched.push(name); return original(...args); };
+    }
+    r.sdk.breakStarted(58);
+    if (action === 'destroy') r.sdk.destroy();
+    if (action === 'replace') {
+      const next = structuredClone(v2);
+      next.expires_at = new Date(Date.now() + 120000).toISOString();
+      assert.equal(r.sdk.replacePlan(next), true);
+    }
+    if (action === 'expire') {
+      t.mock.timers.tick(120000);
+      r.sdk.tick();
+    }
+    assert.deepEqual(r.avplay.calls.slice(before), [], action);
+    assert.deepEqual(touched, [], action);
+  }
+});
+
+test('AVPlay: another session id gets buy_unavailable once, like the browser; no grant in any event', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  const host = fixture('host-plan.json');
+  const events = [];
+  const sdk = attachAvPlayAds({ avplay: device(), session: { commerce: { locale: 'es' }, setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} },
+    plan: host, planOrigin: CONSOLE, sessionId: 'host-view', getDisplayRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+    fetchImpl: async () => ({ ok: true, status: 204 }), onEvent: (e) => events.push(e), Parser: DOMParser, tickMs: 1e9 });
+  t.after(() => sdk.destroy());
+  sdk.breakStarted(58);
+  sdk.setBreakAd({ tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+  assert.deepEqual(events.filter((e) => e.type === 'buy_unavailable'), [{ type: 'buy_unavailable', reason: 'session' }]);
+  const grant = new URL(host.commerce.break_url).searchParams.get('grant');
+  assert.ok(!JSON.stringify(events).includes(grant));
+});
+
+test('the break card request on AVPlay leaves no grant in events', async (t) => {
+  const plan = fixture('app-plan-v1.json');
+  const r = rig(t, { plan });
+  const done = r.sdk.start();
+  await flush();
+  r.avplay.listener.oncurrentplaytime(500);
+  await flush();
+  r.avplay.listener.onstreamcompleted();
+  await done;
+  assert.equal(r.asked.length, 1);
+  assert.ok(!JSON.stringify(r.events).includes(new URL(plan.commerce.url).searchParams.get('grant')));
+});
+
+test('attachAvPlayAppAds outside a Tizen app without app is refused locally (app_id), and appParams reach GAM breaks', async (t) => {
+  const events = [];
+  const none = await attachAvPlayAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, avplay: device(), session: {}, getDisplayRect: () => ({}),
+    onEvent: (e) => events.push(e), fetchImpl: async () => assert.fail('no request') });
+  assert.equal(none, null);
+  assert.deepEqual(events, [{ type: 'plan_unavailable', app: null, status: 0, reason: 'app_id' }]);
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  const sdk = await attachAvPlayAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: 'tizen:AbCdEfGhIj.ILDemo', avplay: device(),
+    session: { setLinearAd() {}, addCue: () => true, removeCue: () => true }, getDisplayRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+    appParams: { msid: 'com.example.ildemo.tizen', an: 'IL Demo' }, Parser: DOMParser, tickMs: 1e9,
+    fetchImpl: async () => new Response(JSON.stringify(fixture('app-plan-v1.json'))) });
+  t.after(() => sdk.destroy());
+  const gam = sdk.cuts.flatMap((cut) => cut.requests).find((request) => request.provider === 'gam');
+  assert.equal(new URL(gam.tagUrl).searchParams.get('msid'), 'com.example.ildemo.tizen');
+  assert.equal(new URL(gam.tagUrl).searchParams.get('an'), 'IL Demo');
 });

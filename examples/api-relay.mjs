@@ -4,7 +4,8 @@
 //
 // Usage
 //   IL_API_BASE=https://console.example IL_API_KEY=... PORT=8787 node examples/api-relay.mjs
-//   node examples/api-relay.mjs --fixtures test/fixtures/native [--static <dir>] [--v2] [--public-origin <origin>]
+//   node examples/api-relay.mjs --fixtures test/fixtures/native [--static <dir>] [--v2] [--public-base https://host:port]
+//                                [--cert cert.pem --key key.pem]   (HTTPS with a locally trusted certificate)
 //
 // Endpoints (JSON in and out, permissive CORS for local demos)
 //   POST /playback   { "asset_id", "channel_id"? }  -> POST /v1/vod/playbacks (graphics: true), then
@@ -17,12 +18,18 @@
 //   GET /il-player/app-plan?...   app-plan-v1.json (app-plan-v2.json with ?v=2 or --v2; renew=... -> app-plan-renewed.json)
 //   GET /il-player/scene-product  scene-product-card.json      GET /il-player/break-product  break-product-card.json
 //   GET /<file>                   static files from --static <dir> (a test video)
-//   Every request line is logged to stdout: it is the evidence the example apps use.
-//   The fixtures name IL's test console `http://localhost:8000`; the relay rewrites that origin in every answer to
-//   --public-origin <origin> (default: http://<Host of the request>), so product requests come back to the relay. The
-//   SDKs only take HTTPS plan and product URLs: put the relay behind a locally trusted HTTPS origin, or Buy stays off.
+//   Every request line is logged to stdout (it is the evidence the example apps use), with `grant` and `renew`
+//   values replaced by `REDACTED`.
+//   Served copies are adjusted, the files stay byte-identical: `expires_at` becomes now + 15 min (v1 app plan, host
+//   plan) or now + 120 s (v2 plan and its renewal), and the origin of `commerce.url` / `commerce.break_url` becomes
+//   --public-base (default: the scheme this relay serves + the request's Host). The SDKs only take HTTPS product URLs
+//   on the plan's origin, so serve HTTPS with --cert/--key (a locally trusted certificate) for Buy to show. The grants
+//   inside those URLs are the fixtures' own and long expired: fixtures mode answers the product routes itself and
+//   never checks them.
 // Upstream errors come back as { "error", "status" } with the upstream status (502 when the backend is unreachable).
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { readFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -116,14 +123,27 @@ function liveBackend({ base, apiKey, fetchImpl = globalThis.fetch }) {
 }
 
 // Offline: the shared fixture files answer, no backend and no key.
-const FIXTURE_ORIGIN = 'http://localhost:8000';
+const FIXTURE_MINUTES = 15;
+// The served copy of a fixture plan: a live expiry and product URLs on this relay.
+function servedPlan(plan, base, lifetimeMs) {
+  const copy = structuredClone(plan);
+  if (copy && typeof copy === 'object' && 'expires_at' in copy) copy.expires_at = new Date(Date.now() + lifetimeMs).toISOString();
+  for (const key of ['url', 'break_url']) {
+    if (typeof copy?.commerce?.[key] !== 'string') continue;
+    const url = new URL(copy.commerce[key]);
+    copy.commerce[key] = base + url.pathname + url.search;
+  }
+  return copy;
+}
+
 function fixtureBackend(dir) {
-  let origin = FIXTURE_ORIGIN;
-  const load = async (name) => JSON.parse((await readFile(join(dir, name), 'utf8')).replaceAll(FIXTURE_ORIGIN, origin));
+  let base = 'http://localhost';
+  const load = async (name) => JSON.parse(await readFile(join(dir, name), 'utf8'));
+  const plan = async (name, lifetimeMs = FIXTURE_MINUTES * 60000) => servedPlan(await load(name), base, lifetimeMs);
   return {
     async playback() {
       const created = await load('playback-created.json');
-      return { playback_id: created.playback_id, plan: await load('host-plan.json') };
+      return { playback_id: created.playback_id, plan: await plan('host-plan.json') };
     },
     async break({ cue_seconds }) {
       const answer = await load(cue_seconds === 58 ? 'break-request-stable.json' : 'break-request-gam.json');
@@ -137,10 +157,16 @@ function fixtureBackend(dir) {
       return { accepted: true };
     },
     load,
-    setOrigin(value) {
-      origin = value;
+    plan,
+    setBase(value) {
+      base = value.replace(/\/+$/, '');
     },
   };
+}
+
+// The request line without grant or renew values.
+export function redact(pathAndQuery) {
+  return pathAndQuery.replace(/([?&](?:grant|renew)=)[^&#]*/g, '$1REDACTED');
 }
 
 async function serveStatic(res, root, pathname) {
@@ -155,15 +181,16 @@ async function serveStatic(res, root, pathname) {
   }
 }
 
-export function createRelay({ base, apiKey, fixtures, staticDir, v2 = false, publicOrigin, fetchImpl, log = (line) => console.log(line) } = {}) {
+export function createRelay({ base, apiKey, fixtures, staticDir, v2 = false, publicBase, cert, key, fetchImpl, log = (line) => console.log(line) } = {}) {
   if (!fixtures && (!base || !apiKey)) throw new Error('Set IL_API_BASE and IL_API_KEY, or pass --fixtures <dir>');
   const backend = fixtures ? fixtureBackend(resolve(fixtures)) : liveBackend({ base, apiKey, fetchImpl });
   const root = staticDir ? resolve(staticDir) : null;
-  return createServer(async (req, res) => {
+  const tls = cert && key ? { cert, key } : null;
+  const handler = async (req, res) => {
     const url = new URL(req.url, 'http://relay.local');
     // The request line only: never headers, never the key.
-    log(`${new Date().toISOString()} ${req.method} ${url.pathname}${url.search}`);
-    if (fixtures) backend.setOrigin(publicOrigin ?? `http://${req.headers.host ?? 'localhost'}`);
+    log(`${new Date().toISOString()} ${req.method} ${redact(url.pathname + url.search)}`);
+    if (fixtures) backend.setBase(publicBase ?? `${tls ? 'https' : 'http'}://${req.headers.host ?? 'localhost'}`);
     try {
       if (req.method === 'OPTIONS') return send(res, 204);
       if (req.method === 'POST' && url.pathname === '/playback') {
@@ -195,9 +222,10 @@ export function createRelay({ base, apiKey, fixtures, staticDir, v2 = false, pub
         // The routes IL's console serves to an app directly; here they come from the fixture files.
         const fixtureHeaders = { 'X-Content-Type-Options': 'nosniff' };
         if (url.pathname === '/il-player/app-plan') {
-          const name = url.searchParams.get('renew') ? 'app-plan-renewed.json'
-            : v2 || url.searchParams.get('v') === '2' ? 'app-plan-v2.json' : 'app-plan-v1.json';
-          return send(res, 200, await backend.load(name), fixtureHeaders);
+          const wantsV2 = v2 || url.searchParams.get('v') === '2';
+          // A renewal of a v2 view stays v2 (the fixture of a renewal is the v1 one): a fresh 120 s approval.
+          const name = url.searchParams.get('renew') && !wantsV2 ? 'app-plan-renewed.json' : wantsV2 ? 'app-plan-v2.json' : 'app-plan-v1.json';
+          return send(res, 200, await backend.plan(name, wantsV2 ? 120000 : FIXTURE_MINUTES * 60000), fixtureHeaders);
         }
         if (url.pathname === '/il-player/scene-product') return send(res, 200, await backend.load('scene-product-card.json'), fixtureHeaders);
         if (url.pathname === '/il-player/break-product') return send(res, 200, await backend.load('break-product-card.json'), fixtureHeaders);
@@ -208,7 +236,8 @@ export function createRelay({ base, apiKey, fixtures, staticDir, v2 = false, pub
       const status = Number.isInteger(error?.status) ? error.status : 500;
       send(res, status, { error: status === 500 ? 'relay error' : error.message, status });
     }
-  });
+  };
+  return tls ? createHttpsServer(tls, handler) : createServer(handler);
 }
 
 function argument(args, name) {
@@ -224,8 +253,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     fixtures: argument(args, '--fixtures'),
     staticDir: argument(args, '--static'),
     v2: args.includes('--v2'),
-    publicOrigin: argument(args, '--public-origin'),
+    publicBase: argument(args, '--public-base'),
+    cert: argument(args, '--cert') ? readFileSync(argument(args, '--cert')) : undefined,
+    key: argument(args, '--key') ? readFileSync(argument(args, '--key')) : undefined,
   });
   const port = Number(process.env.PORT) || 8787;
-  server.listen(port, () => console.log(`relay listening on http://localhost:${port}${argument(args, '--fixtures') ? ' (fixtures)' : ''}`));
+  server.listen(port, () => console.log(`relay listening on ${argument(args, '--cert') ? 'https' : 'http'}://localhost:${port}${argument(args, '--fixtures') ? ' (fixtures)' : ''}`));
 }

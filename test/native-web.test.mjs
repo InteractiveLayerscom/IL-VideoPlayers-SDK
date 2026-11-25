@@ -3,7 +3,7 @@ import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { attachAds, attachAppAds, loadAppPlan, loadPlan, planUrl, vastIdentity } from '../web/ads.mjs';
+import { attachAds, attachAppAds, graphicTag, loadAppPlan, loadPlan, planUrl, vastIdentity } from '../web/ads.mjs';
 
 globalThis.DOMParser = new JSDOM('').window.DOMParser;
 
@@ -102,13 +102,13 @@ test('loadAppPlan: 204 and 404 play without ads and report the exact app= value;
     const plan = await loadAppPlan({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, onEvent: (e) => events.push(e),
       fetchImpl: async () => new Response(null, { status }) });
     assert.equal(plan, null);
-    assert.deepEqual(events, [{ type: 'plan_unavailable', app: APP, status }]);
+    assert.deepEqual(events, [{ type: 'plan_unavailable', app: APP, status, reason: `http_${status}` }]);
   }
   const events = [];
   const network = await loadAppPlan({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, onEvent: (e) => events.push(e),
     fetchImpl: async () => { throw new TypeError('offline'); } });
   assert.equal(network, null);
-  assert.deepEqual(events, [{ type: 'plan_unavailable', app: APP, status: null, reason: 'network' }]);
+  assert.deepEqual(events, [{ type: 'plan_unavailable', app: APP, status: 0, reason: 'network' }]);
 
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const slow = [];
@@ -119,7 +119,7 @@ test('loadAppPlan: 204 and 404 play without ads and report the exact app= value;
   assert.deepEqual(slow, []);
   t.mock.timers.tick(1);
   assert.equal(await pending, null);
-  assert.deepEqual(slow, [{ type: 'plan_unavailable', app: APP, status: null, reason: 'timeout' }]);
+  assert.deepEqual(slow, [{ type: 'plan_unavailable', app: APP, status: 0, reason: 'timeout' }]);
 });
 
 // --- B. Version 2 -------------------------------------------------------------------------------------------------
@@ -189,15 +189,19 @@ test('replacePlan keeps what was shown and the commerce session, and uses the ne
   assert.ok(r.events.some((e) => e.type === 'plan_expired'));
 });
 
-test('replacePlan refuses another video, a version 1 plan and a plan without the contract', async (t) => {
-  frozenClock(t);
+test('replacePlan refuses another video or an invalid plan; a v1 answer to v2 is adopted and v2 over v1 gets an expiry', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
   const v2 = fixture('app-plan-v2.json');
   const r = rig({ plan: v2 });
   assert.equal(r.ads.replacePlan({ ...renewedV2(v2, NOW), asset_version: 'other' }), false);
-  assert.equal(r.ads.replacePlan(fixture('app-plan-v1.json')), false);
   assert.equal(r.ads.replacePlan({ ...renewedV2(v2, NOW), native_gam: undefined }), false);
+  assert.equal(r.ads.replacePlan(fixture('app-plan-v1.json')), true);
+  t.mock.timers.tick(200000);
+  assert.ok(!r.events.some((e) => e.type === 'plan_expired'), 'a version 1 plan has no short expiry');
   const v1 = rig({ plan: fixture('app-plan-v1.json') });
-  assert.equal(v1.ads.replacePlan(renewedV2(v2, NOW)), false);
+  assert.equal(v1.ads.replacePlan(renewedV2(v2, Date.now())), true);
+  t.mock.timers.tick(120000);
+  assert.ok(v1.events.some((e) => e.type === 'plan_expired'));
 });
 
 test('attachAppAds renews a version 2 plan 20 s before expiry with renew=<grant> and swaps it in', async (t) => {
@@ -367,4 +371,202 @@ test('the existing page-route plan and setBreakActive keep working', async (t) =
   r.ads.setBreakActive(false);
   await r.at(17);
   assert.equal(r.graphics.length, 1);
+});
+
+// --- Review rules shared by every platform -----------------------------------------------------------------------
+
+test('host mode: clearance applies around the positions the host reports with breakStarted, none without reports', async (t) => {
+  frozenClock(t);
+  const plan = () => { const p = fixture('host-plan.json'); p.scenes.pacing.cut_clearance_seconds = 5; return p; };
+  // Nothing reported: p2 (15-24 s) is asked normally.
+  const free = rig({ plan: plan() });
+  await free.at(14, 'playing');
+  assert.equal(free.graphics.length, 1);
+  // A break reported at 20 s: p2 shrinks to 15-15 and is never asked, even after the break ends.
+  const r = rig({ plan: plan() });
+  r.ads.breakStarted(20);
+  r.ads.breakEnded();
+  await r.at(14, 'playing');
+  await r.at(16);
+  assert.equal(r.graphics.length, 0);
+});
+
+test('a host break that never ends is closed by the guard after 120 s with break_error, and graphics resume', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const r = rig({ plan: fixture('host-plan.json'), start: 10 });
+  r.ads.breakStarted(10);
+  await r.at(16, 'playing');
+  assert.equal(r.graphics.length, 0);
+  t.mock.timers.tick(119999);
+  assert.ok(!r.events.some((e) => e.type === 'break_error'));
+  t.mock.timers.tick(1);
+  assert.deepEqual(r.events.filter((e) => e.type === 'break_error'), [{ type: 'break_error', cut: 'at-10000' }]);
+  assert.deepEqual(r.linear.at(-1), [false, undefined]);
+  await r.at(17);
+  assert.equal(r.graphics.length, 1);
+});
+
+test('destroy, expiry and replacement during a host break never touch the host player', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = fixture('app-plan-v2.json');
+  for (const action of ['destroy', 'replace', 'expire']) {
+    const r = rig({ plan: v2 });
+    const touched = [];
+    r.video.play = () => { touched.push('play'); };
+    r.video.pause = () => { touched.push('pause'); };
+    r.video.paused = false;
+    r.ads.breakStarted(58);
+    if (action === 'destroy') r.ads.destroy();
+    if (action === 'expire') t.mock.timers.tick(120000);
+    if (action === 'replace') assert.equal(r.ads.replacePlan(renewedV2(v2, Date.now())), true);
+    assert.deepEqual(touched, [], action);
+    assert.equal(r.video.currentTime, 0, action);
+    if (action !== 'replace') assert.deepEqual(r.linear.at(-1), [false, undefined], action);
+  }
+});
+
+test('at-<ms> rounds to the nearest millisecond; a negative or non-finite position is refused with one event', async (t) => {
+  frozenClock(t);
+  const r = rig({ plan: fixture('host-plan.json') });
+  r.ads.setBreakAd({ at: 58.0006, tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+  await flush();
+  assert.equal(r.asked.at(-1).searchParams.get('cut'), 'at-58001');
+  r.ads.breakEnded();
+  for (const at of [-1, NaN, Infinity]) r.ads.breakStarted(at);
+  r.ads.setBreakAd({ at: -0.5, tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+  await flush();
+  assert.equal(r.events.filter((e) => e.type === 'break_refused').length, 4);
+  assert.deepEqual(r.events.find((e) => e.type === 'break_refused'), { type: 'break_refused', reason: 'position' });
+  assert.equal(r.asked.filter((u) => u.pathname.endsWith('/break-product')).length, 1);
+});
+
+test('a host with another session id gets buy_unavailable once instead of a silent missing Buy', async (t) => {
+  frozenClock(t);
+  const events = [];
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true });
+  const session = { commerce: { locale: 'es' }, setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async () => ({ ok: true, status: 204 });
+  const ads = attachAds({ session, video, plan: fixture('host-plan.json'), fetchImpl, planOrigin: CONSOLE, sessionId: 'host-view', onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  ads.breakStarted(58);
+  ads.setBreakAd({ tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+  assert.deepEqual(events.filter((e) => e.type === 'buy_unavailable'), [{ type: 'buy_unavailable', reason: 'session' }]);
+  // A plan without break_url has no Buy to miss: nothing said.
+  const quiet = [];
+  const plan = fixture('host-plan.json');
+  delete plan.commerce.break_url;
+  const other = attachAds({ session, video, plan, fetchImpl, planOrigin: CONSOLE, sessionId: 'host-view', onEvent: (e) => quiet.push(e) });
+  cleanups.push(() => other.destroy());
+  assert.equal(quiet.filter((e) => e.type === 'buy_unavailable').length, 0);
+});
+
+test('no grant, renew value or commerce URL reaches anything a host can observe (load, renewal, scene and break card)', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = fixture('app-plan-v2.json');
+  const secrets = [grantOf(v2.commerce.url), 'renewed-grant', 'renew=', '/il-player/scene-product', '/il-player/break-product'];
+  const events = [];
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true, played: { length: 0 }, pause() {}, play: async () => {} });
+  const session = { commerce: { locale: 'es' }, sceneFeatures: null, holding: () => false, setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/il-player/app-plan') {
+      if (url.searchParams.get('renew')) return new Response(JSON.stringify(renewedV2(v2, Date.now())));
+      return new Response(JSON.stringify(v2));
+    }
+    if (url.pathname === '/il-player/scene-product') return new Response(JSON.stringify({ ...fixture('scene-product-card.json'), start: 0, end: 9000 }));
+    if (url.pathname === '/il-player/break-product') return new Response(JSON.stringify(fixture('break-product-card.json')));
+    if (url.hostname === 'pubads.g.doubleclick.net') return new Response(superVast);
+    return new Response(null, { status: 204 });
+  };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video, fetchImpl, onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  video.currentTime = 1; video.paused = false; video.dispatchEvent(new Event('playing'));
+  await flush();
+  ads.breakStarted(58);
+  ads.setBreakAd({ tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+  await flush();
+  t.mock.timers.tick(100000);
+  await flush();
+  assert.ok(events.some((e) => e.type === 'plan_renewed' && e.version === 2));
+  assert.ok(events.some((e) => e.type === 'request'));
+  const observed = JSON.stringify(events) + JSON.stringify(Object.entries(ads).map(([k, v]) => [k, typeof v === 'function' ? '' : v]));
+  for (const secret of secrets) assert.ok(!observed.includes(secret), secret);
+});
+
+test('attachAppAds: a v1 answer to a v2 renewal is adopted and stops renewals; a v2 plan swapped into a v1 view starts them', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = fixture('app-plan-v2.json');
+  const urls = [];
+  const events = [];
+  let answerV1 = true;
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname !== '/il-player/app-plan') return new Response(null, { status: 204 });
+    urls.push(url);
+    return new Response(JSON.stringify(url.searchParams.get('renew') && answerV1 ? fixture('app-plan-v1.json') : v2));
+  };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video, fetchImpl, onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  t.mock.timers.tick(100000);
+  await flush();
+  assert.deepEqual(events.filter((e) => e.type === 'plan_renewed'), [{ type: 'plan_renewed', version: 1 }]);
+  t.mock.timers.tick(600000);
+  await flush();
+  assert.equal(urls.length, 2, 'no renewal after a version 1 answer');
+  answerV1 = false;
+  assert.equal(ads.replacePlan(renewedV2(v2, Date.now())), true);
+  t.mock.timers.tick(100000);
+  await flush();
+  assert.equal(urls.length, 3);
+  assert.equal(urls[2].searchParams.get('renew'), 'renewed-grant');
+});
+
+test('plan_unavailable: a refused application id is app_id, an unbuildable URL is request, both with the app value', async () => {
+  const events = [];
+  assert.equal(await loadAppPlan({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: 'tizen:bad', onEvent: (e) => events.push(e), fetchImpl: async () => assert.fail('no request') }), null);
+  assert.equal(await loadAppPlan({ origin: 'http://insecure.example', project: PROJECT, asset: ASSET, app: APP, onEvent: (e) => events.push(e), fetchImpl: async () => assert.fail('no request') }), null);
+  assert.deepEqual(events, [
+    { type: 'plan_unavailable', app: 'tizen:bad', status: 0, reason: 'app_id' },
+    { type: 'plan_unavailable', app: APP, status: 0, reason: 'request' },
+  ]);
+});
+
+test('app route only: msid and an from appParams go on GAM requests unless the tag has them; the page route is unchanged', async (t) => {
+  frozenClock(t);
+  const v1 = fixture('app-plan-v1.json');
+  const graphics = [];
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true, played: { length: 0 } });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/il-player/app-plan') return new Response(JSON.stringify(v1));
+    if (url.hostname === 'pubads.g.doubleclick.net') { graphics.push(url); return new Response(superVast); }
+    return new Response(null, { status: 204 });
+  };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video, fetchImpl,
+    appParams: { msid: 'com.example.ildemo.tizen', an: 'IL Demo' } });
+  cleanups.push(() => ads.destroy());
+  const gamCut = ads.cuts.flatMap((cut) => cut.requests).find((request) => request.provider === 'gam');
+  assert.equal(new URL(gamCut.tagUrl).searchParams.get('msid'), 'com.example.ildemo.tizen');
+  assert.equal(new URL(gamCut.tagUrl).searchParams.get('an'), 'IL Demo');
+  assert.ok(ads.cuts.flatMap((cut) => cut.requests).filter((r) => r.provider === 'iadserver').every((r) => !new URL(r.tagUrl).searchParams.has('msid')));
+  video.currentTime = 11; video.paused = false; video.dispatchEvent(new Event('playing'));
+  await flush();
+  assert.equal(graphics[0]?.searchParams.get('an'), 'IL Demo');
+  // A tag that already carries msid keeps its own.
+  const own = structuredClone(v1);
+  own.scenes.graphics[0].tag_url += '&msid=tag.own';
+  const r = rig({ plan: own });
+  const kept = new URL(graphicTag(own.scenes.graphics[0].tag_url, 'super', {}, undefined, { msid: 'x.y', an: 'Z' }));
+  assert.deepEqual([kept.searchParams.get('msid'), kept.searchParams.get('an')], ['tag.own', 'Z']);
+  // The page route (no appParams) adds nothing.
+  assert.ok(r.ads.cuts.flatMap((cut) => cut.requests).every((request) => !new URL(request.tagUrl).searchParams.has('msid') && !new URL(request.tagUrl).searchParams.has('an')));
+  await r.at(11, 'playing');
+  assert.ok(r.graphics.every((url) => url.searchParams.get('msid') === 'tag.own' && !url.searchParams.has('an')));
 });
