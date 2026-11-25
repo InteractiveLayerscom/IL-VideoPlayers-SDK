@@ -251,14 +251,19 @@ public final class ILAdPlanPlayer {
             var reason = "network"
             for offset in Self.renewalOffsets {
                 guard let self, !Task.isCancelled, !self.closed else { return }
+                // A slot at or past expiry sends nothing more; one merely missed but still before expiry goes at once.
+                if self.now() >= expiresAt { break }
                 let sleep = self.renewalSleep
                 let wait = expiresAt.timeIntervalSince(self.now()) - offset
                 await sleep(max(0, wait))
                 guard !Task.isCancelled, !self.closed else { return }
+                if self.now() >= expiresAt { break }
                 let configuration = URLSessionConfiguration.ephemeral
                 configuration.protocolClasses = self.session.configuration.protocolClasses
+                // One attempt at a time: the next is scheduled only after this answer arrived.
                 let answer = await Self.fetchPlan(target, configuration: configuration)
-                guard !Task.isCancelled, !self.closed else { return }
+                // A late answer, after stop() or after expiry, is ignored: plan_expired has said what happened.
+                guard !Task.isCancelled, !self.closed, self.now() < expiresAt else { return }
                 if case .success(let (status, data)) = answer, status == 200 {
                     if self.replacePlan(data) {
                         self.emit("plan_renewed", nil, self.plan.native ? "2" : "1")
