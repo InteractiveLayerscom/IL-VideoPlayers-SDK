@@ -101,7 +101,7 @@ sub receivePlan(result as Dynamic)
         end if
         ' Up to three attempts (expires_at - 20 s, - 12 s, - 5 s); only the last failure is reported.
         if m.renewAttempt < 2
-            scheduleRenewal(m.renewAttempt + 1)
+            scheduleRenewal(m.renewAttempt + 1, result.status, reason)
         else
             m.top.event = { type: "plan_renew_failed", status: result.status, reason: reason }
         end if
@@ -142,12 +142,18 @@ end function
 
 ' Before a version 2 plan expires, ask again with the current grant to keep the commerce session: at
 ' expires_at - 20 s, then - 12 s and - 5 s if the earlier attempt failed.
-sub scheduleRenewal(attempt = 0 as Integer)
+sub scheduleRenewal(attempt = 0 as Integer, lastStatus = 0 as Integer, lastReason = "" as String)
     m.renewTimer.control = "stop"
     m.renewAttempt = attempt
     if m.load = invalid or m.plan = invalid then return
     if m.plan.version <> 2 then return
-    delay = (m.plan.expiresMs - planNowMs()) / 1000# - [20, 12, 5][attempt]
+    left# = (m.plan.expiresMs - planNowMs()) / 1000#
+    ' A missed slot still before expiry goes out at once; one that could only fire at or after expiry is not sent.
+    if left# <= 0.1
+        if attempt > 0 then m.top.event = { type: "plan_renew_failed", status: lastStatus, reason: lastReason }
+        return
+    end if
+    delay = left# - [20, 12, 5][attempt]
     if delay < 0.1 then delay = 0.1
     m.renewTimer.duration = delay
     m.renewTimer.control = "start"

@@ -30,6 +30,7 @@ sub main()
     testExpiryMs()
     testRenewRetries()
     testUnreadable()
+    testRenewTooLate()
     if m.failures = 0 then print "ROKU_NATIVE_OK " + m.checks.toStr()
 end sub
 
@@ -630,4 +631,28 @@ sub testUnreadable()
         b.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: body })
         check(b.player.event.status = 200 and b.player.event.reason = "invalid", "an unreadable 200 is unavailable with reason invalid")
     end for
+end sub
+
+sub testRenewTooLate()
+    s = stage()
+    s.player.callFunc("loadPlan", s.overlay, s.video, "view-1", m.origin, m.project, m.asset, "es")
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v2.json") })
+    timer = s.player.findNode("ilPlanRenew")
+    s.player.callFunc("renewPlan")
+    sent = lastUrl()
+    ' The first attempt times out so late that its answer lands within the plan's final 0.1 s.
+    s.player.callFunc("setClock", m.now + 119.95#)
+    s.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 0, timedOut: true })
+    check(timer.control = "stop" and lastUrl() = sent, "no request goes out once only expiry is left")
+    check(countType(s, "plan_renew_failed") = 1 and s.player.event.reason = "timeout", "plan_renew_failed comes once with the last reason")
+    s.player.callFunc("setClock", m.now + 120)
+    s.player.callFunc("planTick")
+    check(s.player.event.type = "plan_expired" and countType(s, "plan_renew_failed") = 1, "then the plan expires")
+    m2 = stage()
+    m2.player.callFunc("loadPlan", m2.overlay, m2.video, "view-1", m.origin, m.project, m.asset, "es")
+    m2.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 200, body: fixtureText("app-plan-v2.json") })
+    m2.player.callFunc("renewPlan")
+    m2.player.callFunc("setClock", m.now + 117)
+    m2.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 0 })
+    check(m2.player.findNode("ilPlanRenew").control = "start" and m2.player.findNode("ilPlanRenew").duration < 0.2 and countType(m2, "plan_renew_failed") = 0, "a missed slot before expiry goes out at once")
 end sub
