@@ -43,6 +43,6 @@ adb shell am start -n com.interactivelayers.example/.MainActivity --es mode host
 
 ## Qué mirar
 
-- `adb logcat -s ILExample AdPlanPlayer`: los eventos del SDK (`request`/`fill`/`impression` de cada ventana, `plan_unavailable`, `plan_not_found app=…`, `plan_error`, `host_break_start`, `break_product`, `host_break_end`).
+- `adb logcat -s ILExample AdPlanPlayer`: los eventos del SDK (`request`/`fill`/`impression` de cada ventana, `plan_unavailable` con su motivo y el `app=` enviado, `plan_renewed`, `host_break_start`, `break_product`, `host_break_end`).
 - En `load`: las tarjetas de producto aparecen en sus ventanas.
 - En `host`: durante el corte («Corte de la app (anuncio simulado)») desaparece todo lo de IL salvo **Comprar**. En TV, Comprar toma el foco: OK abre el producto y Atrás vuelve paso a paso. Al terminar el corte vuelven las gráficas.

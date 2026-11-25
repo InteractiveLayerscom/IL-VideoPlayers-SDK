@@ -139,15 +139,26 @@ plan.start(() -> player.play());
 El SDK hace `GET <origen>/il-player/app-plan?project=…&asset=…&app=android:<nombre del paquete>` fuera del hilo principal. El valor de `app=` es `android:` más `getPackageName()` (por ejemplo `android:com.example.tv`) y **tiene que estar registrado para el proyecto en la Consola**. `load` nunca devuelve `null`: `start` espera el plan como mucho 5 s y después deja reproducir el contenido.
 
 - **200:** el plan se lee y se conecta como con `attach`.
-- **204:** no hay plan por ahora (IL puede estar armándolo). El contenido sigue sin anuncios y el SDK no reintenta: la próxima vista vuelve a pedirlo. Evento `plan_unavailable`.
-- **404:** proyecto, video o app desconocidos, con la misma respuesta para los tres. El evento `plan_not_found` trae el `app=` enviado (`app=android:…`) y el log lo repite: revisá primero que esa app esté registrada.
-- **Sin red, error o más de 5 s:** contenido sin anuncios. Evento `plan_error`.
+- **Sin plan:** el contenido sigue sin anuncios y el SDK no reintenta (la próxima vista vuelve a pedirlo). Siempre llega un único evento `plan_unavailable`. Su `format` es el motivo y su `id` es `app=<valor enviado> status=<código HTTP o 0>`. Motivos:
+  - `http_204`: IL todavía no tiene plan o se alcanzó un límite.
+  - `http_404`: proyecto, video o app desconocidos, con la misma respuesta para los tres. Revisá primero que el `app=` esté registrado; el log también lo dice.
+  - `http_<código>`: otra respuesta HTTP.
+  - `timeout`: sin respuesta en 5 s.
+  - `network`: falla de red.
+  - `app_id`: el nombre del paquete no cumple el formato de IL y no se envió nada.
+  - `request`: el origen no es un origen HTTPS sin ruta.
+  - `stitched`: un plan con `timeline` (proyecto con inserción en el servidor), que los lectores nativos todavía no reproducen.
+  - `invalid`: cualquier otro 200 que no se puede leer.
 
-El origen tiene que ser HTTPS, sin ruta. Las URL del producto deben ser del mismo origen.
+El origen tiene que ser HTTPS, sin ruta. Las URL del producto deben ser del mismo origen. Ningún evento ni línea de log incluye el `grant`, la URL de renovación ni las URL completas de `commerce`.
+
+### Identidad de la app en Google Ad Manager
+
+El plan de una app no trae `page_url`, así que el SDK nunca agrega `url` ni `description_url`. En los pedidos a Google Ad Manager que el SDK hace por su cuenta (etiquetas de gráficas y la caída a MP4 de un corte de GAM), agrega `msid` (nombre del paquete) y `an` (nombre visible de la app) si la etiqueta no los trae. Así lo pide Google para las llamadas VAST directas desde apps ([parámetros de etiquetas VAST](https://support.google.com/admanager/answer/10678356)). Los pedidos que hace IMA llevan esos datos por cuenta del propio IMA.
 
 ### Plan versión 2 y renovación
 
-Un plan `version: 2` (aprobación de formato nativo de Google Ad Manager) se acepta como en `web/ads.mjs`: sólo con `native_gam.contract` igual a `native-gam-plan-v1` y `expires_at` a no más de 120 s. Al vencer, el SDK deja de usarlo en el próximo tick o salto, emite `plan_expired`, quita sus gráficas y devuelve el contenido si estaba en un corte. Con `load`, el SDK lo vuelve a pedir 20 s antes de `expires_at` con `&renew=<grant>` (el `grant` de `commerce.url`) y lo reemplaza sin perder la vista: lo ya mostrado, intentado y resuelto, el pacing y la sesión de comercio siguen. Si la renovación falla, el plan vence solo. Si tu app obtiene el plan por su cuenta, llamá a `plan.replacePlan(json)` con la versión nueva: hace lo mismo y devuelve `false`, sin tocar el plan actual, si el JSON no sirve.
+Un plan `version: 2` (aprobación de formato nativo de Google Ad Manager) se acepta como en `web/ads.mjs`: sólo con `native_gam.contract` igual a `native-gam-plan-v1` y `expires_at` a no más de 120 s. Al vencer, el SDK deja de usarlo en el próximo tick o salto, emite `plan_expired`, quita sus gráficas y devuelve el contenido si estaba en un corte. Con `load`, el SDK lo vuelve a pedir 20 s antes de `expires_at` con `&renew=<grant>` (el `grant` de `commerce.url`) y lo reemplaza sin perder la vista: lo ya mostrado, intentado y resuelto, el pacing y la sesión de comercio siguen. Cortes y ventanas se rearman con el plan nuevo. Emite `plan_renewed` (`format` = versión nueva) o `plan_renew_failed` (`format` = motivo, como arriba). Si la renovación falla, el plan actual se sigue usando hasta su `expires_at`. Una respuesta versión 1 se adopta y corta las renovaciones. Si tu app obtiene el plan por su cuenta, llamá a `plan.replacePlan(json)` con la versión nueva: hace lo mismo y devuelve `false`, sin tocar el plan actual, si el JSON no sirve.
 
 ### Comprar durante un corte con `commerce.break_url`
 
@@ -169,7 +180,13 @@ plan.adEnded();                                  // completo, salto o error
 plan.breakEnded();                               // vuelve el contenido
 ```
 
+Las ventanas de un plan de host vienen separadas de los cortes que IL pondría, no de los tuyos. Por eso el SDK aplica `scenes.pacing.cut_clearance_seconds` alrededor de cada posición que informás con `setBreaks` o `breakStarted`. Si no informás nada, no hay distancia a ningún corte. Una posición negativa no inicia nada y emite `break_refused` (`format` = `position`).
+
 Con un plan de host el SDK no pide ni reproduce ningún anuncio de video. Durante el corte informado no dibuja nada de IL salvo el botón Comprar, descarta las respuestas de gráficas que lleguen tarde y no cambia el pacing ni las impresiones. Para Comprar pide la ficha con `cut=at-<ms>` (`at-0` en el pre-roll) y el `tag` de la `adTagUrl` de iADServer. La app no necesita IMA ni Google Mobile Ads para este modo.
+
+Comprar durante el corte necesita `commerce.break_url` en el plan de host: sólo viene si el playback se creó con `graphics: true` y recorre pasos ordenados. Sin `break_url` no hay Comprar y no se avisa nada. Si conectaste el plan con un `sessionId` propio y el plan trae `break_url`, el SDK emite una vez `buy_unavailable` (`format` = `session`): para Comprar, pasá `null` y se usa `commerce.session`.
+
+Red de seguridad: si un corte informado no recibe ningún aviso durante 180 s de primer plano (por ejemplo, porque el reproductor de anuncios de la app falló y nunca llegó `breakEnded`), el SDK lo da por terminado, emite `break_error` y vuelve a mostrar gráficas. Durante un corte de la app el SDK nunca toca su reproductor: `close()`, `replacePlan` o el vencimiento del plan sólo limpian el estado y la capa del SDK.
 
 **Obligaciones de la app en este modo:** informar cada corte (`breakStarted`/`breakEnded`) y cada anuncio (`adStarted`/`adEnded`). Si no informa nada, el SDK no tiene forma de saber que hay un anuncio en pantalla: las gráficas siguen sólo por tiempo de contenido y no hay Comprar. `setBreaks` sirve para que las gráficas respeten la distancia a los cortes. El anuncio tiene que verse en el mismo `PlayerView` o debajo de él, porque el botón se dibuja sobre el `PlayerView`.
 
