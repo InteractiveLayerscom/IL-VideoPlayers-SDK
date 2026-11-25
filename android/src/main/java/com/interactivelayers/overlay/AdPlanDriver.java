@@ -55,6 +55,13 @@ final class AdPlanDriver {
         void event(String type, String format, String id);
         AdPlanDisplay display();
         boolean displayFits();
+        /** Wall-clock milliseconds: a version 2 plan expires at {@code expires_at}. */
+        long nowMs();
+        /**
+         * Buy during a break from {@code commerce.break_url}: the ad's identity once it starts ({@code card} null),
+         * then its card. The same drawing path as the session feed's midroll card.
+         */
+        void setBreakCard(String creativeId, String deliveryId, OverlayCue card);
     }
 
     private static final long TICK_MS = 250;
@@ -73,8 +80,8 @@ final class AdPlanDriver {
     }
 
     private final Host host;
-    private final AdPlan plan;
-    private final AdPlan.Schedule schedule;
+    private AdPlan plan;
+    private AdPlan.Schedule schedule;
     private final String locale;
     private final Runnable pulse = this::tick;
     private final Runnable holdExpired = () -> {
@@ -92,11 +99,21 @@ final class AdPlanDriver {
     private AdBreakWalk walk;
     private AdPlan.Cut cut;
     private AdPlan.LinearAd ad;
+    private String adTag;
     private long resumeAt;
     private boolean resumePlay;
     private Runnable afterPreroll;
     private Object displayRequest;
     private AdPlan.Window displayLive;
+    // A version 2 plan past expires_at: nothing more of it is used until a renewal replaces it.
+    private boolean expired;
+    // A break the host plays itself (host-driven mode), at this content position.
+    private boolean hostBreak;
+    private long hostBreakAtMs;
+    private List<Long> hostBreaks;
+    // Buy during a break: a token that outdates a late card, and whether the current ad has a shop identity.
+    private long shopToken;
+    private boolean shopSpot;
 
     AdPlanDriver(Host host, AdPlan plan, String locale) {
         this.host = host;
@@ -109,6 +126,10 @@ final class AdPlanDriver {
         if (closed || started) return;
         started = true;
         host.later(pulse, TICK_MS);
+        if (checkExpired()) {
+            if (ready != null) ready.run();
+            return;
+        }
         AdPlan.Cut preroll = schedule.join(Math.max(0, host.contentPositionMs()));
         if (preroll == null) {
             if (ready != null) ready.run();
@@ -129,6 +150,7 @@ final class AdPlanDriver {
     void tick() {
         if (closed) return;
         host.later(pulse, TICK_MS);
+        if (checkExpired()) return;
         if (inBreak) {
             if (host.appActive()) breakElapsedMs += TICK_MS;
             if (breakElapsedMs >= breakLimitMs) {
@@ -136,6 +158,11 @@ final class AdPlanDriver {
                 return;
             }
             trackQuartiles();
+            return;
+        }
+        // The host's own break: nothing of IL's is asked for or shown but the Buy button of its ad.
+        if (hostBreak) {
+            if (displayLive != null) host.display().setVisible(false);
             return;
         }
         if (!host.contentPlaying()) {
@@ -247,13 +274,14 @@ final class AdPlanDriver {
     // TRUE filled, FALSE empty, null timed out.
     private void displayAnswered(Object request, Boolean answer) {
         if (closed || request == null || request != displayRequest) return;
+        if (expired) answer = null;
         displayRequest = null;
         host.cancel(displayExpired);
         AdPlan.Window window = pendingDisplay;
         pendingDisplay = null;
         schedule.pending.remove(window);
         graphicBusy = false;
-        if (Boolean.TRUE.equals(answer) && !inBreak && host.contentPositionMs() < window.end) {
+        if (Boolean.TRUE.equals(answer) && !breakOn() && host.contentPositionMs() < window.end) {
             schedule.shown.add(window);
             displayLive = window;
             emit("fill", OVERLAY, window.id);
@@ -268,7 +296,8 @@ final class AdPlanDriver {
         if (closed) return;
         schedule.pending.remove(window);
         graphicBusy = false;
-        if (answer == null || inBreak) {
+        if (expired) return;
+        if (answer == null || breakOn()) {
             emit("error", graphic.format, window.id);
         } else if (answer.imageUrl == null) {
             emit("no_fill", graphic.format, window.id);
@@ -313,7 +342,8 @@ final class AdPlanDriver {
         if (closed) return;
         schedule.pending.remove(window);
         productBusy = false;
-        if (card == null || inBreak) {
+        if (expired) return;
+        if (card == null || breakOn()) {
             schedule.products.put(window.id, "empty");
             emit(empty ? "no_fill" : "error", "scene_product", window.id);
             return;
@@ -370,6 +400,7 @@ final class AdPlanDriver {
     }
 
     private void askBreak(AdPlan.Request entry, long token) {
+        shopAdEnded();
         ad = null;
         adPlaying = false;
         emit("break_request", entry.provider, cut.id);
@@ -407,7 +438,9 @@ final class AdPlanDriver {
                 imaStarted = true;
                 watchAd(durationMs);
                 current.started(token);
-                if (identity != null) host.setLinear(true, identity.creativeId, identity.deliveryId);
+                if (plan.breakUrl != null) shopAdStarted(cut.id, cut.position, tag, spot == null ? null : spot.ad.adId,
+                        spot == null ? null : spot.ad.linearCreativeId);
+                else if (identity != null) host.setLinear(true, identity.creativeId, identity.deliveryId);
             }
             @Override public void empty() {
                 if (walk == current) current.done(token, false);
@@ -418,7 +451,9 @@ final class AdPlanDriver {
                 else fallBackToMp4(tag, spot, token, current);
             }
             @Override public void completed() {
-                if (walk == current) current.done(token, true);
+                if (walk != current) return;
+                shopAdEnded();
+                current.done(token, true);
             }
         });
         if (running) swapped = true;
@@ -442,7 +477,7 @@ final class AdPlanDriver {
         }
         if (spot != null) {
             if (spot.ad.mediaUrl == null) current.noFill(token);
-            else playAd(spot.ad, token);
+            else playAd(spot.ad, tag, token);
             return;
         }
         host.background(() -> {
@@ -450,7 +485,7 @@ final class AdPlanDriver {
             host.foreground(() -> {
                 if (closed || walk != current || !inBreak) return;
                 if (found == null || found.ad.mediaUrl == null) current.noFill(token);
-                else playAd(found.ad, token);
+                else playAd(found.ad, tag, token);
             });
         });
     }
@@ -472,8 +507,9 @@ final class AdPlanDriver {
         return null;
     }
 
-    private void playAd(AdPlan.LinearAd found, long token) {
+    private void playAd(AdPlan.LinearAd found, String tag, long token) {
         ad = found;
+        adTag = tag;
         adToken = token;
         swapped = true;
         host.playMp4(found.mediaUrl);
@@ -488,16 +524,21 @@ final class AdPlanDriver {
         walk.started(adToken);
         beacon(ad.impressions);
         beacon(ad.tracking.get("start"));
-        if (plan.breakShop) host.setLinear(true, ad.creativeId, ad.deliveryId);
+        if (plan.breakUrl != null) shopAdStarted(cut.id, cut.position, adTag, ad.adId, ad.linearCreativeId);
+        else if (plan.breakShop) host.setLinear(true, ad.creativeId, ad.deliveryId);
     }
 
     // An ad dragged to its end with the app's controls is not reported complete.
     void adEnded() {
-        if (inBreak && adPlaying) walk.done(adToken, !scrubbed);
+        if (!inBreak || !adPlaying) return;
+        shopAdEnded();
+        walk.done(adToken, !scrubbed);
     }
 
     void adFailed() {
-        if (inBreak && adPlaying) walk.done(adToken, false);
+        if (!inBreak || !adPlaying) return;
+        shopAdEnded();
+        walk.done(adToken, false);
     }
 
     private void trackQuartiles() {
@@ -522,6 +563,8 @@ final class AdPlanDriver {
     private void endBreak(boolean complete) {
         if (closed || !inBreak) return;
         walk = null;
+        shopToken++;
+        shopSpot = false;
         host.cancelIma();
         host.cancel(holdExpired);
         if (complete && ad != null) beacon(ad.tracking.get("complete"));
@@ -543,6 +586,135 @@ final class AdPlanDriver {
         }
         if (ready != null) ready.run();
         else if (resumePlay) host.play();
+    }
+
+    private boolean breakOn() { return inBreak || hostBreak; }
+
+    // Web: expired() checks the clock on every tick and seek; the plan stops and the content in a break comes back.
+    boolean checkExpired() {
+        if (expired) return true;
+        if (closed || plan.version != 2 || host.nowMs() < plan.expiresAtMs) return false;
+        expired = true;
+        if (inBreak) endBreak(false);
+        shopToken++;
+        if (hostBreak && shopSpot) host.setLinear(true, null, null);
+        shopSpot = false;
+        host.cancel(displayExpired);
+        displayRequest = null;
+        if (displayLive != null) host.display().clear();
+        displayLive = null;
+        planCues.clear();
+        host.setCues(planCues);
+        emit("plan_expired", null, null);
+        return true;
+    }
+
+    /**
+     * A renewal of the same view: the new plan's URLs and expiry, and everything already settled, attempted and shown,
+     * with the pacing it counts, carried over so nothing is replayed or counted twice (web: nativeViews).
+     */
+    void replace(AdPlan next) {
+        if (closed) return;
+        plan = next;
+        schedule = next.schedule(schedule);
+        if (hostBreaks != null) schedule.sceneWindows = next.windowsAround(hostBreaks);
+        expired = false;
+    }
+
+    /** The breaks the host will play, in content milliseconds: scene graphics keep the plan's clearance around them. */
+    void setBreaks(long[] atMs) {
+        if (closed || atMs == null) return;
+        List<Long> breaks = new ArrayList<>();
+        for (long at : atMs) if (at >= 0) breaks.add(at);
+        hostBreaks = breaks;
+        schedule.sceneWindows = plan.windowsAround(breaks);
+    }
+
+    void breakStarted(long atMs) {
+        if (closed) return;
+        hostBreak = true;
+        hostBreakAtMs = Math.max(0, atMs);
+        shopToken++;
+        shopSpot = false;
+        if (displayLive != null) host.display().setVisible(false);
+        // Graphics leave the screen; a product held from the content closes (a new break, as web setBreakActive).
+        host.setLinear(true, null, null);
+        emit("host_break_start", null, "at-" + hostBreakAtMs);
+    }
+
+    void hostAdStarted(String tagUrl, String adId, String creativeId) {
+        if (closed || !hostBreak || expired) return;
+        shopAdStarted("at-" + hostBreakAtMs, hostBreakAtMs == 0 ? "preroll" : "midroll", tagUrl, adId, creativeId);
+    }
+
+    void hostAdStarted(String tagUrl, String vastXml) {
+        String[] identity = AdPlan.vastIdentity(vastXml);
+        hostAdStarted(tagUrl, identity == null ? null : identity[0], identity == null ? null : identity[1]);
+    }
+
+    void hostAdEnded() {
+        if (!closed && hostBreak) shopAdEnded();
+    }
+
+    void breakEnded() {
+        if (closed || !hostBreak) return;
+        hostBreak = false;
+        shopToken++;
+        shopSpot = false;
+        host.setLinear(false, null, null);
+        emit("host_break_end", null, "at-" + hostBreakAtMs);
+    }
+
+    /**
+     * One ad of a break started, reader's or host's: with {@code commerce.break_url} the card of exactly this delivery
+     * is asked for (web/ads.mjs shopAdStarted). {@code cutParam} is the plan cut id, or {@code at-<ms>} for a host break.
+     */
+    private void shopAdStarted(String cutParam, String position, String tagUrl, String adId, String creativeId) {
+        long token = ++shopToken;
+        String tag = null;
+        java.util.regex.Matcher match = adId == null ? null : AdPlan.SHOP_AD.matcher(adId);
+        // The tag comes only from an iADServer request, as web reads it from the iadserver provider's tag URL.
+        String iad = tagUrl == null ? null : AdPlan.canonicalTag("iadserver", tagUrl);
+        if (iad != null) tag = AdPlan.query(iad, "tag");
+        boolean shop = plan.breakUrl != null && match != null && match.matches() && match.group(1).equals(position)
+                && tag != null && !tag.isEmpty() && creativeId != null && OverlayCue.validIdentity(creativeId);
+        if (!shop) {
+            // A spot without a shop changes nothing unless the one before it had one.
+            if (shopSpot) host.setLinear(true, null, null);
+            shopSpot = false;
+            return;
+        }
+        String delivery = match.group(2);
+        shopSpot = true;
+        host.setBreakCard(creativeId, delivery, null);
+        String url = plan.breakProductUrl(cutParam, tag, creativeId, delivery, locale);
+        emit("request", "break_product", cutParam);
+        host.background(() -> {
+            String body;
+            try {
+                body = host.fetch(url);
+            } catch (IOException e) {
+                body = null;
+            }
+            OverlayCue card = body == null || body.isEmpty() ? null : AdPlan.breakCue(body, creativeId, delivery);
+            boolean none = body != null && body.isEmpty();
+            host.foreground(() -> {
+                if (closed || token != shopToken || !breakOn()) return;
+                if (card == null) {
+                    emit(none ? "no_fill" : "error", "break_product", cutParam);
+                    return;
+                }
+                emit("fill", "break_product", cutParam);
+                host.setBreakCard(creativeId, delivery, card);
+            });
+        });
+    }
+
+    /** The ad ended (complete, skip or error): its card goes; a product the viewer opened stays (overlay hold). */
+    private void shopAdEnded() {
+        shopToken++;
+        if (breakOn() && shopSpot) host.setLinear(true, null, null);
+        shopSpot = false;
     }
 
     void close() {

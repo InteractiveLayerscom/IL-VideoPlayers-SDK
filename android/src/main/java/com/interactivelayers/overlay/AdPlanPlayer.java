@@ -34,10 +34,20 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     private final OverlayNetwork network = new OverlayNetwork();
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final AdPlanDriver driver;
+    private final String planOrigin, sessionId, locale;
+    private AdPlanDriver driver;
     private final List<MediaItem> content = new ArrayList<>();
     private int contentIndex;
     private boolean closed;
+    // load(): the plan is still on its way. start() waits for it, never longer than AdPlanLoader.LOAD_TIMEOUT_MS.
+    private AdPlanLoader loader;
+    private boolean loading, startCalled;
+    private Runnable pendingReady;
+    private final Runnable loadTimedOut = () -> loadFinished(null, "plan_error", "timeout");
+    private final Runnable renew = this::renew;
+    // Host-driven state reported before the plan arrived, applied when it does.
+    private long[] hostBreaks;
+    private Long hostBreakAt;
 
     /**
      * Null when the plan is unusable: the player then runs with no ads. Breaks use IMA when the app ships
@@ -49,14 +59,184 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         AdPlan plan = read(overlay, planJson, planOrigin, sessionId);
         if (plan == null) return null;
         AdPlanIma ima = defaultIma(overlay.playerView(), player);
-        return new AdPlanPlayer(overlay, player, plan, locale, ima, ima != null, null, events);
+        AdPlanPlayer out = new AdPlanPlayer(overlay, player, planOrigin, sessionId, locale, ima, ima != null, null, events);
+        out.use(plan);
+        return out;
     }
 
     /** {@code ima} is the app's own engine, or null for MP4 only. {@code display} shows the Overlay, or null for none. */
     public static AdPlanPlayer attach(OverlayController overlay, Player player, String planJson, String planOrigin,
                                       String sessionId, String locale, AdPlanIma ima, AdPlanDisplay display, Events events) {
         AdPlan plan = read(overlay, planJson, planOrigin, sessionId);
-        return plan == null ? null : new AdPlanPlayer(overlay, player, plan, locale, ima, false, display, events);
+        if (plan == null) return null;
+        AdPlanPlayer out = new AdPlanPlayer(overlay, player, planOrigin, sessionId, locale, ima, false, display, events);
+        out.use(plan);
+        return out;
+    }
+
+    /**
+     * Requests the plan from IL ({@code GET <origin>/il-player/app-plan}) with {@code app=android:<package name>},
+     * off the main thread. Never null: call {@link #start} as with {@code attach}; the content waits for the plan at
+     * most 5 s. 204, 404, a network failure or a timeout play the content without ads (said through {@code events}:
+     * {@code plan_unavailable}, {@code plan_not_found} with the {@code app=} value sent, {@code plan_error}). A version 2
+     * plan is renewed by itself 20 s before it expires. Call on the main thread.
+     */
+    public static AdPlanPlayer load(OverlayController overlay, Player player, String origin, String project, String asset,
+                                    String sessionId, String locale, Events events) {
+        AdPlanIma ima = defaultIma(overlay.playerView(), player);
+        return load(overlay, player, origin, project, asset, sessionId, locale, ima, ima != null, null, events);
+    }
+
+    /** {@link #load} with the app's own IMA engine (or null for MP4 only) and Overlay slot (or null). */
+    public static AdPlanPlayer load(OverlayController overlay, Player player, String origin, String project, String asset,
+                                    String sessionId, String locale, AdPlanIma ima, AdPlanDisplay display, Events events) {
+        return load(overlay, player, origin, project, asset, sessionId, locale, ima, false, display, events);
+    }
+
+    private static AdPlanPlayer load(OverlayController overlay, Player player, String origin, String project, String asset,
+                                     String sessionId, String locale, AdPlanIma ima, boolean ownsIma, AdPlanDisplay display,
+                                     Events events) {
+        Context context = overlay.playerView().getContext();
+        AdPlanLoader loader = new AdPlanLoader(AdPlanLoader.HTTPS, origin, project, asset, AdPlanLoader.appId(context.getPackageName()));
+        AdPlanPlayer out = new AdPlanPlayer(overlay, player, loader.origin, sessionId, locale, ima, ownsIma, display, events);
+        out.loader = loader;
+        out.loading = true;
+        out.main.postDelayed(out.loadTimedOut, AdPlanLoader.LOAD_TIMEOUT_MS);
+        out.requestPlan(null);
+        return out;
+    }
+
+    private void requestPlan(String renewGrant) {
+        background(() -> loader.fetch(renewGrant, new AdPlanLoader.Listener() {
+            @Override public void loaded(String json) { main.post(() -> answered(json, null, null, renewGrant != null)); }
+            @Override public void unavailable(String type, String detail) {
+                main.post(() -> answered(null, type, detail, renewGrant != null));
+            }
+        }));
+    }
+
+    private void answered(String json, String type, String detail, boolean renewal) {
+        if (closed) return;
+        if (renewal) {
+            // A failed renewal leaves the current plan to expire on its own (plan_expired).
+            if (json == null || !replacePlan(json)) event(type == null ? "plan_invalid" : type, null, detail);
+            return;
+        }
+        if (loading) loadFinished(json, type, detail);
+    }
+
+    private void loadFinished(String json, String type, String detail) {
+        if (!loading || closed) return;
+        loading = false;
+        main.removeCallbacks(loadTimedOut);
+        AdPlan plan = json == null ? null : read(overlay, json, planOrigin, sessionId);
+        if (plan != null) {
+            use(plan);
+        } else {
+            String reason = json != null ? "plan_invalid" : type;
+            if ("plan_not_found".equals(reason)) Log.w("AdPlanPlayer", "IL answered 404 for the plan: check that " + detail + " is registered in the console");
+            event(reason, null, detail);
+        }
+        if (!startCalled) return;
+        Runnable ready = pendingReady;
+        pendingReady = null;
+        if (driver != null) driver.start(ready);
+        else if (ready != null) ready.run();
+    }
+
+    private void use(AdPlan plan) {
+        current = plan;
+        driver = new AdPlanDriver(this, plan, locale);
+        overlay.useContentClock(driver::cueVisible);
+        if (hostBreaks != null) driver.setBreaks(hostBreaks);
+        if (hostBreakAt != null) driver.breakStarted(hostBreakAt);
+        scheduleRenewal(plan);
+    }
+
+    private void scheduleRenewal(AdPlan plan) {
+        main.removeCallbacks(renew);
+        long delay = AdPlanLoader.renewDelay(plan, System.currentTimeMillis());
+        if (loader != null && delay >= 0) main.postDelayed(renew, delay);
+    }
+
+    private AdPlan current;
+
+    private void renew() {
+        if (closed || loader == null || current == null) return;
+        requestPlan(current.grant == null ? "" : current.grant);
+    }
+
+    /**
+     * Swaps in a renewed plan of the same view (for example a version 2 plan before its {@code expires_at}): what
+     * was already shown, attempted and settled, the pacing counts and the commerce session carry over, so nothing is
+     * replayed or counted twice. False, and the current plan stays, when {@code planJson} is unusable.
+     */
+    public boolean replacePlan(String planJson) {
+        if (closed) return false;
+        AdPlan plan = read(overlay, planJson, planOrigin, sessionId);
+        if (plan == null) return false;
+        if (driver == null) {
+            if (loading) {
+                loadFinished(planJson, null, null);
+                return true;
+            }
+            use(plan);
+            if (startCalled) driver.start(takeReady());
+            return true;
+        }
+        current = plan;
+        driver.replace(plan);
+        scheduleRenewal(plan);
+        return true;
+    }
+
+    private Runnable takeReady() {
+        Runnable ready = pendingReady;
+        pendingReady = null;
+        return ready;
+    }
+
+    /**
+     * Host-driven mode: the content positions, in milliseconds, of the breaks the app will play itself. Scene
+     * graphics keep the plan's clearance around them.
+     */
+    public void setBreaks(long[] atMs) {
+        if (closed || atMs == null) return;
+        hostBreaks = atMs.clone();
+        if (driver != null) driver.setBreaks(hostBreaks);
+    }
+
+    /** Host-driven mode: the app's own break starts at this content position (0 for a pre-roll). */
+    public void breakStarted(long atMs) {
+        if (closed) return;
+        hostBreakAt = atMs;
+        if (driver != null) driver.breakStarted(atMs);
+    }
+
+    /**
+     * Host-driven mode: an ad of the break is on screen. {@code adTagUrl} is the iADServer ad tag the app requested;
+     * {@code adId} and {@code creativeId} are its VAST {@code Ad@id} and {@code Creative@id} (IMA's
+     * {@code Ad.getAdId()} and {@code Ad.getCreativeId()}).
+     */
+    public void adStarted(String adTagUrl, String adId, String creativeId) {
+        if (!closed && driver != null) driver.hostAdStarted(adTagUrl, adId, creativeId);
+    }
+
+    /** Host-driven mode: as {@link #adStarted(String, String, String)}, from the raw VAST the app's player received. */
+    public void adStarted(String adTagUrl, String vastXml) {
+        if (!closed && driver != null) driver.hostAdStarted(adTagUrl, vastXml);
+    }
+
+    /** Host-driven mode: the ad ended (complete, skip or error). Its Buy button goes; an open product stays. */
+    public void adEnded() {
+        if (!closed && driver != null) driver.hostAdEnded();
+    }
+
+    /** Host-driven mode: the app's break is over and IL's graphics may come back. */
+    public void breakEnded() {
+        if (closed) return;
+        hostBreakAt = null;
+        if (driver != null) driver.breakEnded();
     }
 
     private static AdPlan read(OverlayController overlay, String planJson, String planOrigin, String sessionId) {
@@ -82,39 +262,55 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         }
     }
 
-    private AdPlanPlayer(OverlayController overlay, Player player, AdPlan plan, String locale, AdPlanIma ima,
-                         boolean ownsIma, AdPlanDisplay display, Events events) {
+    private AdPlanPlayer(OverlayController overlay, Player player, String planOrigin, String sessionId, String locale,
+                         AdPlanIma ima, boolean ownsIma, AdPlanDisplay display, Events events) {
         this.overlay = overlay;
         this.player = player;
+        this.planOrigin = planOrigin;
+        this.sessionId = sessionId;
+        this.locale = locale;
         this.ima = ima;
         this.ownsIma = ownsIma;
         this.display = display;
         this.events = events;
-        driver = new AdPlanDriver(this, plan, locale);
-        overlay.useContentClock(driver::cueVisible);
         player.addListener(this);
     }
 
     /** Call before playing content. {@code ready} runs once the host may play it. */
-    public void start(Runnable ready) { driver.start(ready); }
+    public void start(Runnable ready) {
+        if (closed || startCalled) return;
+        startCalled = true;
+        if (driver != null) driver.start(ready);
+        else if (loading) pendingReady = ready;
+        else if (ready != null) ready.run();
+    }
 
     @Override public void onIsPlayingChanged(boolean isPlaying) {
-        if (isPlaying) driver.adPlaying();
+        if (isPlaying && driver != null) driver.adPlaying();
     }
 
     @Override public void onPlaybackStateChanged(int state) {
-        if (state == Player.STATE_ENDED) driver.adEnded();
+        if (state == Player.STATE_ENDED && driver != null) driver.adEnded();
     }
 
-    @Override public void onPlayerError(PlaybackException error) { driver.adFailed(); }
+    @Override public void onPlayerError(PlaybackException error) {
+        if (driver != null) driver.adFailed();
+    }
+
+    // A seek is one of the moments web checks a short-lived plan's expiry.
+    @Override public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, int reason) {
+        if (driver != null && reason == Player.DISCONTINUITY_REASON_SEEK) driver.checkExpired();
+    }
 
     @Override public void close() {
         if (closed) return;
-        driver.close();
+        if (driver != null) driver.close();
         closed = true;
+        loading = false;
+        pendingReady = null;
         main.removeCallbacksAndMessages(null);
         player.removeListener(this);
-        overlay.useContentClock(null);
+        if (driver != null) overlay.useContentClock(null);
         if (ownsIma) ima.close();
         workers.shutdownNow();
     }
@@ -191,6 +387,10 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     }
     @Override public void event(String type, String format, String id) {
         if (events != null) events.onAdEvent(type, format, id);
+    }
+    @Override public long nowMs() { return System.currentTimeMillis(); }
+    @Override public void setBreakCard(String creativeId, String deliveryId, OverlayCue card) {
+        overlay.setPlanBreakCard(creativeId, deliveryId, card);
     }
     @Override public AdPlanDisplay display() { return display; }
     @Override public boolean displayFits() {
