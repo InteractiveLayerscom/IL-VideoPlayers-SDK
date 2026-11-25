@@ -807,5 +807,48 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertFalse(FixtureNetwork.seen.contains { $0.contains("&renew=") })
         reader.stop()
     }
+    func testAHostDrivenReaderRefusesAPlanWithCuts() throws {
+        FixtureNetwork.reset([:])
+        let reader = try attach(NativeFixtures.data("host-plan"), overlay: overlay())
+        // Before any host call a plan with cuts may replace the host plan (nothing is host-driven yet).
+        reader.setBreaks([58])
+        XCTAssertFalse(reader.replacePlan(try NativeFixtures.data("app-plan-v1")))
+        XCTAssertEqual(events.map { "\($0.type) \($0.format ?? "")" }, ["break_refused plan_has_cuts"])
+        XCTAssertTrue(reader.schedule.plan.cuts.isEmpty, "the host plan stays")
+        // Another host plan is still accepted.
+        XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("host-plan")))
+        reader.stop()
+    }
+
+    func testAPlanWithCutsIsRefusedDuringAnOpenHostBreak() throws {
+        FixtureNetwork.reset([:])
+        let reader = try attach(NativeFixtures.data("host-plan"), overlay: overlay())
+        reader.breakStarted(at: 30)
+        XCTAssertFalse(reader.replacePlan(try NativeFixtures.data("app-plan-v1")))
+        XCTAssertEqual(events.filter { $0.type == "break_refused" && $0.format == "plan_has_cuts" }.count, 1)
+        XCTAssertTrue(reader.schedule.plan.cuts.isEmpty)
+        reader.breakEnded()
+        reader.stop()
+    }
+
+    func testAReaderThatWasNeverHostDrivenTakesAPlanWithCuts() throws {
+        let reader = try attach(NativeFixtures.data("host-plan"), overlay: overlay())
+        XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("app-plan-v1")))
+        XCTAssertFalse(events.contains { $0.type == "break_refused" })
+        reader.stop()
+    }
+
+    func testSetBreaksOnAPlanWithCutsIsRefusedOnce() throws {
+        var plan = try NativeFixtures.object("app-plan-v1")
+        var scenes = try XCTUnwrap(plan["scenes"] as? [String: Any])
+        scenes["pacing"] = ["min_seconds": 1.5, "cut_clearance_seconds": 10]
+        plan["scenes"] = scenes
+        let reader = try attach(NativeFixtures.data(plan), overlay: overlay())
+        let windows = reader.schedule.plan.windows.map(\.id)
+        reader.setBreaks([100])
+        XCTAssertEqual(events.map { "\($0.type) \($0.format ?? "")" }, ["break_refused plan_has_cuts"])
+        XCTAssertEqual(reader.schedule.plan.windows.map(\.id), windows, "no host clearance on a plan with cuts")
+        reader.stop()
+    }
 }
 #endif
