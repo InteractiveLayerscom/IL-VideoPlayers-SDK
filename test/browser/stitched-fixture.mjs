@@ -5,7 +5,9 @@
 // pre-roll 0–4, content 0–14 at 4–18, mid-roll 18–22, content 14–30 at 22–38. Content segments carry the PDT IL
 // writes (pdt_origin + content start) and the #EXT-X-ASSET marker MediaTailor keeps; ad segments sit between
 // discontinuities without PDT, wrapped in the DATERANGE and CUE-OUT / CUE-OUT-CONT / CUE-IN lines MediaTailor
-// writes when ad markers are on.
+// writes when ad markers are on. As in a real MediaTailor session, the playlist opens with a discontinuity before the
+// pre-roll, and master.m3u8 names its variant relative to itself in another directory (session/v.m3u8), as
+// MediaTailor's `../../../manifest/…/0.m3u8` does: a variant URI resolved against the wrong base names nothing.
 // - multi.m3u8: two renditions of one session whose ads differ in length (4.0 s and 4.2 s each), as when
 //   MediaTailor transcodes an ad per rendition.
 // - audio.m3u8: video without sound plus a separate audio rendition (EXT-X-MEDIA), both stitched.
@@ -53,7 +55,7 @@ function part(dir, { picture, filter, tone, seconds, length, pattern, name, mode
 }
 
 // A stitched media playlist from content segments and the ad pod's segments.
-function stitch(content, ad, tag = '') {
+function stitch(content, ad, tag = '', prefix = '') {
   const pdt = (seconds) => new Date(Date.parse(ORIGIN) + seconds * 1000).toISOString();
   const length = (segment) => Number.parseFloat(segment.extinf.slice(8));
   const podLength = ad.reduce((sum, segment) => sum + length(segment), 0).toFixed(3);
@@ -65,7 +67,7 @@ function stitch(content, ad, tag = '') {
     let elapsed = 0;
     ad.forEach((segment, i) => {
       if (i) out.push(`#EXT-X-CUE-OUT-CONT:ElapsedTime=${elapsed.toFixed(3)},Duration=${podLength}`);
-      out.push(segment.extinf, ...segment.tags, segment.uri);
+      out.push(segment.extinf, ...segment.tags, prefix + segment.uri);
       elapsed += length(segment);
     });
     out.push('#EXT-X-CUE-IN');
@@ -76,10 +78,11 @@ function stitch(content, ad, tag = '') {
     content.slice(from, to).forEach((segment, i) => {
       out.push('#EXT-X-PROGRAM-DATE-TIME:' + pdt(at));
       if (!i && marker) out.push(`#EXT-X-ASSET:IL_ASSET=asset-1,IL_CUE=${at},IL_BREAK=${marker},IL_POS=midroll`);
-      out.push(segment.extinf, ...segment.tags, segment.uri + tag);
+      out.push(segment.extinf, ...segment.tags, prefix + segment.uri + tag);
       at += length(segment);
     });
   };
+  out.push('#EXT-X-DISCONTINUITY');
   pod('pre', -4);
   out.push('#EXT-X-DISCONTINUITY');
   play(0, 7, null);
@@ -94,8 +97,8 @@ function stitch(content, ad, tag = '') {
 const CODECS = 'avc1.42e01e,mp4a.40.2';
 
 export function makeStitched(dir) {
-  if (existsSync(join(dir, 'fmp4.m3u8'))) return dir;
-  mkdirSync(dir, { recursive: true });
+  if (existsSync(join(dir, 'session', 'v.m3u8'))) return dir;
+  mkdirSync(join(dir, 'session'), { recursive: true });
   const content = part(dir, { picture: 'color=c=black', filter: BANDS,
     tone: 440, seconds: 30, length: 2, pattern: 'c-%02d.ts', name: 'content.m3u8' });
   const ad = part(dir, { picture: 'color=c=red', tone: 1000, seconds: 4, length: 2, pattern: 'a-%02d.ts', name: 'ad.m3u8' });
@@ -103,8 +106,9 @@ export function makeStitched(dir) {
   writeFileSync(join(dir, 'v.m3u8'), stitch(content, ad));
   // Each rendition has its own content segment URIs, as real renditions do (here the same files).
   writeFileSync(join(dir, 'v-long.m3u8'), stitch(content, longer, '?rendition=long'));
+  writeFileSync(join(dir, 'session', 'v.m3u8'), stitch(content, ad, '', '../'));
   writeFileSync(join(dir, 'master.m3u8'),
-    `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=160x90,CODECS="${CODECS}"\nv.m3u8\n`);
+    `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=160x90,CODECS="${CODECS}"\nsession/v.m3u8\n`);
   writeFileSync(join(dir, 'multi.m3u8'), '#EXTM3U\n#EXT-X-VERSION:3\n' +
     `#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=160x90,CODECS="${CODECS}"\nv.m3u8\n` +
     `#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=160x90,CODECS="${CODECS}"\nv-long.m3u8\n`);

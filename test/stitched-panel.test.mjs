@@ -12,7 +12,8 @@ globalThis.DOMParser = new JSDOM('').window.DOMParser;
 const ORIGIN = '2000-01-01T00:00:00.000Z';
 const pdt = (seconds) => new Date(Date.parse(ORIGIN) + seconds * 1000).toISOString();
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-const inAdTruth = (t) => (t >= 0 && t < 10) || (t >= 40 && t < 50);
+// An ad segment, or the 200 ms before one (see the test of that margin below).
+const inAdTruth = (t) => (t >= 0 && t < 10) || (t >= 39.8 && t < 50);
 
 function playlist() {
   const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:5', '#EXT-X-MEDIA-SEQUENCE:0', '#EXT-X-PLAYLIST-TYPE:VOD'];
@@ -84,14 +85,14 @@ const factories = {
 };
 
 for (const name of Object.keys(factories)) {
-  test(`${name} clock: inAd() is true on an ad segment, and only there`, async () => {
+  test(`${name} clock: inAd() is true on an ad segment (and just before it), and only there`, async () => {
     const { clock, set } = await factories[name]();
     for (const t of [2, 8, 12, 25, 39.9, 40, 45, 49.9, 50.1, 60, 79]) {
       set(t);
       assert.equal(clock.inAd(), inAdTruth(t), `at ${t}`);
     }
     // Near an ad the content time is withheld (a margin), but that is not an ad: the picture still is content.
-    set(39.8);
+    set(39.7);
     assert.equal(clock.time(), null, 'the margin withholds the time');
     assert.equal(clock.inAd(), false, 'and the picture is not an ad');
     for (const t of [NaN, undefined, -5, 500]) {
@@ -272,12 +273,12 @@ test('native clock: variants that disagree about an ad leave inAd() false (a mis
   clock.destroy?.();
 });
 
-// A player's position can trail the frame it presents (Video.js put the first ad frame 15–20 ms before the ad segment's
-// start in the browser tests): inAd() says yes one frame (50 ms, scaled by a rate above 1) before an ad, not earlier.
+// Video.js puts the first ad frame up to 70 ms before the ad segment's start (seen on a real MediaTailor stream):
+// inAd() says yes 200 ms (scaled by a rate above 1) before an ad, not earlier.
 for (const name of Object.keys(factories)) {
-  test(`${name} clock: inAd() is true in the last 50 ms before an ad`, async () => {
+  test(`${name} clock: inAd() is true in the last 200 ms before an ad`, async () => {
     const { clock, set } = await factories[name]();
-    for (const [t, expected] of [[39.9, false], [39.94, false], [39.96, true], [50.02, false], [10.02, false]]) {
+    for (const [t, expected] of [[39.7, false], [39.79, false], [39.81, true], [39.93, true], [50.02, false], [10.02, false]]) {
       set(t);
       assert.equal(clock.inAd(), expected, `at ${t}`);
     }
