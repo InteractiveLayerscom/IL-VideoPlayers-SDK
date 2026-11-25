@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application' version '8.11.0'
+}
+
+android {
+    namespace 'com.interactivelayers.example'
+    compileSdk 35
+    defaultConfig {
+        // The console must have android:com.interactivelayers.example registered for the project.
+        applicationId 'com.interactivelayers.example'
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    sourceSets.debug.res.srcDir(layout.buildDirectory.dir('generated/devTrust/res'))
+}
+
+// Debug builds only: trust one local development certificate for one host (-PilDevCa=/path/cert.pem
+// -PilDevHost=10.0.2.2), so the example can reach a fixture server on the Mac over HTTPS. Without the properties the
+// debug build trusts exactly what a release build trusts. The SDK's HTTPS-only rule never changes.
+def devTrust = tasks.register('generateDevTrust') {
+    def ca = providers.gradleProperty('ilDevCa').orNull
+    def host = providers.gradleProperty('ilDevHost').getOrElse('10.0.2.2')
+    def out = layout.buildDirectory.dir('generated/devTrust/res').get().asFile
+    inputs.property('ca', ca ?: '')
+    inputs.property('host', host)
+    outputs.dir(out)
+    doLast {
+        delete(out)
+        new File(out, 'xml').mkdirs()
+        def config = '<network-security-config/>'
+        if (ca) {
+            new File(out, 'raw').mkdirs()
+            new File(out, 'raw/il_dev_ca.pem').bytes = new File(ca).bytes
+            config = """<network-security-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">${host}</domain>
+        <trust-anchors><certificates src="@raw/il_dev_ca" /></trust-anchors>
+    </domain-config>
+</network-security-config>"""
+        }
+        new File(out, 'xml/il_dev_network.xml').text = config
+    }
+}
+tasks.matching { it.name == 'generateDebugResValues' || it.name == 'mergeDebugResources' }.configureEach { dependsOn(devTrust) }
+
+dependencies {
+    implementation 'com.interactivelayers:media3-overlays:0.1.0'
+    implementation 'androidx.media3:media3-exoplayer:1.6.0'
+    implementation 'androidx.media3:media3-ui:1.6.0'
+}
