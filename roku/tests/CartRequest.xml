@@ -9,7 +9,12 @@
         sub answer()
             if m.top.control <> "run" then return
             request = m.top.request
-            if request.kind = "plan" then return
+            if request.kind = "plan"
+                ' Tests read the last URL sent here: the component publishes no URL that carries a grant.
+                if not m.global.hasField("lastPlanUrl") then m.global.addField("lastPlanUrl", "string", false)
+                m.global.lastPlanUrl = request.url
+                return
+            end if
             m.top.result = { sessionId: request.sessionId, revision: request.revision, status: 200,
                 body: formatJson({ continueUrl: "https://ads.example/cart",
                     qrImageUrl: request.url + "/qr/" + request.variantId + ".png" }) }
