@@ -47,7 +47,6 @@ import org.junit.runner.RunWith;
  */
 @RunWith(AndroidJUnit4.class)
 public final class NativePlanPlaybackTest {
-    private static final String DELIVERY = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
     private final MockWebServer server = new MockWebServer();
     private final SSLSocketFactory originalTrust = HttpsURLConnection.getDefaultSSLSocketFactory();
     private final List<String> requests = Collections.synchronizedList(new ArrayList<>());
@@ -152,10 +151,17 @@ public final class NativePlanPlaybackTest {
         }
     }
 
-    private void load() {
+    private String delivery() throws Exception { return new JSONObject(fixture("break-product-card.json")).getString("id"); }
+
+    private String planParam(String key) throws Exception {
+        return AdPlan.query(new JSONObject(fixture("host-plan.json")).getJSONObject("commerce").getString("url"), key);
+    }
+
+    private void load() throws Exception {
+        String project = planParam("project"), asset = planParam("asset");
         activity.onActivity(a -> {
-            plan = AdPlanPlayer.load(overlays, player, origin, "proj_8e4cb338d66e4ec6bc6b99fd21f651f6",
-                    "asset-40edc822d6f24974a9af51695a88184b", null, "es", (type, format, id) -> events.add(type + " " + id));
+            plan = AdPlanPlayer.load(overlays, player, origin, project,
+                    asset, null, "es", (type, format, id) -> events.add(type + " " + id));
             plan.start(() -> ready.set(true));
         });
     }
@@ -191,7 +197,7 @@ public final class NativePlanPlaybackTest {
         await(ready::get);
         String sent = planRequest();
         String app = InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName();
-        assertEquals("/il-player/app-plan?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b"
+        assertEquals("/il-player/app-plan?project=" + planParam("project") + "&asset=" + planParam("asset")
                 + "&app=android%3A" + app, sent);
         assertTrue(events.isEmpty());
     }
@@ -228,10 +234,11 @@ public final class NativePlanPlaybackTest {
         load();
         await(ready::get);
         String tag = new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url");
+        String shopAdId = "il-shop-midroll-" + delivery();
         activity.onActivity(a -> {
             plan.setBreaks(new long[] {58000});
             plan.breakStarted(58000);
-            plan.adStarted(tag, "il-shop-midroll-" + DELIVERY, "cr1");
+            plan.adStarted(tag, shopAdId, "cr1");
         });
         await(() -> !buttons("Comprar").isEmpty());
         String card;
@@ -239,7 +246,7 @@ public final class NativePlanPlaybackTest {
             card = requests.stream().filter(path -> path.startsWith("/il-player/break-product")).findFirst().orElse(null);
         }
         assertNotNull(card);
-        assertTrue(card, card.endsWith("&host=1&cut=at-58000&tag=T_mid&creative=cr1&delivery=" + DELIVERY + "&locale=es"));
+        assertTrue(card, card.endsWith("&host=1&cut=at-58000&tag=T_mid&creative=cr1&delivery=" + delivery() + "&locale=es"));
         boolean tv = (view.getResources().getConfiguration().uiMode & Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION
                 || view.getContext().getPackageManager().hasSystemFeature("android.software.leanback");
         if (tv) {

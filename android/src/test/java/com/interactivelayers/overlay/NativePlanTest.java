@@ -19,10 +19,31 @@ public final class NativePlanTest {
     // The fixtures come from IL's test environment on http://localhost:8000; the reader only takes HTTPS, so the
     // tests serve the same bodies from an HTTPS origin. Nothing else in them changes.
     private static final String ORIGIN = "https://console.example";
-    private static final String DELIVERY = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+    // Ids come from the fixtures themselves, so a fixture refresh needs no test edit.
+    private static final String DELIVERY = fromFixture("break-product-card.json", "id");
     private static final String SUPER = "<VAST><Ad><InLine><Impression>https://t.example/g</Impression><Creatives><Creative><NonLinearAds>"
             + "<NonLinear width=\"600\" height=\"90\"><StaticResource creativeType=\"image/png\">https://c.example/s.png</StaticResource></NonLinear>"
             + "</NonLinearAds></Creative></Creatives></InLine></Ad></VAST>";
+
+    private static String fromFixture(String name, String key) {
+        try {
+            return new JSONObject(fixture(name)).getString(key);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private static String session(String name) throws Exception {
+        return new JSONObject(fixture(name)).getJSONObject("commerce").getString("session");
+    }
+
+    private static String commerceParam(String key) {
+        try {
+            return AdPlan.query(new JSONObject(fixture("app-plan-v1.json")).getJSONObject("commerce").getString("url"), key);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+    }
 
     static String fixture(String name) throws IOException {
         try (InputStream in = NativePlanTest.class.getClassLoader().getResourceAsStream("native/" + name)) {
@@ -67,7 +88,7 @@ public final class NativePlanTest {
         JSONObject commerce = new JSONObject(json).getJSONObject("commerce");
         assertEquals(commerce.getString("break_url"), plan.breakUrl);
         assertEquals(grantOf(commerce.getString("url")), plan.grant);
-        assertEquals("178311e8ffa4791646c0d0f6c728aa73", plan.sid);
+        assertEquals(session("app-plan-v1.json"), plan.sid);
         assertEquals("preroll", plan.cuts.get(0).position);
     }
 
@@ -98,7 +119,7 @@ public final class NativePlanTest {
         assertNotNull(plan);
         assertTrue(plan.cuts.isEmpty());
         assertTrue(plan.breakUrl.contains("&host=1"));
-        assertEquals("ed4c7d84521a3bc4faba519c687146f0", plan.sid);
+        assertEquals(session("host-plan.json"), plan.sid);
     }
 
     @Test public void theBreakRouteNeedsThePlansSessionAndOrigin() throws Exception {
@@ -393,8 +414,8 @@ public final class NativePlanTest {
 
     // --- A. Loading the plan ---------------------------------------------------------------------------------------
 
-    private static final String PROJECT = "proj_8e4cb338d66e4ec6bc6b99fd21f651f6";
-    private static final String ASSET = "asset-40edc822d6f24974a9af51695a88184b";
+    private static final String PROJECT = commerceParam("project");
+    private static final String ASSET = commerceParam("asset");
 
     private static final class Answer implements AdPlanLoader.Listener {
         String json, type;
@@ -721,5 +742,88 @@ public final class NativePlanTest {
         Answer slow = new Answer();
         loader((url, body) -> { throw new SocketTimeoutException(); }).fetch(read(fixture("app-plan-v2.json")).grant, slow);
         assertEquals("timeout", slow.type);
+    }
+
+    // --- Renewal retries at expires_at - 20 s, - 12 s and - 5 s ----------------------------------------------------
+
+    private AdPlan renewedV2(long nowMs) throws Exception {
+        return AdPlan.read(new JSONObject(fixture("app-plan-v2.json")).put("expires_at", "2026-11-02T16:04:00Z").toString(), nowMs, ORIGIN, null);
+    }
+
+    @Test public void aFirstFailedRenewalIsRetriedAndASuccessEndsIt() throws Exception {
+        AdPlanDriver driver = started(fixture("app-plan-v2.json"));
+        // The pre-roll ends first, so its 8 s hold timer is not mistaken for the retry.
+        host.ima.started(0);
+        host.ima.completed();
+        host.now = NOW + 100000;
+        host.fire(100000);
+        assertEquals(1, host.renewals.size());
+        assertTrue(driver.renewalPending());
+        driver.renewFailed("http_204", "app=x status=204");
+        assertFalse("never two in flight", driver.renewalPending());
+        host.now = NOW + 108000;
+        host.fire(8000);
+        assertEquals(2, host.renewals.size());
+        AdPlan next = renewedV2(host.now);
+        driver.renewed(next);
+        assertFalse(host.events.contains("plan_renew_failed"));
+        assertEquals(1, host.events.stream().filter("plan_renewed"::equals).count());
+        assertTrue("the cycle restarts for the new plan", host.timers.containsValue(next.expiresAtMs - 20000 - host.now));
+        host.now = NOW + 130000;
+        driver.tick();
+        assertFalse(host.events.contains("plan_expired"));
+    }
+
+    @Test public void threeFailedRenewalsSayItOnceAndThePlanExpires() throws Exception {
+        AdPlanDriver driver = started(fixture("app-plan-v2.json"));
+        host.ima.started(0);
+        host.ima.completed();
+        host.now = NOW + 100000;
+        host.fire(100000);
+        driver.renewFailed("timeout", "a");
+        host.now = NOW + 108000;
+        host.fire(8000);
+        driver.renewFailed("network", "b");
+        host.now = NOW + 115000;
+        host.fire(7000);
+        assertEquals(3, host.renewals.size());
+        driver.renewFailed("http_204", "c");
+        assertEquals(java.util.Collections.singletonList("plan_renew_failed|http_204|c"),
+                host.eventLog.stream().filter(e -> e.startsWith("plan_renew_failed")).collect(java.util.stream.Collectors.toList()));
+        assertEquals("no fourth attempt", 3, host.renewals.size());
+        assertFalse(host.events.contains("plan_expired"));
+        host.now = NOW + 120000;
+        driver.tick();
+        assertTrue(host.events.contains("plan_expired"));
+    }
+
+    @Test public void aFailureAtExpirySendsNothingMoreAndALateSuccessIsIgnored() throws Exception {
+        AdPlanDriver driver = started(fixture("app-plan-v2.json"));
+        host.now = NOW + 100000;
+        host.fire(100000);
+        // The answer to the first attempt arrives only at expires_at: no further request, the failure said once.
+        host.now = NOW + 120000;
+        driver.renewFailed("timeout", "late");
+        assertEquals(1, host.renewals.size());
+        assertFalse(host.timers.containsValue(0L));
+        assertEquals(1, host.events.stream().filter("plan_renew_failed"::equals).count());
+
+        AdPlanDriverTest.FakeHost other = new AdPlanDriverTest.FakeHost();
+        AdPlanDriver second = new AdPlanDriver(other, read(fixture("app-plan-v2.json")), "es");
+        second.start(null);
+        other.now = NOW + 100000;
+        other.fire(100000);
+        // A slot that was missed but is still before expiry goes out at once.
+        other.now = NOW + 113000;
+        second.renewFailed("network", "x");
+        assertTrue(other.timers.containsValue(0L));
+        other.fire(0);
+        assertEquals(2, other.renewals.size());
+        // A success that arrives after expiry is not adopted.
+        other.now = NOW + 120000;
+        second.tick();
+        assertFalse(second.renewalPending());
+        second.renewed(renewedV2(NOW + 110000));
+        assertFalse(other.events.contains("plan_renewed"));
     }
 }

@@ -146,11 +146,15 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     private void answered(String json, int status, String reason, boolean renewal) {
         if (closed) return;
         if (renewal) {
-            // A failed renewal leaves the current plan in use until it expires on its own (plan_expired).
-            if (json != null && replacePlan(json)) {
-                event("plan_renewed", Integer.toString(current.version), null);
+            // A late answer (after expiry or close) is dropped; the driver decides retries and plan_renew_failed.
+            if (driver == null) return;
+            AdPlan plan = json == null ? null : read(overlay, json, planOrigin, sessionId);
+            if (plan != null) {
+                if (!driver.renewalPending()) return;
+                current = plan;
+                driver.renewed(plan);
             } else {
-                event("plan_renew_failed", json != null ? AdPlanLoader.refusal(json) : reason, "app=" + app + " status=" + status);
+                driver.renewFailed(json != null ? AdPlanLoader.refusal(json) : reason, "app=" + app + " status=" + status);
             }
             return;
         }

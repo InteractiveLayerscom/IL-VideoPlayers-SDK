@@ -122,8 +122,47 @@ final class AdPlanDriver {
     private long hostBreakElapsedMs;
     private final Runnable renewTask = this::renewNow;
 
+    // Renewal attempts at expires_at - 20 s, - 12 s and - 5 s; the next one only once the previous answer is in.
+    private static final long[] RENEW_AHEAD_MS = {20000, 12000, 5000};
+    private int renewAttempt;
+    private boolean renewInFlight, renewFailedSaid;
+
     private void renewNow() {
-        if (!closed) host.renew(plan.grant);
+        if (closed || expired || plan.version != 2) return;
+        renewInFlight = true;
+        host.renew(plan.grant);
+    }
+
+    /** Whether an answer to a renewal is still wanted: one is in flight, and the plan is neither closed nor expired. */
+    boolean renewalPending() {
+        return renewInFlight && !closed && !expired && host.nowMs() < plan.expiresAtMs;
+    }
+
+    /** A renewal answered with a usable plan: it replaces this one and the cycle restarts for it. */
+    void renewed(AdPlan next) {
+        if (!renewalPending()) return;
+        renewInFlight = false;
+        replace(next);
+        emit("plan_renewed", Integer.toString(next.version), null);
+    }
+
+    /**
+     * A renewal attempt failed: the next slot, at once if it was missed but is still before expiry. After the last
+     * attempt, or once expires_at is reached, plan_renew_failed once with the last reason; the plan runs to expiry.
+     */
+    void renewFailed(String reason, String detail) {
+        if (closed || !renewInFlight) return;
+        renewInFlight = false;
+        long now = host.nowMs();
+        renewAttempt++;
+        if (renewAttempt < RENEW_AHEAD_MS.length && now < plan.expiresAtMs && !expired) {
+            host.later(renewTask, Math.max(0, plan.expiresAtMs - RENEW_AHEAD_MS[renewAttempt] - now));
+            return;
+        }
+        if (!renewFailedSaid) {
+            renewFailedSaid = true;
+            emit("plan_renew_failed", reason, detail);
+        }
     }
 
     AdPlanDriver(Host host, AdPlan plan, String locale) {
@@ -643,6 +682,9 @@ final class AdPlanDriver {
     // About 20 s before expires_at (the server allows 120 s, so about 100 s after the plan was issued).
     private void scheduleRenewal() {
         host.cancel(renewTask);
+        renewAttempt = 0;
+        renewInFlight = false;
+        renewFailedSaid = false;
         long delay = AdPlanLoader.renewDelay(plan, host.nowMs());
         if (delay >= 0) host.later(renewTask, delay);
     }
