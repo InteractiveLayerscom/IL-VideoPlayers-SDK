@@ -51,7 +51,7 @@ end function
 
 ' No grant, renew value or plan URL may leave the component through its events or fields.
 sub noGrant(s as Object, label as String)
-    published = formatJson(s.player.event) + s.player.planUrl
+    published = formatJson(s.log.events) + s.player.planUrl
     for each name in ["app-plan-v1.json", "app-plan-v2.json", "app-plan-renewed.json", "host-plan.json"]
         grant = adPlanQuery(fixture(name).commerce.url, "grant")
         if instr(1, published, grant) > 0 or instr(1, published, grant.encodeUriComponent()) > 0
@@ -80,8 +80,10 @@ function stage(key = "view-1" as String) as Object
     overlay.commerceAutoFocus = false
     overlay.commerceEnabled = true
     player.callFunc("setClock", m.now)
+    log = scene.createChild("EventLog")
+    log.callFunc("watch", player)
     m.key = key
-    return { video: video, overlay: overlay, player: player }
+    return { video: video, overlay: overlay, player: player, log: log }
 end function
 
 sub at(s as Object, seconds as Double)
@@ -463,7 +465,14 @@ sub testNoLeak()
     e.player.callFunc("loadPlan", e.overlay, e.video, "view-1", m.origin, m.project, m.asset, "es")
     e.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: 404 })
     noGrant(e, "no grant in plan_unavailable")
-    check(e.player.event.reason = 404 and e.player.event.app = "roku:dev", "plan_unavailable carries the status as reason and the raw app id")
+    check(e.player.event.reason = "http_404" and e.player.event.status = 404 and e.player.event.app = "roku:dev", "plan_unavailable carries the status as reason and the raw app id")
+    for each answer in [{ status: 204, reason: "http_204" }, { status: 0, reason: "network" }, { status: 0, timedOut: true, reason: "timeout" }]
+        n = stage()
+        n.player.callFunc("loadPlan", n.overlay, n.video, "view-1", m.origin, m.project, m.asset, "es")
+        n.player.callFunc("receivePlan", { sessionId: "view-1", revision: 1, status: answer.status, timedOut: answer.timedOut })
+        check(n.player.event.reason = answer.reason and n.player.event.status = answer.status, "plan_unavailable says " + answer.reason)
+    end for
+    check(s.log.events.count() = 6 and s.log.events[1].format = "break_product", "every event of the load flow was collected")
     l = stage()
     l.player.callFunc("loadPlan", l.overlay, l.video, "view-1", "http://localhost:8000", m.project, m.asset, "es")
     check(l.player.event.reason = "request" and l.player.event.app = "roku:dev", "a request refused locally says so with the app id")

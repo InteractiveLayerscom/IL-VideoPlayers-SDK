@@ -105,7 +105,12 @@ sub receivePlan(result as Dynamic)
         end if
     end if
     ' 404 is the same answer for an unknown project, video or app: the app id sent is what to check first.
-    m.top.event = { type: "plan_unavailable", status: result.status, app: load.app, reason: result.status }
+    reason = "http_" + result.status.toStr()
+    if result.status = 0
+        reason = "network"
+        if result.timedOut = true then reason = "timeout"
+    end if
+    m.top.event = { type: "plan_unavailable", status: result.status, app: load.app, reason: reason }
     m.load = invalid
     m.top.contentReady = true
 end sub
