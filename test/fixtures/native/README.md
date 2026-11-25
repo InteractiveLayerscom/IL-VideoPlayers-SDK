@@ -95,6 +95,13 @@ No `Origin` is needed. Requests must not carry credentials.
 
 **Per-break API with graphics.**
 
+- `commerce.break_url` is optional in a host plan. It is present only when the playback was created with
+  `graphics: true`, walks the project's ordered steps (`routing: "steps"`), has no AdRouter placement, the product
+  feature is on, and the project saved at least one iADServer step with a `tag`. Without it, offer no Buy during
+  breaks.
+- For a server-insertion project, the app plan is the stitched plan (`cuts: []` plus `timeline`), the same body as
+  `/il-player/ad-plan`. Native readers refuse a plan with `timeline` for now and play without IL ads.
+
 - Only a playback created with `"graphics": true` gets stable-tag answers. Read `GET …/plan` once per playback, again
   when it expires, and again for `version: 2`.
 - Its `commerce.session` is the `sid` already inside every stable `ad_tag_url`. Don't add or replace `sid`.
