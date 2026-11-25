@@ -381,6 +381,7 @@ final class NativePlayerTests: XCTestCase {
         FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v2"))])
         let loaded = await load(overlay: overlay())
         let reader = try XCTUnwrap(loaded)
+        reader.renewalSleep = { _ in }   // the retries at −12 s and −5 s run at once
         FixtureNetwork.reset([consoleHost: .init(status: 500, body: "")])
         reader.advance(nowMs: 60500)
         try await waitFor({ self.events.contains { $0.type == "plan_renew_failed" } }, "failed renewal")
@@ -567,17 +568,25 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertEqual(events.map { "\($0.type) \($0.format ?? "")" }, ["plan_unavailable stitched", "plan_unavailable invalid"])
     }
 
-    func testTheRenewalIsScheduled20SecondsBeforeExpiryAndAFailureKeepsThePlan() async throws {
+    func testThreeFailedRenewalsAt20_12And5SecondsSayFailedOnceThenThePlanExpires() async throws {
         FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v1"))])
         let loaded = await load(overlay: overlay())
         let reader = try XCTUnwrap(loaded)
         var waits: [TimeInterval] = []
-        reader.renewalSleep = { waits.append($0) }
+        // The injected sleep moves the clock by what it was asked to wait.
+        reader.renewalSleep = { [weak self] seconds in
+            waits.append(seconds)
+            self?.clock.addTimeInterval(seconds)
+        }
         FixtureNetwork.reset([consoleHost: .init(status: 500, body: "")])
         XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("app-plan-v2")))   // expires at now + 120 s
-        try await waitFor({ self.events.contains { $0.type == "plan_renew_failed" } }, "the renewal")
-        XCTAssertEqual(waits.count, 1)
-        XCTAssertEqual(waits[0], 100, accuracy: 0.001)
+        try await waitFor({ self.events.contains { $0.type == "plan_renew_failed" } }, "the last attempt")
+        XCTAssertEqual(waits.count, 3)
+        XCTAssertEqual(waits[0], 100, accuracy: 0.001)   // expires_at − 20 s
+        XCTAssertEqual(waits[1], 8, accuracy: 0.001)     // − 12 s
+        XCTAssertEqual(waits[2], 7, accuracy: 0.001)     // − 5 s
+        XCTAssertEqual(FixtureNetwork.seen.filter { $0.contains("&renew=") }.count, 3)
+        XCTAssertEqual(events.filter { $0.type == "plan_renew_failed" }.count, 1)
         XCTAssertEqual(events.last?.format, "http_500")
         // The current approval stays until it expires, then stops.
         XCTAssertTrue(reader.schedule.plan.native)
@@ -585,7 +594,29 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertFalse(events.contains { $0.type == "plan_expired" })
         clock = NativeFixtures.frozenNow.addingTimeInterval(120)
         reader.advance(nowMs: 60600)
-        XCTAssertTrue(events.contains { $0.type == "plan_expired" })
+        XCTAssertEqual(events.filter { $0.type == "plan_expired" }.count, 1)
+        reader.stop()
+    }
+
+    func testARenewalThatFailsOnceSucceedsOnTheSecondAttempt() async throws {
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v1"))])
+        let loaded = await load(overlay: overlay())
+        let reader = try XCTUnwrap(loaded)
+        let renewed = try NativeFixtures.text("app-plan-renewed")
+        var calls = 0
+        reader.renewalSleep = { [weak self] seconds in
+            calls += 1
+            self?.clock.addTimeInterval(seconds)
+            // The first attempt gets a 204; the second gets the renewed plan.
+            FixtureNetwork.reset([self?.consoleHost ?? "": calls == 1 ? .init(status: 204, body: "") : .init(status: 200, body: renewed)])
+        }
+        XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("app-plan-v2")))
+        try await waitFor({ self.events.contains { $0.type == "plan_renewed" } }, "the renewal")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(calls, 2, "stops at the first success")
+        XCTAssertEqual(events.filter { $0.type == "plan_renewed" }.count, 1)
+        XCTAssertFalse(events.contains { $0.type == "plan_renew_failed" })
+        XCTAssertFalse(reader.schedule.plan.native)
         reader.stop()
     }
 

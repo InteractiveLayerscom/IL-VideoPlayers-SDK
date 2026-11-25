@@ -238,25 +238,40 @@ public final class ILAdPlanPlayer {
 
     /// A version 2 plan from `load` is asked again about 20 s before it expires, with `renew` so IL keeps the
     /// same commerce session. A renewal that fails lets the plan expire: playback goes on without ads.
+    /// Seconds before `expires_at` at which a version 2 plan is asked again: a single 204, timeout or network blip
+    /// must not end the view, so up to three attempts, stopping at the first success.
+    static let renewalOffsets: [TimeInterval] = [20, 12, 5]
+
     private func scheduleRenewal() {
         renewal?.cancel()
         guard plan.native, let base = loadURL else { return }
-        let wait = plan.expiresAt.timeIntervalSince(now()) - 20
+        let expiresAt = plan.expiresAt
         let target = plan.renewGrant.map { URL(string: AdPlan.setQuery(base.absoluteString, "renew", $0)) ?? base } ?? base
         renewal = Task { [weak self] in
-            guard let sleep = self?.renewalSleep else { return }
-            await sleep(max(0, wait))
-            guard !Task.isCancelled, let self, !self.closed else { return }
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.protocolClasses = self.session.configuration.protocolClasses
-            let answer = await Self.fetchPlan(target, configuration: configuration)
-            guard !self.closed else { return }
-            if case .success(let (status, data)) = answer, status == 200, self.replacePlan(data) {
-                self.emit("plan_renewed", nil, self.plan.native ? "2" : "1")
-                return
+            var reason = "network"
+            for offset in Self.renewalOffsets {
+                guard let self, !Task.isCancelled, !self.closed else { return }
+                let sleep = self.renewalSleep
+                let wait = expiresAt.timeIntervalSince(self.now()) - offset
+                await sleep(max(0, wait))
+                guard !Task.isCancelled, !self.closed else { return }
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = self.session.configuration.protocolClasses
+                let answer = await Self.fetchPlan(target, configuration: configuration)
+                guard !Task.isCancelled, !self.closed else { return }
+                if case .success(let (status, data)) = answer, status == 200 {
+                    if self.replacePlan(data) {
+                        self.emit("plan_renewed", nil, self.plan.native ? "2" : "1")
+                        return
+                    }
+                    reason = "invalid"
+                } else {
+                    reason = Self.failureReason(answer)
+                }
             }
-            // Never the URL: it carries the grant.
-            self.emit("plan_renew_failed", Self.failureReason(answer), "")
+            // Once, after the last attempt; never the URL: it carries the grant.
+            guard let self, !Task.isCancelled, !self.closed else { return }
+            self.emit("plan_renew_failed", reason, "")
         }
     }
 
