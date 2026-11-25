@@ -1,8 +1,8 @@
 {
-  "asset_id": "asset-a0a377d6c8214c1498674e53c97721d2",
+  "asset_id": "asset-40edc822d6f24974a9af51695a88184b",
   "asset_version": "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc",
   "commerce": {
-    "break_url": "http://localhost:8000/il-player/break-product?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2&grant=1793639100.659398e2456448b6e13feb04d2836f14.8d8b2d2ca8a5362e.e928a8d6c065f8db1f39d36a5cde48839ca24e691f8aa779dcfaec162cb64fd4",
+    "break_url": "http://localhost:8000/il-player/break-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.5990561fda4bd75154be4c4465d8d2b6.600687f5743c48db.1d1476bc7f0629c2825066e9b0978734d8d2b8077f5264d3a2464e4d61693cc4",
     "kind": "scene_product",
     "lead_ms": 5000,
     "pacing": {
@@ -12,7 +12,7 @@
       "max_seconds": null,
       "min_seconds": 1.5
     },
-    "url": "http://localhost:8000/il-player/scene-product?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2&grant=1793639100.659398e2456448b6e13feb04d2836f14.8d8b2d2ca8a5362e.e928a8d6c065f8db1f39d36a5cde48839ca24e691f8aa779dcfaec162cb64fd4",
+    "url": "http://localhost:8000/il-player/scene-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.5990561fda4bd75154be4c4465d8d2b6.600687f5743c48db.1d1476bc7f0629c2825066e9b0978734d8d2b8077f5264d3a2464e4d61693cc4",
     "windows": [
       {
         "end_ms": 9000,
@@ -45,7 +45,7 @@
         "start_ms": 235000
       }
     ],
-    "session": "659398e2456448b6e13feb04d2836f14"
+    "session": "5990561fda4bd75154be4c4465d8d2b6"
   },
   "cuts": [
     {
@@ -56,7 +56,7 @@
       "requests": [
         {
           "provider": "iadserver",
-          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_pre&output=vast&vid=asset-a0a377d6c8214c1498674e53c97721d2&cue_seconds=0"
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_pre&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=0"
         }
       ]
     },
@@ -105,7 +105,7 @@
   "native_gam": {
     "contract": "native-gam-plan-v1"
   },
-  "revision": "733cae14f28e9dd23084733d0ec943c7c07dd4aec101a4497968a00b55d8036e",
+  "revision": "222cb4d789cee1f859bfa1a64f493a9574864c8c9ff90381da9717f1753ac309",
   "scenes": {
     "formats": [
       "super",
