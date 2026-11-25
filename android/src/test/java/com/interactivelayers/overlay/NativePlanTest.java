@@ -747,7 +747,7 @@ public final class NativePlanTest {
     // --- Renewal retries at expires_at - 20 s, - 12 s and - 5 s ----------------------------------------------------
 
     private AdPlan renewedV2(long nowMs) throws Exception {
-        return AdPlan.read(new JSONObject(fixture("app-plan-v2.json")).put("expires_at", "2026-11-02T16:04:00Z").toString(), nowMs, ORIGIN, null);
+        return AdPlan.read(new JSONObject(fixture("app-plan-v2.json")).put("expires_at", "2026-11-02T16:03:40Z").toString(), nowMs, ORIGIN, null);
     }
 
     @Test public void aFirstFailedRenewalIsRetriedAndASuccessEndsIt() throws Exception {

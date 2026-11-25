@@ -80,7 +80,7 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
      * {@code format} is the reason ({@code http_<status>} such as {@code http_204} or {@code http_404}, {@code timeout},
      * {@code network}, {@code app_id}, {@code request}, {@code stitched} or {@code invalid}) and {@code id} is
      * {@code "app=<value sent> status=<HTTP status, 0 without one>"}. A version 2 plan is renewed by itself 20 s before
-     * it expires ({@code plan_renewed} with the version, or {@code plan_renew_failed} with the same reasons); it stops
+     * it expires, retried at - 12 s and - 5 s ({@code plan_renewed} with the version, or one {@code plan_renew_failed} with the last reason); it stops
      * at expiry with {@code plan_expired}. After {@link #close()} a late answer attaches nothing. Call on the main thread.
      */
     public static AdPlanPlayer load(OverlayController overlay, Player player, String origin, String project, String asset,
