@@ -418,6 +418,16 @@ export async function attachAvPlayAppAds({ origin, project, asset, app, timeoutM
       // Diagnostics must never break playback.
     }
   }
+  // A server-insertion project answers the stitched plan (`timeline`); this reader has no content clock for AVPlay
+  // and plays without IL ads, as IL's contract says native readers do for now.
+  if (plan?.timeline != null) {
+    try {
+      options.onEvent?.({ type: 'plan_unavailable', app: appValue, status: 200, reason: 'stitched' });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+    return null;
+  }
   if (!plan) return null;
   const ads = attachAvPlayAds({ ...options, plan, planOrigin: new URL(origin).origin });
   const stop = keepPlanRenewed(plan, (next) => ads.replacePlan(next), params);

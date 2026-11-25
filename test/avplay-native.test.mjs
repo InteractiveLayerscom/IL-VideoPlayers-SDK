@@ -176,3 +176,13 @@ test('attachAvPlayAppAds attaches a loaded plan and renews a version 2 plan with
   assert.equal(urls[1].searchParams.get('renew'), new URL(v2.commerce.url).searchParams.get('grant'));
   assert.ok(sdk.cuts.length > 0);
 });
+
+test('attachAvPlayAppAds plays without IL ads when the app route answers a stitched plan', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  const stitched = { ...fixture('app-plan-v1.json'), cuts: [], timeline: { kind: 'stitched', pdt_origin: '2026-11-02T16:00:00Z' } };
+  const events = [];
+  const result = await attachAvPlayAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: 'tizen:AbCdEfGhIj.ILDemo', avplay: device(),
+    session: {}, getDisplayRect: () => ({}), onEvent: (e) => events.push(e), fetchImpl: async () => new Response(JSON.stringify(stitched)) });
+  assert.equal(result, null);
+  assert.deepEqual(events, [{ type: 'plan_unavailable', app: 'tizen:AbCdEfGhIj.ILDemo', status: 200, reason: 'stitched' }]);
+});
