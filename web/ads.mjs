@@ -496,10 +496,15 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
     }
   };
   // Up to three tries before expiry (RENEW_ATTEMPTS_MS ahead of it); one plan_renew_failed only after the last.
-  const arm = (current, attempt = 0) => {
+  // The next attempt is armed only after the previous answer arrived, so never two are in flight.
+  const arm = (current, attempt = 0, lastReason = 'refused') => {
     clearTimeout(timer);
     if (stopped || current?.version !== 2) return;
     const own = attempt === 0 ? ++generation : generation;
+    const expires = Date.parse(current.expires_at);
+    // A retry whose slot is at or past expiry is not sent: the renewal has failed. A missed slot still before
+    // expiry goes out at once.
+    if (attempt > 0 && Date.now() >= expires) return say({ type: 'plan_renew_failed', reason: lastReason });
     timer = setTimeout(async () => {
       let grant = null;
       try {
@@ -514,13 +519,15 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
           say(event);
         } });
       if (stopped || own !== generation) return;
+      // An answer that arrives after the plan expired is ignored.
+      if (Date.now() >= expires) return say({ type: 'plan_renew_failed', reason: next ? 'late' : reason });
       if (next && replace(next)) {
         say({ type: 'plan_renewed', version: next.version });
         return arm(next);
       }
-      if (attempt + 1 < RENEW_ATTEMPTS_MS.length) return arm(current, attempt + 1);
+      if (attempt + 1 < RENEW_ATTEMPTS_MS.length) return arm(current, attempt + 1, reason);
       say({ type: 'plan_renew_failed', reason });
-    }, Math.max(0, Date.parse(current.expires_at) - RENEW_ATTEMPTS_MS[attempt] - Date.now()));
+    }, Math.max(0, expires - RENEW_ATTEMPTS_MS[attempt] - Date.now()));
     timer.unref?.();
   };
   arm(plan);

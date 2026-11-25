@@ -3,7 +3,7 @@ import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { attachAds, attachAppAds, graphicTag, loadAppPlan, loadPlan, planUrl, vastIdentity } from '../web/ads.mjs';
+import { attachAds, attachAppAds, graphicTag, keepPlanRenewed, loadAppPlan, loadPlan, planUrl, vastIdentity } from '../web/ads.mjs';
 
 globalThis.DOMParser = new JSDOM('').window.DOMParser;
 
@@ -660,4 +660,65 @@ test('setBreakAd with another at keeps the open break: same cut, no second break
   // The guard is the one of the open break: it fires once, 120 s after breakStarted.
   t.mock.timers.tick(120000);
   assert.deepEqual(r.events.filter((e) => e.type === 'break_error'), [{ type: 'break_error', cut: 'at-58000' }]);
+});
+
+// A renewal source whose answers the test releases one by one (204 each).
+function heldRenewals(v2) {
+  const asked = [];
+  const pending = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname !== '/il-player/app-plan') return new Response(null, { status: 204 });
+    if (!url.searchParams.get('renew')) return new Response(JSON.stringify(v2));
+    asked.push(url);
+    return new Promise((resolve) => pending.push(() => resolve(new Response(null, { status: 204 }))));
+  };
+  return { asked, fetchImpl, release: () => pending.shift()() };
+}
+
+test('renewal: never two in flight; a missed slot still before expiry goes out at once', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = fixture('app-plan-v2.json');
+  const held = heldRenewals(v2);
+  const events = [];
+  const video = Object.assign(new EventTarget(), { currentTime: 0, paused: true });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video,
+    fetchImpl: held.fetchImpl, timeoutMs: 1e9, onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  t.mock.timers.tick(100000);
+  await flush();
+  assert.equal(held.asked.length, 1);
+  // The -12 s and -5 s slots pass while the first answer is pending: nothing else goes out.
+  t.mock.timers.tick(19000);
+  await flush();
+  assert.equal(held.asked.length, 1);
+  // The 204 arrives 1 s before expiry: the next attempt goes out at once.
+  held.release();
+  await flush();
+  t.mock.timers.tick(0);
+  await flush();
+  assert.equal(held.asked.length, 2);
+  assert.ok(!events.some((e) => e.type === 'plan_renew_failed'));
+});
+
+test('renewal: an answer at expiry sends no further request; one plan_renew_failed with the last reason', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = fixture('app-plan-v2.json');
+  const held = heldRenewals(v2);
+  const events = [];
+  const replaced = [];
+  // keepPlanRenewed on its own (attachAppAds would already have stopped it at expiry with plan_expired).
+  keepPlanRenewed(v2, (next) => replaced.push(next) > 0, { origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP,
+    fetchImpl: held.fetchImpl, timeoutMs: 1e9, onEvent: (e) => events.push(e) });
+  t.mock.timers.tick(100000);
+  await flush();
+  t.mock.timers.tick(20000);
+  held.release();
+  await flush();
+  t.mock.timers.tick(10000);
+  await flush();
+  assert.equal(held.asked.length, 1);
+  assert.deepEqual(replaced, []);
+  assert.deepEqual(events.filter((e) => e.type === 'plan_renew_failed'), [{ type: 'plan_renew_failed', reason: 'http_204' }]);
 });
