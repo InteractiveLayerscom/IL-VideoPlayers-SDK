@@ -24,6 +24,8 @@ gradle assembleDebug -PilDevCa=/ruta/ca.pem -PilDevHost=10.0.2.2
 
 Registrá `android:com.interactivelayers.example` como app del proyecto en la Consola, o `load` va a recibir 404.
 
+Para la build de release minificada (R8, sin IMA ni Google Mobile Ads) firmada con la clave de debug y con la misma confianza local: `gradle assembleQa -PilDevCa=/ruta/ca.pem` (APK en `build/outputs/apk/qa/`). No es para distribuir.
+
 ## Correr
 
 ```sh

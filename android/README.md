@@ -207,6 +207,7 @@ Cada lector guarda su propio consentimiento e identidad de app: dos reproductore
 - Pruebas unitarias en la JVM, con dobles del reproductor, de la red y del reloj, y con las respuestas de IL de `test/fixtures/native`.
 - Pruebas instrumentadas en un emulador de teléfono con Android 15 (API 35) y en un emulador de Android TV 14 (API 34), con ExoPlayer real y un servidor HTTPS local dentro del emulador.
 - La app de ejemplo en los dos modos y en ambos emuladores, contra fixtures servidos desde la Mac. En el modo de cortes de la app, el anuncio está simulado.
+- Una build de release de la app de ejemplo, minificada con R8 y sin IMA ni Google Mobile Ads, corrió en los dos modos en el emulador de teléfono.
 - No se probó con anuncios reales de Google Ad Manager, IMA ni iADServer en esta ronda.
 - Nada corrió en un dispositivo físico.
 - Fire TV no se probó: se trata como Android TV por inferencia.
