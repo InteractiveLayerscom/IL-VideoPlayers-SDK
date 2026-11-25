@@ -180,7 +180,7 @@ plan.adEnded();                                  // completo, salto o error
 plan.breakEnded();                               // vuelve el contenido
 ```
 
-Las ventanas de un plan de host vienen separadas de los cortes que IL pondría, no de los tuyos. Por eso el SDK aplica `scenes.pacing.cut_clearance_seconds` alrededor de cada posición que informás con `setBreaks` o `breakStarted`. Si no informás nada, no hay distancia a ningún corte. Una posición negativa no inicia nada y emite `break_refused` (`format` = `position`).
+Las ventanas de un plan de host vienen separadas de los cortes que IL pondría, no de los tuyos. Por eso el SDK aplica `scenes.pacing.cut_clearance_seconds` alrededor de cada posición que informás con `setBreaks` o `breakStarted`. Si no informás nada, no hay distancia a ningún corte. Una posición negativa no inicia nada y emite `break_refused` (`format` = `position`). Los avisos de corte son para un plan de host (`cuts: []`): con un plan que trae sus propios cortes, `breakStarted` se rechaza con `break_refused` (`format` = `plan_has_cuts`), para no mezclar dos formas de manejar los cortes. Un plan versión 2 vence a su hora aunque el contenido esté en pausa o haya un corte de la app: se quitan las gráficas y el botón Comprar y llega `plan_expired`.
 
 Con un plan de host el SDK no pide ni reproduce ningún anuncio de video. Durante el corte informado no dibuja nada de IL salvo el botón Comprar, descarta las respuestas de gráficas que lleguen tarde y no cambia el pacing ni las impresiones. Para Comprar pide la ficha con `cut=at-<ms>` (`at-0` en el pre-roll) y el `tag` de la `adTagUrl` de iADServer. La app no necesita IMA ni Google Mobile Ads para este modo.
 

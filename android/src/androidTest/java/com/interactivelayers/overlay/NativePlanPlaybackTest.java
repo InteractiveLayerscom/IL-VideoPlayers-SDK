@@ -154,8 +154,8 @@ public final class NativePlanPlaybackTest {
 
     private void load() {
         activity.onActivity(a -> {
-            plan = AdPlanPlayer.load(overlays, player, origin, "proj_f76ed12b1f1a409589564fbbeade5c21",
-                    "asset-a0a377d6c8214c1498674e53c97721d2", null, "es", (type, format, id) -> events.add(type + " " + id));
+            plan = AdPlanPlayer.load(overlays, player, origin, "proj_8e4cb338d66e4ec6bc6b99fd21f651f6",
+                    "asset-40edc822d6f24974a9af51695a88184b", null, "es", (type, format, id) -> events.add(type + " " + id));
             plan.start(() -> ready.set(true));
         });
     }
@@ -191,7 +191,7 @@ public final class NativePlanPlaybackTest {
         await(ready::get);
         String sent = planRequest();
         String app = InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName();
-        assertEquals("/il-player/app-plan?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2"
+        assertEquals("/il-player/app-plan?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b"
                 + "&app=android%3A" + app, sent);
         assertTrue(events.isEmpty());
     }
@@ -255,5 +255,16 @@ public final class NativePlanPlaybackTest {
             plan.breakEnded();
         });
         assertFalse("no video ad of IL's own", requests.stream().anyMatch(path -> path.contains("gampad")));
+    }
+
+    @Test public void closingWhileThePlanIsOnItsWayAttachesNothing() throws Exception {
+        planDelayMs = 1500;
+        load();
+        activity.onActivity(a -> plan.close());
+        Thread.sleep(planDelayMs + 2500);
+        activity.onActivity(a -> assertFalse("no reader started after close", ready.get()));
+        assertTrue(events.toString(), events.isEmpty());
+        // close() may even stop the request before it leaves; at most the one plan request was sent.
+        assertTrue(requests.stream().filter(path -> path.startsWith("/il-player/")).count() <= 1);
     }
 }

@@ -667,6 +667,11 @@ final class AdPlanDriver {
             emit("break_refused", "position", Long.toString(atMs));
             return;
         }
+        // Host calls go with a host plan (cuts: []): two break drivers on one view are not mixed.
+        if (!plan.cuts.isEmpty()) {
+            emit("break_refused", "plan_has_cuts", Long.toString(atMs));
+            return;
+        }
         // The host plan's windows are not cleared around the app's breaks: the reported position gets the clearance.
         if (hostBreaks == null || !hostBreaks.contains(atMs)) {
             List<Long> breaks = hostBreaks == null ? new ArrayList<>() : new ArrayList<>(hostBreaks);

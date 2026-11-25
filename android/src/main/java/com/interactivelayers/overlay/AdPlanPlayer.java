@@ -76,9 +76,12 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     /**
      * Requests the plan from IL ({@code GET <origin>/il-player/app-plan}) with {@code app=android:<package name>},
      * off the main thread. Never null: call {@link #start} as with {@code attach}; the content waits for the plan at
-     * most 5 s. 204, 404, a network failure or a timeout play the content without ads (said through {@code events}:
-     * {@code plan_unavailable}, {@code plan_not_found} with the {@code app=} value sent, {@code plan_error}). A version 2
-     * plan is renewed by itself 20 s before it expires. Call on the main thread.
+     * most 5 s. Without a plan the content plays without ads and {@code events} gets one {@code plan_unavailable}:
+     * {@code format} is the reason ({@code http_<status>} such as {@code http_204} or {@code http_404}, {@code timeout},
+     * {@code network}, {@code app_id}, {@code request}, {@code stitched} or {@code invalid}) and {@code id} is
+     * {@code "app=<value sent> status=<HTTP status, 0 without one>"}. A version 2 plan is renewed by itself 20 s before
+     * it expires ({@code plan_renewed} with the version, or {@code plan_renew_failed} with the same reasons); it stops
+     * at expiry with {@code plan_expired}. After {@link #close()} a late answer attaches nothing. Call on the main thread.
      */
     public static AdPlanPlayer load(OverlayController overlay, Player player, String origin, String project, String asset,
                                     String sessionId, String locale, Events events) {

@@ -67,7 +67,7 @@ public final class NativePlanTest {
         JSONObject commerce = new JSONObject(json).getJSONObject("commerce");
         assertEquals(commerce.getString("break_url"), plan.breakUrl);
         assertEquals(grantOf(commerce.getString("url")), plan.grant);
-        assertEquals("31fd74b20d30ef0688bb8b51c2e156fc", plan.sid);
+        assertEquals("178311e8ffa4791646c0d0f6c728aa73", plan.sid);
         assertEquals("preroll", plan.cuts.get(0).position);
     }
 
@@ -98,7 +98,7 @@ public final class NativePlanTest {
         assertNotNull(plan);
         assertTrue(plan.cuts.isEmpty());
         assertTrue(plan.breakUrl.contains("&host=1"));
-        assertEquals("a1443784d8c5306265cc64d6ab475db2", plan.sid);
+        assertEquals("ed4c7d84521a3bc4faba519c687146f0", plan.sid);
     }
 
     @Test public void theBreakRouteNeedsThePlansSessionAndOrigin() throws Exception {
@@ -393,8 +393,8 @@ public final class NativePlanTest {
 
     // --- A. Loading the plan ---------------------------------------------------------------------------------------
 
-    private static final String PROJECT = "proj_f76ed12b1f1a409589564fbbeade5c21";
-    private static final String ASSET = "asset-a0a377d6c8214c1498674e53c97721d2";
+    private static final String PROJECT = "proj_8e4cb338d66e4ec6bc6b99fd21f651f6";
+    private static final String ASSET = "asset-40edc822d6f24974a9af51695a88184b";
 
     private static final class Answer implements AdPlanLoader.Listener {
         String json, type;
@@ -688,5 +688,38 @@ public final class NativePlanTest {
             AdPlan.appId = null;
             AdPlan.appName = null;
         }
+    }
+
+    @Test public void expiryIsNoticedWhilePausedAndDuringAHostBreak() throws Exception {
+        JSONObject v2 = new JSONObject(fixture("host-plan.json")).put("version", 2).put("expires_at", "2026-11-02T16:02:00Z")
+                .put("native_gam", new JSONObject().put("contract", "native-gam-plan-v1"));
+        String breakUrl = v2.getJSONObject("commerce").getString("break_url");
+        host.replies.put(breakUrl, fixture("break-product-card.json"));
+        AdPlanDriver driver = started(v2.toString());
+        host.playing = false;
+        driver.breakStarted(58000);
+        String tag = new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url");
+        assertTrue("the fixture's tag carries the backend correlator", tag.contains("&correlator="));
+        driver.hostAdStarted(tag, "il-shop-midroll-" + DELIVERY, "cr1");
+        assertTrue(host.fetched.get(host.fetched.size() - 1).contains("&tag=T_mid&"));
+        assertNotNull(host.card);
+        host.now = NOW + 120000;
+        // The pulse runs on its own timer, whether or not anything plays.
+        host.fire(250);
+        assertTrue(host.events.contains("plan_expired"));
+        assertNull("the Buy card goes", host.creative);
+        assertTrue(host.cues.isEmpty());
+    }
+
+    @Test public void hostCallsOnAPlanWithCutsAreRefused() throws Exception {
+        AdPlanDriver driver = started(fixture("app-plan-v1.json"));
+        driver.breakStarted(58000);
+        assertTrue(host.eventLog.contains("break_refused|plan_has_cuts|58000"));
+    }
+
+    @Test public void aRenewalThatTimesOutSaysTimeout() throws Exception {
+        Answer slow = new Answer();
+        loader((url, body) -> { throw new SocketTimeoutException(); }).fetch(read(fixture("app-plan-v2.json")).grant, slow);
+        assertEquals("timeout", slow.type);
     }
 }
