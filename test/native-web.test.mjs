@@ -261,6 +261,8 @@ test('a host plan requests no video ad; a reported ad gets its break card with c
   const r = rig({ plan: fixture('host-plan.json') });
   assert.deepEqual(r.ads.cuts, []);
   assert.ok(!r.ads.vmap().includes('AdBreak'));
+  // The fixture's per-break tag carries the backend's correlator; the tag is read from it as given.
+  assert.ok(new URL(STABLE.ad_tag_url).searchParams.has('correlator'));
   r.ads.breakStarted(58);
   assert.deepEqual(r.linear.at(-1), [true, undefined]);
   r.ads.setBreakAd({ tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });

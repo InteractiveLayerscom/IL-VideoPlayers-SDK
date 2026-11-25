@@ -18,6 +18,8 @@
 //   GET /il-player/app-plan?...   app-plan-v1.json (app-plan-v2.json with ?v=2 or --v2; renew=... -> app-plan-renewed.json)
 //   GET /il-player/scene-product  scene-product-card.json      GET /il-player/break-product  break-product-card.json
 //   GET /<file>                   static files from --static <dir> (a test video)
+//   /break answers the fixture's ad_tag_url with fresh digits in its `correlator` on every call (the backend generates
+//   one per request; the app fetches the URL exactly as given). Everything else in the answer is the fixture's.
 //   Every request line is logged to stdout (it is the evidence the example apps use), with `grant` and `renew`
 //   values replaced by `REDACTED`.
 //   Served copies are adjusted, the files stay byte-identical: `expires_at` becomes now + 15 min (v1 app plan, host
@@ -147,6 +149,10 @@ function fixtureBackend(dir) {
     },
     async break({ cue_seconds }) {
       const answer = await load(cue_seconds === 58 ? 'break-request-stable.json' : 'break-request-gam.json');
+      // The backend puts a fresh correlator in every ad_tag_url; repeated runs get fresh digits, nothing else changes.
+      if (typeof answer.ad_tag_url === 'string') {
+        answer.ad_tag_url = answer.ad_tag_url.replace(/([?&]correlator=)\d+/, (_, key) => key + String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, '0'));
+      }
       return { ...answer, opportunity_id: `opp-fixture-${Math.round(cue_seconds * 1000)}` };
     },
     // The fixtures have no second step: the walk ends there, as when steps_left is 0.

@@ -42,6 +42,14 @@ test('fixtures mode answers the playback, both breaks and the app routes, and lo
     assert.equal(stable.body.provider, 'iadserver');
     assert.equal(new URL(stable.body.ad_tag_url).searchParams.get('tag'), 'T_mid');
     assert.equal(stable.body.opportunity_id, 'opp-fixture-58000');
+    // A fresh correlator per call; the rest of the tag is the fixture's.
+    const tagOf = (href) => { const u = new URL(href); const c = u.searchParams.get('correlator'); u.searchParams.delete('correlator'); return [u.href, c]; };
+    const again = await r.call('POST', '/break', { playback_id: playback.body.playback_id, cue_seconds: 58 });
+    const [fixtureTag, fixtureCorrelator] = tagOf(file('break-request-stable.json').ad_tag_url);
+    assert.equal(tagOf(stable.body.ad_tag_url)[0], fixtureTag);
+    assert.match(tagOf(stable.body.ad_tag_url)[1], /^\d+$/);
+    assert.notEqual(tagOf(stable.body.ad_tag_url)[1], fixtureCorrelator);
+    assert.notEqual(tagOf(again.body.ad_tag_url)[1], tagOf(stable.body.ad_tag_url)[1]);
     const gam = await r.call('POST', '/break', { playback_id: playback.body.playback_id, cue_seconds: 178 });
     assert.equal(gam.body.provider, 'gam');
     const next = await r.call('POST', '/break/next', { playback_id: playback.body.playback_id, opportunity_id: stable.body.opportunity_id, after_step: 0 });
