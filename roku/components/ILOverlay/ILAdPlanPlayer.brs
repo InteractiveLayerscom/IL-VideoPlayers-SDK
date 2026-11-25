@@ -173,6 +173,11 @@ function replacePlan(plan as Dynamic) as Boolean
     if m.plan = invalid then return false
     read = adPlanRead(plan, planNow(), m.origin, m.hostSid, m.consent)
     if read = invalid then return false
+    ' Two break drivers never mix: a host-driven view keeps its host plan rather than adopt one with cuts.
+    if read.cuts.count() > 0 and (m.hostDriven = true or m.hostBreak = true)
+        m.top.event = { type: "break_refused", reason: "plan_has_cuts" }
+        return false
+    end if
     if m.hostBreaks <> invalid then adPlanSetBreaks(read, m.hostBreaks)
     m.plan = read
     ' What the old plan derived goes; per-view state (shown, attempted, settled, products, measure) stays.
@@ -231,6 +236,7 @@ function adoptPlan(overlay as Object, video as Object, sessionId as String, host
     m.consent = consent
     m.hostBreaks = invalid
     m.hostBreak = false
+    m.hostDriven = false
     m.breakCard = invalid
     m.breakToken = 0
     m.overlay = overlay
@@ -668,6 +674,8 @@ end sub
 ' Positions in content milliseconds. Scene windows keep the plan's clearance around them.
 sub setBreaks(positionsMs as Dynamic)
     if m.plan = invalid or type(positionsMs) <> "roArray" then return
+    if refusedForCuts() then return
+    m.hostDriven = true
     seconds = []
     for each at in positionsMs
         if adPlanIsNumber(at)
@@ -678,9 +686,17 @@ sub setBreaks(positionsMs as Dynamic)
     adPlanSetBreaks(m.plan, seconds)
 end sub
 
+' A plan with its own cuts is played by the reader through RAF: host-reported breaks would make a second driver.
+function refusedForCuts() as Boolean
+    if m.plan.cuts.count() = 0 then return false
+    m.top.event = { type: "break_refused", reason: "plan_has_cuts" }
+    return true
+end function
+
 ' While the app's break is on, IL draws nothing but Buy, and pending graphic answers are discarded.
 sub breakStarted(atMs as Dynamic)
     if m.plan = invalid or m.inBreak then return
+    if refusedForCuts() then return
     ' The server takes only digits: a negative, NaN or infinite position is refused once, with no call.
     finite = false
     if adPlanIsNumber(atMs)
@@ -691,6 +707,7 @@ sub breakStarted(atMs as Dynamic)
         return
     end if
     if planExpired() then return
+    m.hostDriven = true
     ms& = int(atMs + 0.5)
     position = "midroll"
     if ms& = 0 then position = "preroll"

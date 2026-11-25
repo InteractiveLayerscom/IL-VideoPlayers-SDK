@@ -31,6 +31,7 @@ sub main()
     testRenewRetries()
     testUnreadable()
     testRenewTooLate()
+    testDriversDontMix()
     if m.failures = 0 then print "ROKU_NATIVE_OK " + m.checks.toStr()
 end sub
 
@@ -655,4 +656,33 @@ sub testRenewTooLate()
     m2.player.callFunc("setClock", m.now + 117)
     m2.player.callFunc("receivePlan", { sessionId: "view-1", revision: 2, status: 0 })
     check(m2.player.findNode("ilPlanRenew").control = "start" and m2.player.findNode("ilPlanRenew").duration < 0.2 and countType(m2, "plan_renew_failed") = 0, "a missed slot before expiry goes out at once")
+end sub
+
+sub testDriversDontMix()
+    v1 = fixture("app-plan-v1.json")
+    s = stage(v1.commerce.session)
+    s.player.callFunc("attachPlan", s.overlay, s.video, v1.commerce.session, v1, m.origin, "es")
+    s.player.callFunc("startPlan")
+    s.player.callFunc("finishBreak", "break_end")
+    s.player.callFunc("breakStarted", 58000)
+    check(s.player.event.type = "break_refused" and s.player.event.reason = "plan_has_cuts" and not s.overlay.linearBreak, "breakStarted on a plan with cuts is refused")
+    s.player.callFunc("setBreaks", [58000])
+    check(s.player.event.type = "break_refused" and s.player.event.reason = "plan_has_cuts", "setBreaks on a plan with cuts is refused")
+    s.player.callFunc("stopPlan")
+
+    h = hostStage(fixture("host-plan.json"))
+    h.player.callFunc("setBreaks", [58000])
+    check(not h.player.callFunc("replacePlan", fixture("app-plan-v1.json")) and h.player.event.reason = "plan_has_cuts", "a host-driven view refuses a replacement with cuts")
+    h.player.callFunc("breakStarted", 58000)
+    check(h.player.event.type = "break_start" and h.player.event.cut = "at-58000", "the host plan stays in place")
+    h.player.callFunc("stopPlan")
+
+    o = hostStage(fixture("host-plan.json"))
+    o.player.callFunc("breakStarted", 178000)
+    check(not o.player.callFunc("replacePlan", fixture("app-plan-v1.json")) and o.player.event.reason = "plan_has_cuts" and o.overlay.linearBreak, "an open host break refuses a replacement with cuts")
+    o.player.callFunc("stopPlan")
+
+    q = hostStage(fixture("host-plan.json"))
+    check(q.player.callFunc("replacePlan", fixture("app-plan-v1.json")), "before any host call a replacement with cuts is still taken")
+    q.player.callFunc("stopPlan")
 end sub
