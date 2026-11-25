@@ -137,7 +137,49 @@ La página que aloja el reproductor debe servirse por https: IMA pide sus propio
 
 Llamá a `attachAds` antes del gesto de reproducción del espectador, para que `start()` pueda inicializar IMA dentro de ese gesto. Si IMA llega cuando el video ya pasó su primer segundo, se salta el preroll (los midrolls se mantienen); si `ima3.js` no cargó 8 segundos después de `start()`, el módulo renuncia a IMA en esa reproducción (`break_error`) y el contenido sigue. Un corte que no termina en 120 segundos se trata como error y el contenido se reanuda.
 
-Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`. Mientras tu reproductor de anuncios pasa un corte, llamá a `ads.setBreakActive(true)` (y `false` al terminar): el overlay se oculta y no empieza ninguna solicitud de gráficos, igual que durante un corte de IMA.
+Sin `linear: 'ima'` no se carga nada de IMA y `start()` no hace nada. Si programás tus propios cortes, `ads.setBreaks([segundos])` le dice al módulo dónde están: desde ese momento esas posiciones reemplazan a `plan.cuts` para `cut_clearance_seconds`. Mientras tu reproductor de anuncios pasa un corte, llamá a `ads.setBreakActive(true)` (y `false` al terminar): el overlay se oculta y no empieza ninguna solicitud de gráficos, igual que durante un corte de IMA. Para que además aparezca **Comprar** durante tus anuncios usá los avisos de [Cortes que reproduce tu app](#cortes-que-reproduce-tu-app-api-por-corte).
+
+### Cortes que reproduce tu app (API por corte)
+
+Si tu backend pide cada corte a la API por corte de IL (`POST /v1/vod/playbacks` con `"graphics": true`, `GET …/plan`, `POST …/opportunities/{id}/request`) y tu propio reproductor de anuncios lo pasa, el plan de esa reproducción es un *plan de host*: `cuts: []`. Con él el módulo no pide ni reproduce ningún anuncio de video; sólo dibuja los gráficos de escena y el botón **Comprar**. Para eso tu app le avisa lo que pasa:
+
+```js
+const ads = attachAds({ session, video, stage, plan: hostPlan, planOrigin: 'https://console.example' });
+ads.setBreaks([0, 58, 178]);                // dónde van a ir tus cortes (despeje cut_clearance_seconds)
+// Empieza el corte en el segundo 58 del contenido:
+ads.breakStarted(58);
+// Empieza cada anuncio del corte: el tag que pediste y lo que IMA expone del anuncio...
+ads.setBreakAd({ tagUrl: answer.ad_tag_url, adId: ad.getAdId(), creativeId: ad.getCreativeId() });
+// ...o el VAST que tu reproductor descargó (sin IMA): ads.setBreakAd({ tagUrl: answer.ad_tag_url, vastXml });
+ads.clearBreakAd();                          // terminó, se saltó o falló ese anuncio
+ads.breakEnded();                            // vuelve el contenido
+```
+
+- `breakStarted(at)` (segundos de contenido; `0` para el preroll): mientras dura no se dibuja nada de IL sobre el corte salvo **Comprar**, no empieza ninguna solicitud de gráficos ni de producto de escena, la sesión pasa a modo anuncio (`setLinearAd(true)`) y un producto que el espectador tenía abierto de antes se cierra, igual que en los cortes del propio módulo. El pacing y las reglas de impresión no cambian.
+- `setBreakAd({ at?, tagUrl, adId, creativeId })` o `setBreakAd({ at?, tagUrl, vastXml })`: si el `Ad@id` del VAST es `il-shop-<preroll|midroll>-<43 caracteres>` (la posición tiene que coincidir: `preroll` sólo en el segundo 0), el `tagUrl` es de `https://ads.iadserver.com/gampad/ads` y trae `tag`, y el plan tiene `commerce.break_url`, el módulo pide la tarjeta a IL con `cut=at-<ms>` (milisegundos enteros del corte, `at-58000`; `at-0` para el preroll), `tag`, `creative`, `delivery` y `locale`, y dibuja **Comprar** mientras dura ese anuncio. Un anuncio sin ese `Ad@id` (por ejemplo de GAM) no consulta nada. La impresión del anuncio es la del propio VAST; el módulo sólo envía `commerce.viewUrl` al abrir la tarjeta. Con `at` y sin `breakStarted` previo, el corte empieza ahí.
+- `clearBreakAd()` quita la tarjeta del anuncio que terminó. `breakEnded()` termina el corte; el panel que el espectador abrió queda hasta que lo cierre (reanudar el contenido es de tu app).
+- **Obligación de la app**: el módulo no puede saber que hay un anuncio en pantalla si la app no lo avisa. Sin `breakStarted`, los gráficos de escena salen por tiempo de contenido aunque tu reproductor esté pasando un anuncio, y nunca aparece **Comprar** en los cortes. Avisá siempre el comienzo y el final de cada corte y de cada anuncio.
+- `commerce.url` y `break_url` deben estar en el origen del plan: pasá `planOrigin` (el origen de la consola de IL) cuando el plan lo obtuvo tu backend. El `sid` de los tags estables de iADServer ya es `commerce.session`; no lo cambies ni pases `sessionId`.
+
+`examples/api-relay.mjs` es un backend de ejemplo para esta API (la clave vive sólo en su entorno) y `examples/tizen/` lo usa desde una app de Samsung.
+
+### Plan para apps empaquetadas (Samsung Tizen)
+
+Una app empaquetada (Samsung Tizen, y en general cualquier cliente sin una página https propia) no manda un `Origin` utilizable, así que no puede usar la ruta de páginas. Usa la ruta de apps, `GET /il-player/app-plan?project=…&asset=…&app=<plataforma>:<id>`, sin cookies y sin CORS:
+
+```js
+import { attachAppAds, planUrl } from '@interactivelayers/player-sdk/ads';
+
+planUrl({ origin: 'https://console.example', project, asset, app: 'tizen:AbCdEfGhIj.MiApp' });
+// https://console.example/il-player/app-plan?project=…&asset=…&app=tizen%3AAbCdEfGhIj.MiApp
+const ads = await attachAppAds({ origin: 'https://console.example', project, asset, app: 'tizen:AbCdEfGhIj.MiApp',
+  session, video, stage, onEvent });
+```
+
+- `app` es `<plataforma>:<id>` y **tiene que estar registrado en la consola** del proyecto (`tizen:<id de aplicación>`, que en Tizen da `tizen.application.getCurrentApplication().appInfo.id`; también `android:`, `apple:` y `roku:`). `planUrl` rechaza un valor con otra forma. Sin `app`, `planUrl` sigue dando la ruta de páginas (`/il-player/ad-plan`) como antes.
+- `loadAppPlan({ origin, project, asset, app, timeoutMs = 4000 })` devuelve el plan o `null`, y `attachAppAds` lo carga y llama a `attachAds`. Sin plan, el contenido se reproduce sin anuncios y `onEvent` recibe `{ type: 'plan_unavailable', app, status }`: **204** (no hay plan ahora, o se alcanzó un límite; la próxima vista vuelve a preguntar, el módulo no reintenta), **404** (proyecto, video o app desconocidos: la respuesta es idéntica, así que revisá primero el `app` que figura en el evento) o `status: null` con `reason: 'timeout'` o `'network'`. Nunca se retiene el contenido esperando el plan.
+- `loadPlan(url, { onEvent, timeoutMs })` acepta ahora `version: 2` con las mismas reglas que `attachAds` (ver [Native GAM brief plans](#native-gam-brief-plans-version-2)).
+- **Renovación**: con un plan `version: 2`, `attachAppAds` vuelve a pedir el plan unos 20 s antes de `expires_at` con `&renew=<grant>` (el parámetro `grant` de `commerce.url` del plan actual), que conserva la misma `commerce.session`, y lo cambia en el lugar con `ads.replacePlan(plan)`. Lo ya mostrado, intentado y resuelto, el pacing, la sesión de comercio y lo que está en pantalla siguen: nada se repite ni se cuenta dos veces. Si la renovación falla, `onEvent` recibe `plan_renew_failed` y el plan vence normalmente (`plan_expired`). Un host que obtiene el plan por su cuenta llama a `ads.replacePlan(nuevo)` él mismo: devuelve `false` (y no cambia nada) si no es un `version: 2` válido del mismo video y versión.
 
 ### Overlay de display de 300×250
 
@@ -320,6 +362,25 @@ const sdk = attachAvPlay({
 
 `appVideoRect` es el rectángulo completo actual de la app en coordenadas AVPlay (`x, y, width, height`). Samsung usa una base de 1920 × 1080 para `setDisplayRect()`. `currentSegment` debe corresponder al segmento efectivamente reproducido. La integración ajusta el objeto HTML y el rectángulo de AVPlay, y recorta el lienzo gráfico en dos bandas. Al preparar un medio nuevo, la app aplica su rectángulo completo habitual. [Guía oficial de Samsung](https://developer.samsung.com/smarttv/develop/guides/multimedia/media-playback/using-avplay.html)
 
+### Plan de anuncios en AVPlay
+
+`attachAvPlayAds` (`@interactivelayers/player-sdk/avplay-ads`) aplica el plan sobre el único AVPlay: gráficos, producto y pacing son los de `attachAds`, y además pide los cortes en orden y reproduce el anuncio lineal (sin IMA). Una app de Tizen es una app empaquetada: carga el plan por la ruta de apps.
+
+```js
+import { attachAvPlayAppAds } from '@interactivelayers/player-sdk/avplay-ads';
+
+// app: por defecto `tizen:` + tizen.application.getCurrentApplication().appInfo.id
+const sdk = await attachAvPlayAppAds({ origin: 'https://console.example', project, asset,
+  avplay: webapis.avplay, session, contentUrl, listener, getDisplayRect, stage, onEvent });
+if (sdk) await sdk.start();   // null: sin plan (204, 404, tiempo agotado), reproducí sin anuncios
+```
+
+- **Versión 2**: AVPlay ya no descarta un plan `version: 2`. No empieza ningún corte después de `expires_at` (el que ya está sonando termina); `attachAvPlayAppAds` lo renueva como `attachAppAds` y `sdk.replacePlan(plan)` hace lo mismo para un host que trae el plan.
+- **Comprar en el corte**: con `commerce.break_url` en el plan, el primer cuadro de cada anuncio pide la tarjeta con el `cut` del plan, el `tag` de la solicitud de iADServer y el `Ad@id` y `Creative@id` del VAST que el propio módulo descargó (en AVPlay no hay IMA). Sin `break_url` sigue el camino anterior: la identidad de la extensión `iADServerShop` y el feed de sesión.
+- **Cortes de tu app** (plan de host, `cuts: []`): `sdk.setBreaks`, `sdk.breakStarted(at)`, `sdk.setBreakAd({ tagUrl, adId, creativeId })` o `sdk.setBreakAd({ tagUrl, vastXml })`, `sdk.clearBreakAd()` y `sdk.breakEnded()` son los de [Cortes que reproduce tu app](#cortes-que-reproduce-tu-app-api-por-corte), con las mismas obligaciones. El módulo no reproduce ningún anuncio con ese plan.
+- **Red y `config.xml`**: la ruta de apps no manda encabezados `Access-Control-*` a propósito. Samsung indica declarar el servidor con `<access origin="https://console.example" subdomains="true"></access>` y el privilegio `<tizen:privilege name="http://tizen.org/privilege/internet"/>` ([FAQ de red de Samsung, pregunta 2](https://developer.samsung.com/smarttv/develop/faq/networking-and-connectivity.html)); por WARP una app no accede a la red sin esa declaración ([Configuring Web Applications](https://developer.samsung.com/smarttv/develop/guides/fundamentals/configuring-web-applications.html)). **No está confirmado** que esa declaración permita leer una respuesta de otro origen sin CORS: la documentación consultada no lo dice y no se probó en un televisor. Si un televisor la rechaza, `attachAvPlayAppAds` resuelve `null` (`plan_unavailable`, `reason: 'network'`); entonces pedí el plan desde tu backend y pasalo con `attachAvPlayAds({ plan, planOrigin })`, que sigue funcionando igual. Las URL de producto (`commerce.url`, `break_url`) son de la misma consola y tienen la misma condición.
+- Probado sólo en Node con dobles de AVPlay (`test/avplay-ads.test.mjs`, `test/avplay-native.test.mjs`); nada corrió en un televisor ni en un emulador de TV.
+
 ## Cortes y medición
 
 Usá `sdk.setLinearAd(true)` al comenzar un spot confirmado de esa sesión y `sdk.setLinearAd(false)` cuando vuelve el contenido. Con Shaka, un ad lineal activo que conoce su AdManager también suspende la capa. En SSAI el host puede recibir esos límites desde la integración de tracking de la sesión. El backend coordina esa misma ventana con el contexto del programa.
@@ -376,8 +437,14 @@ La licencia está en `web/fonts/OFL.txt`; conservala si redistribuís la carpeta
 
 Plans with `version: 2` require `native_gam.contract: "native-gam-plan-v1"` and an `expires_at` no more than 120 seconds ahead. Earlier SDKs reject this plan version. The web ads module checks validity while mounted, clears ads and pending requests at expiry, and emits `plan_expired`. The host must obtain a fresh plan and attach it to resume contextual advertising; playback itself continues. Do not extend a stored plan's expiration locally.
 
-Native plans request each IMA break just before its moment, including single-request breaks. `vmap()` returns an empty schedule for these plans so a VMAP cannot retain future versioned tags. Version 1 behavior is unchanged. Native GAM rollout is limited to this web consumer; Android/TV and third-party SSAI consumers require equivalent version/expiry verification before enabling this mode.
+Native plans request each IMA break just before its moment, including single-request breaks. `vmap()` returns an empty schedule for these plans so a VMAP cannot retain future versioned tags. Version 1 behavior is unchanged. Native GAM rollout covers this web consumer and Samsung AVPlay; Android/TV and third-party SSAI consumers require equivalent version/expiry verification before enabling this mode.
 
 Native GAM renewal keeps graphic pacing, attempted windows and settled cuts for the lifetime
 of the same SDK session and asset version. Reuse that session when replacing an expired plan;
 creating a new session would represent a new view and reset those limits.
+
+Before expiry, `ads.replacePlan(next)` swaps in a renewed version 2 plan of the same asset and version without
+re-attaching: on-screen cues, product answers, pacing and the commerce session stay. `attachAppAds` and
+`attachAvPlayAppAds` request the renewal about 20 s before `expires_at` with `renew=<grant>` and call it themselves.
+`loadPlan` now accepts version 2 under the same rules, and Samsung AVPlay (`attachAvPlayAds`) no longer drops it: it
+starts no break after expiry.

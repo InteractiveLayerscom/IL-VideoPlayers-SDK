@@ -47,7 +47,23 @@ const nativeViews = new WeakMap();
 
 const ms = (seconds) => Math.round(seconds * 1000);
 const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
-const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, setBreakActive() {}, start() {}, destroy() {} });
+const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, setBreakActive() {}, start() {}, destroy() {},
+  replacePlan: () => false, breakStarted() {}, setBreakAd() {}, clearBreakAd() {}, breakEnded() {} });
+
+// Ad@id and the linear Creative@id of a VAST the host's own ad player fetched (no IMA to ask).
+export function vastIdentity(xml, Parser = globalThis.DOMParser) {
+  try {
+    if (typeof xml !== 'string' || xml.length > 262144 || /<!DOCTYPE/i.test(xml) || typeof Parser !== 'function') return {};
+    const doc = new Parser().parseFromString(xml, 'application/xml');
+    if (doc.documentElement.localName !== 'VAST' || doc.getElementsByTagName('parsererror').length) return {};
+    const ad = Array.from(doc.getElementsByTagName('Ad'))[0];
+    const linear = ad && Array.from(ad.getElementsByTagName('Linear'))[0];
+    const creative = linear?.parentElement?.localName === 'Creative' ? linear.parentElement : null;
+    return { adId: ad?.getAttribute('id') ?? undefined, creativeId: creative?.getAttribute('id') ?? undefined };
+  } catch {
+    return {};
+  }
+}
 
 // One fresh value per ad request, so ad servers never treat two requests as one page view.
 const correlator = () => String(Date.now()) + String(Math.floor(Math.random() * 1e6)).padStart(6, '0');
@@ -321,7 +337,18 @@ export function parseGraphicVast(xml, format, availableMs, Parser = globalThis.D
   };
 }
 
-export function planUrl({ origin, project, asset } = {}) {
+// `app=<platform>:<id>` of the native route, as IL's console checks it (full match, at most 155 characters).
+const APP_IDS = {
+  android: /^[A-Za-z][A-Za-z0-9_]{0,63}(\.[A-Za-z][A-Za-z0-9_]{0,63}){1,9}$/,
+  apple: /^[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63}){1,9}$/,
+  roku: /^(dev|[0-9]{1,10}(_[0-9a-f]{1,8})?)$/,
+  tizen: /^[A-Za-z0-9]{10}\.[A-Za-z0-9]{1,52}$/,
+};
+export const RENEW_AHEAD_MS = 20000;
+
+// Without `app` this is the page route (the browser's Origin names the site). With `app` it is the route for
+// packaged apps, which send no usable Origin: a Samsung Tizen app passes `tizen:<application id>`.
+export function planUrl({ origin, project, asset, app, renew } = {}) {
   let parsed;
   try {
     parsed = new URL(origin);
@@ -334,20 +361,53 @@ export function planUrl({ origin, project, asset } = {}) {
   for (const [name, value] of [['project', project], ['asset', asset]]) {
     if (typeof value !== 'string' || !value) throw new TypeError(name + ' must be a non-empty string');
   }
-  return `${parsed.origin}/il-player/ad-plan?project=${encodeURIComponent(project)}&asset=${encodeURIComponent(asset)}`;
+  const query = `project=${encodeURIComponent(project)}&asset=${encodeURIComponent(asset)}`;
+  if (app == null) return `${parsed.origin}/il-player/ad-plan?${query}`;
+  const [platform, id] = typeof app === 'string' && app.length <= 155 ? app.split(/:(.*)/s) : [];
+  if (!Object.hasOwn(APP_IDS, platform ?? '') || !APP_IDS[platform].test(id ?? '')) {
+    throw new TypeError('app must be <platform>:<id>, for example tizen:AbCdEfGhIj.MyApp');
+  }
+  const renewal = typeof renew === 'string' && renew ? `&renew=${encodeURIComponent(renew)}` : '';
+  return `${parsed.origin}/il-player/app-plan?${query}&app=${encodeURIComponent(app)}${renewal}`;
 }
 
-export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {}) {
+// `onEvent` hears `plan_unavailable` when no plan comes back: `status` 204 (none right now; ask again on the next
+// view, never in a loop), 404 (unknown project, video or app: check `app` first, the answer is identical), or
+// `reason` 'timeout' / 'network'. `timeoutMs` bounds the request; content never waits for a plan longer than that.
+export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal, onEvent, timeoutMs } = {}) {
+  let app = null;
+  let timer;
+  const abort = new AbortController();
+  const unavailable = (extra) => {
+    try {
+      onEvent?.({ type: 'plan_unavailable', app, ...extra });
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  };
   try {
     // A relative URL is resolved against the page; without a page it is refused, as before.
     const resolved = new URL(url, globalThis.location?.href);
     if (resolved.protocol !== 'https:' || typeof fetchImpl !== 'function') return null;
     // An absolute URL is requested exactly as given.
     const target = URL.canParse?.(url) ?? /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : resolved.href;
-    const response = await fetchImpl(target, { method: 'GET', credentials: 'omit', redirect: 'error', signal });
-    if (response.status !== 200) return null;
+    app = resolved.searchParams.get('app');
+    // Without a timeout the host's own signal is passed exactly as before.
+    if (isNumber(timeoutMs)) {
+      signal?.addEventListener?.('abort', () => abort.abort(), { once: true });
+      if (signal?.aborted) abort.abort();
+      timer = setTimeout(() => abort.abort(new Error('timeout')), timeoutMs);
+    }
+    const response = await fetchImpl(target, { method: 'GET', credentials: 'omit', redirect: 'error',
+      signal: timer === undefined ? signal : abort.signal });
+    if (response.status !== 200) {
+      unavailable({ status: response.status });
+      return null;
+    }
     const plan = JSON.parse(await response.text());
-    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || plan.version !== 1) return null;
+    // Version 2 (a short-lived native GAM approval) only under the rules attachAds applies.
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || ![1, 2].includes(plan.version) ||
+        (plan.version === 2 && !readPlan(plan, Date.now()))) return null;
     // Remembering where it came from never costs the plan: without it the page-origin / planOrigin rule applies.
     try {
       planOrigins.set(plan, resolved.origin);
@@ -356,15 +416,71 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal } = {
     }
     return plan;
   } catch {
+    if (app !== null || timer !== undefined) unavailable({ status: null, reason: abort.signal.aborted ? 'timeout' : 'network' });
     return null;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+// The app route in one call: loads the plan (bounded), attaches, and keeps a version 2 plan renewed about
+// RENEW_AHEAD_MS before it expires with `renew=<grant>`, so the same commerce session and the per-view state carry on.
+export function loadAppPlan({ origin, project, asset, app, renew, fetchImpl = globalThis.fetch, onEvent, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  return loadPlan(planUrl({ origin, project, asset, app, renew }), { fetchImpl, onEvent, timeoutMs });
+}
+
+// Re-requests a version 2 plan before it expires and hands it to `replace`. Returns the function that stops it.
+export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fetchImpl = globalThis.fetch, onEvent, timeoutMs } = {}) {
+  let timer = null;
+  let stopped = false;
+  const arm = (current) => {
+    if (stopped || current?.version !== 2) return;
+    timer = setTimeout(async () => {
+      let grant = null;
+      try {
+        grant = new URL(current.commerce.url).searchParams.get('grant');
+      } catch {
+        grant = null;
+      }
+      const next = await loadAppPlan({ origin, project, asset, app, renew: grant ?? undefined, fetchImpl, onEvent, timeoutMs });
+      if (stopped) return;
+      if (next && replace(next)) return arm(next);
+      try {
+        onEvent?.({ type: 'plan_renew_failed' });
+      } catch {
+        // Diagnostics must never break playback.
+      }
+    }, Math.max(0, Date.parse(current.expires_at) - RENEW_AHEAD_MS - Date.now()));
+    timer.unref?.();
+  };
+  arm(plan);
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
+export async function attachAppAds({ origin, project, asset, app, timeoutMs, ...options } = {}) {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const params = { origin, project, asset, app, fetchImpl, onEvent: options.onEvent, timeoutMs };
+  const plan = await loadAppPlan(params);
+  if (!plan) return inert;
+  const ads = attachAds({ ...options, plan });
+  if (ads === inert || plan.version !== 2) return ads;
+  const stop = keepPlanRenewed(plan, (next) => ads.replacePlan(next), params);
+  const destroy = ads.destroy;
+  ads.destroy = () => {
+    stop();
+    destroy();
+  };
+  return ads;
 }
 
 export function attachAds({
   session, video, plan, pageUrl, fetchImpl = globalThis.fetch, onEvent,
   stage, linear, adContainer, loadScript = loadScriptOnce, sessionId, clock, planOrigin,
 } = {}) {
-  const valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
+  let valid = session && video && typeof fetchImpl === 'function' ? readPlan(plan, Date.now()) : null;
   if (!valid) return inert;
   const native = valid.version === 2;
   let view = nativeViews.get(session);
@@ -392,23 +508,25 @@ export function attachAds({
   const page = pageUrl ?? valid.page_url;
   // commerce.url must be on the origin the plan came from: the one loadPlan fetched it from or, for a plan the
   // host obtained itself, the page's origin or the `planOrigin` the host states. Otherwise `commerce` is ignored.
-  const origins = planOrigins.has(plan) ? [planOrigins.get(plan)] : [globalThis.location?.origin, planOrigin];
-  const shop = (() => {
-    const commerce = readCommerce(valid.commerce);
+  const shopOf = (source, checked) => {
+    const origins = planOrigins.has(source) ? [planOrigins.get(source)] : [globalThis.location?.origin, planOrigin];
+    const commerce = readCommerce(checked.commerce);
     try {
       return commerce && origins.includes(new URL(commerce.url).origin) ? commerce : null;
     } catch {
       return null;
     }
-  })();
+  };
+  let shop = shopOf(plan, valid);
   // A host that keeps its own view id keeps it on the iADServer requests (its frequency caps per viewer);
   // otherwise the plan's commerce.session is the sid, so breaks and products share one session.
   const sid = typeof sessionId === 'string' && sessionId ? sessionId
     : typeof shop?.session === 'string' && SID.test(shop.session) ? shop.session : randomId();
-  const cuts = Object.freeze(stitched ? [] : planCuts(valid.cuts, page, sid).map(Object.freeze));
+  const cutsOf = (checked) => Object.freeze(stitched ? [] : planCuts(checked.cuts, page, sid).map(Object.freeze));
+  let cuts = cutsOf(valid);
   // The Buy button during an ad: IL's grant names the view's session, and iADServer ties the delivery to that session,
   // so a host with its own view id gets the ad without the card.
-  const breakUrl = (() => {
+  const breakUrlOf = () => {
     if (!shop || !session.commerce || sid !== shop.session || typeof shop.break_url !== 'string') return null;
     try {
       const url = new URL(shop.break_url);
@@ -417,7 +535,8 @@ export function attachAds({
     } catch {
       return null;
     }
-  })();
+  };
+  let breakUrl = breakUrlOf();
   // kept: the card of an ad that ended while its product was open; deferred: the end of the break, run once it closes.
   const breakShop = { token: 0, id: null, abort: null, spot: false, kept: null, deferred: null, poll: null };
   const scenes = valid.scenes;
@@ -432,6 +551,8 @@ export function attachAds({
   const servableNow = () => overlayServable && stage.clientWidth >= MIN_STAGE[0] && stage.clientHeight >= MIN_STAGE[1]
     ? formats : graphics;
   let hostBreak = false;
+  // The break the host reported with breakStarted (its own ad player plays it): { id, at, position }.
+  let hostCut = null;
   // Re-attaching to a video that already played keeps the latch. A resume position alone is not playback.
   let played = (Number(video.played?.length) || 0) > 0;
   const failedCuts = new Set();
@@ -957,21 +1078,28 @@ export function attachAds({
     video.addEventListener('play', hostPlayed);
   }
   // One ad of the break started: the session is told which, and the card of exactly this delivery is asked for.
-  async function shopAdStarted(event, cut, request) {
-    clearBreakShop();
-    if (disposed || !inBreak) return;
-    let identity = null;
+  function shopAdStarted(event, cut, request) {
+    let adId = null;
+    let creativeId = null;
     let tag = null;
     try {
       const ad = event?.getAd?.();
-      const match = SHOP_AD.exec(ad?.getAdId?.() ?? '');
-      const creativeId = ad?.getCreativeId?.();
+      adId = ad?.getAdId?.();
+      creativeId = ad?.getCreativeId?.();
       tag = request?.provider === 'iadserver' ? new URL(request.tagUrl).searchParams.get('tag') : null;
-      if (breakUrl && match && match[1] === cut?.position && tag && typeof creativeId === 'string' && creativeId)
-        identity = { creativeId, deliveryId: match[2] };
     } catch {
-      identity = null;
+      tag = null;
     }
+    return breakProduct(cut, tag, adId, creativeId);
+  }
+  // The same path for an ad IMA plays for this module and for an ad the host's own player reports (setBreakAd).
+  async function breakProduct(cut, tag, adId, creativeId) {
+    clearBreakShop();
+    if (disposed || !(inBreak || hostCut)) return;
+    let identity = null;
+    const match = SHOP_AD.exec(typeof adId === 'string' ? adId : '');
+    if (breakUrl && match && match[1] === cut?.position && tag && typeof creativeId === 'string' && creativeId)
+      identity = { creativeId, deliveryId: match[2] };
     // Each ad of a break closes the product kept from the one before, never its own.
     session.closeProduct?.(undefined, identity?.deliveryId);
     // A spot without a shop changes nothing unless the one before it had one.
@@ -1001,7 +1129,7 @@ export function attachAds({
   }
   function shopAdEnded() {
     clearBreakShop();
-    if (!disposed && inBreak && breakShop.spot) session.setLinearAd(true);
+    if (!disposed && (inBreak || hostCut) && breakShop.spot) session.setLinearAd(true);
     breakShop.spot = false;
   }
   function watchShopAds(manager, sdk, started) {
@@ -1481,7 +1609,9 @@ export function attachAds({
     return true;
   }
   const api = {
-    cuts,
+    get cuts() {
+      return cuts;
+    },
     // Native revisions are requested just in time. A VMAP would retain future tags past expiry.
     vmap: () => buildVmap(native ? [] : cuts),
     setBreaks(seconds) {
@@ -1494,6 +1624,74 @@ export function attachAds({
       // A new break closes a product the viewer kept from before (see session.setLinearAd).
       if (active && !hostBreak) session.closeProduct?.();
       hostBreak = Boolean(active);
+      updateOverlay(now());
+      sync();
+    },
+    // A renewed version 2 plan of the same video and version replaces this one in place: what was shown, attempted
+    // and settled, pacing, the commerce session and anything on screen stay; only expiry, grants and tags change.
+    replacePlan(next) {
+      if (disposed || !native) return false;
+      const fresh = readPlan(next, Date.now());
+      if (fresh?.version !== 2 || fresh.asset_id !== valid.asset_id || fresh.asset_version !== valid.asset_version ||
+          (fresh.timeline?.kind === 'stitched') !== stitched) return false;
+      const nextShop = shopOf(next, fresh);
+      // A product path already running cannot lose its URLs mid-view.
+      if (shopOn && !nextShop) return false;
+      valid = fresh;
+      shop = nextShop;
+      breakUrl = breakUrlOf();
+      cuts = cutsOf(fresh);
+      clearTimeout(expiryTimer);
+      expiryTimer = setTimeout(expired, Math.max(0, Date.parse(valid.expires_at) - Date.now()));
+      expiryTimer.unref?.();
+      sync();
+      return true;
+    },
+    // Host-driven breaks: the app's own ad player plays a break at content second `at` (0 for a pre-roll). Until
+    // breakEnded() nothing of IL's is drawn over it but the Buy button of the ad reported with setBreakAd().
+    // `cut` ({ id, position }) names a plan cut when an adapter of this package plays one of the plan's breaks.
+    breakStarted(at, cut) {
+      if (disposed || expired() || !isNumber(at) || at < 0) return;
+      const id = typeof cut?.id === 'string' && cut.id ? cut.id : `at-${ms(at)}`;
+      if (hostCut?.id === id) return;
+      if (breakShop.deferred || breakShop.kept) releaseHeld(false);
+      if (hostCut) clearBreakShop();
+      else session.closeProduct?.();
+      hostCut = { id, at, position: cut?.position ?? (at === 0 ? 'preroll' : 'midroll') };
+      hostBreak = true;
+      breakShop.spot = false;
+      stage?.classList?.add('il-ad-playing');
+      session.setLinearAd(true);
+      updateOverlay(now());
+      sync();
+    },
+    // The ad now playing in the host's break: the tag URL it requested and either its VAST Ad@id and Creative@id
+    // (IMA: getAdId(), getCreativeId()) or the VAST XML itself. Buy is drawn when IL has the product of that delivery.
+    setBreakAd({ at, tagUrl, adId, creativeId, vastXml } = {}) {
+      if (disposed || expired()) return;
+      if (isNumber(at) && hostCut?.at !== at) api.breakStarted(at);
+      if (!hostCut) return;
+      if (typeof vastXml === 'string') ({ adId, creativeId } = vastIdentity(vastXml));
+      let tag = null;
+      try {
+        tag = cutRequestAllowed('iadserver', tagUrl) ? new URL(tagUrl).searchParams.get('tag') : null;
+      } catch {
+        tag = null;
+      }
+      void breakProduct(hostCut, tag, adId, creativeId);
+    },
+    clearBreakAd() {
+      if (!disposed && hostCut) shopAdEnded();
+    },
+    breakEnded() {
+      if (disposed || !hostCut) return;
+      // A product the viewer has open stays (keepOpen) until closed; resuming the content is the host's.
+      clearBreakShop();
+      breakShop.spot = false;
+      hostCut = null;
+      hostBreak = false;
+      stage?.classList?.remove('il-ad-playing');
+      session.setLinearAd(false);
       updateOverlay(now());
       sync();
     },
@@ -1554,6 +1752,12 @@ export function attachAds({
       }
       ima.manager = ima.loader = ima.display = null;
       endBreak();
+      if (hostCut) {
+        hostCut = null;
+        hostBreak = false;
+        stage?.classList?.remove('il-ad-playing');
+        session.setLinearAd(false);
+      }
       dropSlot();
       overlay.node?.remove();
       if (overlay.gpt) {
