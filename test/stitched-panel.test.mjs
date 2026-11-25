@@ -271,3 +271,51 @@ test('native clock: variants that disagree about an ad leave inAd() false (a mis
   assert.equal(clock.inAd(), false);
   clock.destroy?.();
 });
+
+// A player's position can trail the frame it presents (Video.js put the first ad frame 15–20 ms before the ad segment's
+// start in the browser tests): inAd() says yes one frame (50 ms, scaled by a rate above 1) before an ad, not earlier.
+for (const name of Object.keys(factories)) {
+  test(`${name} clock: inAd() is true in the last 50 ms before an ad`, async () => {
+    const { clock, set } = await factories[name]();
+    for (const [t, expected] of [[39.9, false], [39.94, false], [39.96, true], [50.02, false], [10.02, false]]) {
+      set(t);
+      assert.equal(clock.inAd(), expected, `at ${t}`);
+    }
+    clock.destroy?.();
+  });
+}
+
+test('attachAds watches every frame while a product panel is kept after its card ended, and closes it on the first ad frame', async (t) => {
+  const frames = [];
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 14, paused: false, ended: false, playbackRate: 1,
+    requestVideoFrameCallback: (callback) => frames.push(callback), cancelVideoFrameCallback: () => {} });
+  const hls = { details: { fragments: fragments() }, levels: [{ details: { fragments: fragments() } }], currentLevel: 0, on() {}, off() {} };
+  const clock = hlsContentClock({ hls, video, plan: plan() });
+  const route = 'https://console.example/il-player/scene-product';
+  const productPlan = { ...plan(), commerce: { kind: 'scene_product', url: route + '?grant=g', lead_ms: 5000,
+    pacing: { min_seconds: 1.5, max_seconds: null, gap_after_seconds: 0, max_per_video: null, cut_clearance_seconds: 0 },
+    windows: [{ id: 'w', start_ms: 5000, end_ms: 10000 }] } };
+  const card = { id: 'dlv_w', format: 'super', start: 5000, end: 10000, window: 'w', imageUrl: 'https://cdn.example/p.jpg',
+    commerce: { title: 'Delantal', price: '100.00', currency: 'USD', handoffUrl: 'https://ads.example/h',
+      variants: [{ id: 'v1', label: 'M', price: '100.00' }] } };
+  let held = false;
+  const closed = [];
+  const session = { clock: clock.programTime, commerce: { locale: 'en' }, addCue: () => true, removeCue: () => true,
+    holding: (id) => held && id === 'dlv_w', closeProduct: () => closed.push(video.currentTime) };
+  const fetchImpl = async (url) => String(url).startsWith(route) ? { ok: true, status: 200, json: async () => card } : { ok: true };
+  const ads = attachAds({ session, video, plan: productPlan, clock, fetchImpl, planOrigin: 'https://console.example' });
+  t.after(() => ads.destroy());
+  const at = async (seconds) => { video.currentTime = seconds; video.dispatchEvent(new Event('timeupdate')); await flush(); };
+  const runFrames = () => { for (const callback of frames.splice(0)) callback(); };
+  await at(14);                                        // content 4: the product is asked lead_ms ahead
+  await at(16);                                        // content 6: the card is on screen
+  held = true;                                         // the viewer opened its detail
+  await at(25);                                        // content 15: the card ended, the open panel is kept
+  runFrames();
+  assert.ok(frames.length > 0, 'frames are still watched for the kept panel');
+  assert.deepEqual(closed, []);
+  video.currentTime = 40.02;                           // the first ad frame, before any video event
+  runFrames();
+  assert.deepEqual(closed, [40.02], 'closed in that frame');
+});
