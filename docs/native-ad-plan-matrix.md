@@ -1,8 +1,14 @@
 # Plan de anuncios en SDK nativos
 
-Cada plataforma lee el plan de IL con las reglas de `web/ads.mjs`: pedidos ordenados por corte, pacing, ventanas, una impresión y nada dibujado sobre un anuncio. Un plan vencido, de otra versión o con línea de tiempo `stitched` (anuncios insertados en el servidor) no muestra anuncios y el contenido sigue.
+Cada plataforma lee el plan de IL con las reglas de `web/ads.mjs`: pedidos ordenados por corte, pacing, ventanas, una impresión y nada dibujado sobre un anuncio. Un plan vencido, de una versión que no acepta o con línea de tiempo `stitched` (anuncios insertados en el servidor) no muestra anuncios y el contenido sigue.
 
-**Nada de esto corrió todavía en un dispositivo físico.** Todo lo que dice "lógica probada" corre en pruebas de escritorio con dobles del reproductor, del SDK de anuncios y de la red. Las pruebas del reproductor de Apple corren en Mac Catalyst.
+Además del plan que entrega el host, cada lector puede pedir su propio plan a IL (ruta de apps), acepta el plan versión 2 con su vencimiento y su renovación, pide la ficha de Comprar durante un corte a `commerce.break_url` y dibuja junto a los cortes que reproduce la propia app (API por corte).
+
+**Nada de esto corrió todavía en un dispositivo físico.** Todo lo que dice "lógica probada" corre en pruebas de escritorio con dobles del reproductor, del SDK de anuncios y de la red. Qué corrió dónde:
+
+- **Roku:** sólo el intérprete de BrightScript de escritorio, con dobles del nodo `Video`, de RAF y de la red (`sh roku/verify.sh`), y los fixtures compartidos con la hora congelada. El canal de ejemplo sólo pasó la validación estática de BrighterScript y el empaquetado; no se ejecutó en un Roku.
+- **Apple:** las pruebas del paquete corren en Mac Catalyst y en los simuladores de iPhone 17 (iOS 26.1) y Apple TV 4K (tvOS 26.1); `swift test` en macOS corre sólo las que no usan UIKit. La app de ejemplo corrió en los dos simuladores contra un servidor HTTPS local que respondía con los fixtures compartidos, con un clip local como anuncio (según la PR #41). No intervino ningún anuncio real de Google Ad Manager, IMA ni iADServer.
+- **Samsung Tizen:** sólo Node, con dobles de AVPlay (`test/avplay-ads.test.mjs`, `test/avplay-native.test.mjs`). Nada corrió en un televisor ni en un emulador de TV, y la app de ejemplo `examples/tizen` nunca se ejecutó. No está confirmado que una app empaquetada pueda leer la respuesta de la ruta de apps, que no manda CORS.
 
 **Android teléfono se probó en un emulador** (Android 15, API 35, imagen `google_apis` arm64, Pixel 7 apaisado) con ExoPlayer de Media3 1.6.0, IMA real y Google Mobile Ads real, en una app de demostración:
 
@@ -38,7 +44,11 @@ Lo que el emulador no prueba: el decodificador de video de un teléfono o una TV
 | Overlay 300x250 de GAM | Implementado, lógica probada con un doble; `AdPlanGma` sólo compilado | **No compatible** | Implementado, lógica probada con un doble; `ILAdPlanGMA` sólo verificado en tipos | **No compatible** | **No compatible** | Usa GPT de `web/ads.mjs`, sin probar en TV |
 | Producto de escena con Comprar (tarjeta simple) | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada (ver ADS 1.1) | Implementado, lógica probada |
 | Banner de producto diseñado (`scene=1`) | No implementado | No implementado | No implementado | No implementado | No implementado | Implementado, heredado de `web/ads.mjs` |
-| Comprar durante un corte | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada |
+| Comprar durante un corte (feed de sesión) | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada | Implementado, lógica probada |
+| Comprar durante un corte con `commerce.break_url` | Todavía no en main | Todavía no en main | Implementado, lógica probada (Catalyst y simulador) | Implementado, lógica probada (Catalyst y simulador) | Implementado, lógica probada en el intérprete | Implementado, lógica probada en Node |
+| La app pide su plan (ruta de apps) | Todavía no en main | Todavía no en main | `ILAdPlanPlayer.load`, lógica probada (Catalyst y simulador) | `ILAdPlanPlayer.load`, lógica probada (Catalyst y simulador) | `loadPlan`, lógica probada en el intérprete | `attachAvPlayAppAds`, lógica probada en Node; lectura sin CORS sin confirmar |
+| Plan versión 2: vencimiento y renovación (20, 12 y 5 s antes) | Todavía no en main | Todavía no en main | Implementado, lógica probada (Catalyst y simulador) | Implementado, lógica probada (Catalyst y simulador) | Implementado, lógica probada en el intérprete | Implementado, lógica probada en Node |
+| Cortes que reproduce la app (API por corte) | Todavía no en main | Todavía no en main | Implementado, lógica probada (Catalyst y simulador; app de ejemplo en ambos simuladores) | Implementado, lógica probada (Catalyst y simulador; app de ejemplo en ambos simuladores) | Implementado, lógica probada en el intérprete | Implementado, lógica probada en Node |
 | QR en TV | No aplica | Sin probar | No aplica | Sin probar | Sin probar | Sin probar |
 
 Fire TV figura junto a Android TV por inferencia: corre Android, el código lo trata como un dispositivo de TV y no se probó nada específico de Fire TV.
@@ -47,7 +57,8 @@ Fire TV figura junto a Android TV por inferencia: corre Android, el código lo t
 
 Los lectores nativos usan los mismos nombres de campo que `web/ads.mjs` y rechazan lo mismo:
 
-- `version` distinto de 1, `expires_at` vencido o ilegible, o un `timeline` presente: no hay anuncios. Roku lee fechas con `Z` o con desplazamiento (`+03:00`).
+- `version` 1, o `version` 2 sólo con `native_gam.contract` igual a `native-gam-plan-v1` y `expires_at` a no más de 120 s (comparado en milisegundos). Otra versión, un `expires_at` vencido o ilegible: no hay anuncios. Roku lee fechas con `Z` o con desplazamiento (`+03:00`).
+- Un plan con `timeline` (proyecto con inserción en el servidor) se sigue rechazando: no hay reloj de contenido nativo. Cargado por la ruta de apps, se informa `plan_unavailable` con motivo `stitched`.
 - `scenes` presente pero sin `formats`, `windows` o `pacing` válidos anula todo el plan, como en la web. Sin `scenes`, el plan necesita `cuts` o un `commerce` válido.
 - `start_ms`, `end_ms`, `lead_ms` y `max_per_video` deben ser enteros. Un valor fraccionario descarta la ventana, el producto o el plan, en lugar de redondearse.
 - Pedidos de corte: sólo `gam` con origen `https://pubads.g.doubleclick.net` e `iadserver` con origen `https://ads.iadserver.com`, en la ruta `/gampad/ads`, hasta tres por corte. Como un navegador, se aceptan el host en mayúsculas y `:443`, y la URL se reescribe a la forma canónica. Android e iOS también resuelven `.` y `..` en la ruta. Roku los rechaza porque BrightScript no trae un parser de URL.
@@ -69,7 +80,8 @@ Cada pedido que el SDK hace a GAM o a iADServer (cortes, gráficas, prelecturas)
 
 ### Diferencias con la web
 
-- **Comprar durante un corte.** La web identifica el anuncio por `Ad@id` (`il-shop-<posición>-<entrega>`) y pide la ficha a `commerce.break_url`. Los nativos leen la misma identidad de la extensión VAST `iADServerShop` que iADServer emite en el mismo anuncio, y piden la ficha por el feed de la sesión con `shop_midroll`. Ignoran `break_url`. Roku toma la entrega de la URL de impresión de iADServer, sólo en `https://ads.iadserver.com/events/{entrega}/impression`.
+- **Comprar durante un corte.** Como la web, Apple, Roku y Samsung identifican el anuncio por `Ad@id` (`il-shop-<preroll|midroll>-<entrega>`, de la misma posición que el corte) y `Creative@id`, y piden la ficha a `commerce.break_url` con `cut`, `tag`, `creative`, `delivery` y `locale`. Sin ese prefijo no hay producto ni pedido. Samsung lee los dos valores del VAST que descargó (no hay IMA). Roku lee el `adId` del anuncio de RAF y, si falta o no es `il-shop-…`, toma la entrega de la URL de impresión de iADServer (`https://ads.iadserver.com/events/{entrega}/impression`); Roku no documenta que `adId` sea el `Ad@id` del VAST. Cuando el plan no trae `break_url`, sigue el camino anterior: la identidad de la extensión VAST `iADServerShop` y la ficha por el feed de la sesión con `shop_midroll`.
+- **Panel de Comprar al terminar el anuncio.** En iOS y tvOS la ficha de Comprar se cierra cuando termina el anuncio, aunque el espectador la haya abierto. La web y Android la mantienen abierta hasta que el espectador la cierra.
 - **Volumen del anuncio.** La web hace que IMA siga el silencio y el volumen del video. En Android, IMA de Media3 reproduce el anuncio en el mismo `ExoPlayer`, que conserva su volumen. En iOS y tvOS, IMA reproduce en su propio reproductor y este SDK no le pasa el silencio ni el volumen de `AVPlayer`. En Samsung y Roku el anuncio usa el reproductor del contenido y el volumen del sistema.
 
 ## Cortes
@@ -108,17 +120,71 @@ Cada pedido que el SDK hace a GAM o a iADServer (cortes, gráficas, prelecturas)
 - **Android.** IMA corre sobre un `ExoPlayer` cuando la app incluye `androidx.media3:media3-exoplayer-ima`. El SDK la declara `compileOnly`: agregala a tu app con la misma versión que tus otros módulos de Media3 (el SDK compila contra 1.6.0). Sin ella, el SDK lo informa en el log y los cortes usan MP4 progresivo en tu reproductor. La biblioteca trae reglas de R8 (`consumer-rules.pro`) para que una app que minifica sin IMA ni Google Mobile Ads compile igual. Si IMA no puede reproducir una respuesta, pasa a MP4. Una respuesta vacía pasa al pedido siguiente.
 - **Contenido con cabeceras o DRM en Android.** El `attach` simple crea IMA con un `DefaultMediaSourceFactory` sin tus cabeceras ni tu DRM, que sólo se usa mientras IMA reproduce. Para ese contenido, creá `AdPlanIma(context, playerView, factory)` con tu factory y pasalo al otro `attach`. Al terminar cada corte, el SDK vuelve a cargar tu lista completa, en el ítem y la posición donde estaba, con la factory de tu reproductor.
 - **iOS y tvOS.** El producto `ILAVPlayerOverlayIMA` usa IMA desde 3.34.1 (iOS) y 4.18.1 (tvOS), y GMA desde 13.13.0, hasta la próxima versión mayor de cada uno. Una app que fija otra versión menor de esos paquetes resuelve sin conflicto. Pasá `linearEngine: ILAdPlanIMA(overlay: overlay)`, con la misma caída a MP4. Una app que sólo enlaza `ILAVPlayerOverlay` no enlaza ningún SDK de anuncios, aunque SwiftPM igual resuelve esos paquetes. Sin motor, los cortes usan MP4.
-- **Roku.** RAF. La identidad para Comprar sale del anuncio que RAF informa en su callback: `creativeId` y la entrega de la URL de impresión de iADServer.
+- **Roku.** RAF. La identidad para Comprar sale del anuncio que RAF informa en su callback: el `adId` `il-shop-…` y `creativeId` o, si falta ese `adId`, la entrega de la URL de impresión de iADServer.
 - **Samsung.** MP4 progresivo en AVPlay, con wrappers VAST. La impresión y `start` salen con el primer `oncurrentplaytime`. Un MP4 que no se prepara en 8 segundos termina el corte.
 
 ## Integración
 
 - **Android.** `AdPlanPlayer.attach(overlay, player, planJson, planOrigin, sessionId, locale, events)` y luego `start(() -> player.play())`. Para el Overlay, agregá `com.google.android.gms:play-services-ads:23.6.0`, el `APPLICATION_ID` en el manifiesto, y usá la variante con `ima` y `new AdPlanGma(playerView)`. Devuelve `null` si el plan no sirve. Cerrá con `close()`.
 - **Apple.** `ILAdPlanPlayer(overlay:player:planJSON:planOrigin:sessionID:locale:linearEngine:events:)`, luego `await plan.start()` y `player.play()`. Para el Overlay en iOS, agregá el producto `ILAVPlayerOverlayGMA`, `GADApplicationIdentifier` en `Info.plist`, y pasá `displaySlot: ILAdPlanGMA(container:rootViewController:)`. Cerrá con `stop()`. Un motor propio implementa `playAd(tagURL:adsResponse:deadline:onStart:)`.
-- **Roku.** Creá `ILAdPlanPlayer` junto al `Video`, llamá a `attachPlan(overlay, video, sessionId, plan, origin, locale, consent)` y a `startPlan`. Iniciá el contenido cuando `contentReady` sea verdadero. Al cambiar `linearSpot`, leé el feed de la sesión con esa identidad para traer la ficha del corte. Cerrá con `stopPlan`. El canal necesita `bs_libs_required=roku_ads_lib` en el manifiesto.
+- **Roku.** Creá `ILAdPlanPlayer` junto al `Video`, llamá a `attachPlan(overlay, video, sessionId, plan, origin, locale, consent)` y a `startPlan`. Iniciá el contenido cuando `contentReady` sea verdadero. Con un plan que trae `commerce.break_url`, el componente pide la ficha del corte él mismo; sin ella, al cambiar `linearSpot` leé el feed de la sesión con esa identidad para traer la ficha. Cerrá con `stopPlan`. El canal necesita `bs_libs_required=roku_ads_lib` en el manifiesto.
 - **Samsung.** Importá `attachAvPlayAds` de `@interactivelayers/player-sdk/avplay-ads`, pasale `{ avplay, session, plan, contentUrl, listener, getDisplayRect, stage }` y llamá a `await ads.start()` antes de abrir el contenido. Si tu contenido usa DRM, propiedades de streaming o subtítulos, pasá `reopenContent(resumeAtMs)`: el SDK la llama después de cada anuncio para que abras, prepares y busques tu contenido. Sin ella, reabre `contentUrl`. Pasá `consent` con los valores de tu CMP. Avisá el final con `contentEnded()` y cerrá con `destroy()`.
 
 `planOrigin` es el origen HTTPS del que vino el plan. Sin él, el producto de escena se ignora.
+
+### La app pide su plan
+
+Cada lector puede pedir `GET <consola>/il-player/app-plan?project=…&asset=…&app=<plataforma>:<id>` por HTTPS, sin cookies, y adjuntarlo. El valor de `app=` **tiene que estar registrado en la Console** del proyecto: un id no registrado recibe el mismo 404 que un proyecto o video desconocido.
+
+- **Apple:** `ILAdPlanPlayer.load(overlay:player:origin:project:asset:locale:linearEngine:events:)`, `app=apple:<bundle id>`, límite de 5 s. Devuelve `nil` sin plan.
+- **Roku:** `loadPlan(overlay, video, viewId, origen, proyecto, video, locale, consent)`, `app=roku:dev` en modo desarrollador o `roku:<id del canal>` publicado, límite de 5 s. Iniciá el contenido con `contentReady`.
+- **Samsung:** `attachAvPlayAppAds({ origin, project, asset, ... })` de `@interactivelayers/player-sdk/avplay-ads`, `app=tizen:<id de aplicación>` (de `tizen.application.getCurrentApplication().appInfo.id`), límite de 4 s. Resuelve `null` sin plan. En la web, `attachAppAds` y `loadAppPlan` de `@interactivelayers/player-sdk/ads`. En `config.xml`, `<access origin>` y el privilegio `internet`; si un televisor rechaza la lectura sin CORS, el backend pide el plan y el host lo pasa con `attachAvPlayAds({ plan, planOrigin })`.
+
+Un 204 (no hay plan todavía o se alcanzó un límite) no se reintenta: la próxima vista vuelve a preguntar. El contenido nunca espera más que el límite. La entrada en la que el host pasa el plan sigue igual en todas las plataformas.
+
+Con un plan versión 2, el lector vuelve a pedirlo con `&renew=<grant de commerce.url>` hasta tres veces, a 20, 12 y 5 s del vencimiento, de a un pedido, y se detiene en el primer éxito. La renovación conserva la sesión de compra y el estado de la vista (lo mostrado, intentado y cerrado, el pacing); lo que sale del plan se reconstruye. Una respuesta versión 1 se adopta y termina las renovaciones; una versión 2 que reemplaza un plan versión 1 las empieza. Un host que obtiene el plan por su cuenta usa `replacePlan`. Al vencer sin renovación, el lector deja de usar el plan, emite `plan_expired` y el contenido sigue.
+
+### Cortes que reproduce la app (API por corte)
+
+Cuando el backend del cliente pide cada corte a la API por corte de IL (playback creado con `"graphics": true`) y la app lo reproduce con su propio reproductor, el plan de la reproducción (`GET /v1/vod/playbacks/{id}/plan`) trae `cuts: []` y el lector no pide ni reproduce anuncios. La app avisa:
+
+- **Apple:** `setBreaks([segundos])`, `breakStarted(at:)`, `adStarted(tagURL:adID:creativeID:)` o `adStarted(tagURL:vastXML:)`, `adEnded()`, `breakEnded()`.
+- **Roku:** `setBreaks([ms])`, `breakStarted(ms)`, `adStarted(adTagUrl, ad)` con el anuncio de RAF, `adEnded()`, `breakEnded()`.
+- **Samsung y web:** `setBreaks([segundos])`, `breakStarted(at)`, `setBreakAd({ tagUrl, adId, creativeId })` o `setBreakAd({ tagUrl, vastXml })` (el VAST inline del anuncio que suena), `clearBreakAd()`, `breakEnded()`.
+
+Obligaciones de la app:
+
+- **Informar los cortes.** Las ventanas de un plan de reproducción sólo están separadas de los cortes que IL ubicaría. El lector aplica `cut_clearance_seconds` alrededor de las posiciones informadas con `setBreaks` o `breakStarted`; sin cortes informados no hay separación. Sin `breakStarted`, el lector no puede saber que hay un anuncio en pantalla: dibuja por tiempo de contenido y no hay Comprar.
+- **Adjuntar con `commerce.session` del plan** como sesión. Es el `sid` de cada `ad_tag_url` estable y la sesión que nombra el grant de `break_url`. Con otra, el lector emite una vez `buy_unavailable` (motivo `session`) y no hay Comprar durante los cortes.
+- **Pedir el `ad_tag_url` de cada corte exactamente como llega**, con el `correlator` que ya trae; no agregar ni cambiar `sid`.
+
+Mientras dura un corte informado no se dibuja nada de IL salvo Comprar. La ficha se pide con `cut=at-<ms>`, la posición redondeada al milisegundo; una posición negativa o no finita emite `break_refused` (motivo `position`). Un plan sin `break_url` (playback creado sin `"graphics": true` o sin pasos ordenados) no tiene Comprar durante los cortes, sin evento. Durante un corte de la app, `destroy()`/`stop()`/`stopPlan`, el vencimiento o un reemplazo del plan sólo limpian el estado del lector: nunca tocan el reproductor de la app. Como red de seguridad, un corte sin `breakEnded` se da por terminado con `break_error`.
+
+### Eventos
+
+| Evento | Cuándo |
+| --- | --- |
+| `plan_unavailable` | Un pedido por la ruta de apps terminó sin plan. Lleva el `app` enviado (o que se habría enviado) y un motivo de texto: `http_<estado>` (`http_204`, `http_404`, …), `timeout`, `network`, `request` (la URL no se puede armar), `app_id` (id rechazado localmente, sin pedido), `stitched` (un 200 con `timeline`) o `invalid` (otro 200 ilegible). |
+| `plan_renewed` | Se adoptó una renovación; lleva la versión nueva. |
+| `plan_renew_failed` | Fallaron los intentos de renovación; una vez, con el último motivo. |
+| `plan_expired` | El plan versión 2 venció; sin más datos. |
+| `break_error` | Un corte terminó de forma anormal, también la red de seguridad de un corte de la app. |
+| `break_refused` | Una posición de corte informada que no se acepta (motivo `position`). |
+| `buy_unavailable` | Hay `break_url` pero la sesión no es `commerce.session` (motivo `session`). |
+
+Ningún evento ni campo público lleva el `grant`, el valor de `renew` ni las URLs de `commerce`.
+
+### Identidad de la app en Google Ad Manager
+
+El plan de una app no trae `page_url`, así que los pedidos a GAM no llevan página.
+
+- **Apple:** el SDK agrega `msid` (bundle id) y `an` (nombre visible) a los pedidos a GAM que hace él mismo, si el tag no los trae; los tags que se entregan a IMA no se tocan.
+- **Roku:** no agrega `msid` ni `an` (el formato para Roku no está definido); si hacen falta, tienen que venir en los tags del proyecto.
+- **Samsung:** agrega `msid` y `an` sólo si el host los pasa en `appParams` a `attachAvPlayAppAds`, y sólo a planes cargados por la ruta de apps; no los deduce del id de aplicación.
+
+### Ejemplos
+
+`examples/api-relay.mjs` hace de backend del cliente para la API por corte en las apps de ejemplo (`examples/apple`, `examples/roku`, `examples/tizen`), con un modo `--fixtures` sin backend. **Es sólo un ejemplo: nunca lo despliegues.** En modo real le da el poder de `IL_API_KEY` a quien lo alcance.
 
 ## Qué falta probar en un dispositivo
 
@@ -143,15 +209,20 @@ Cada pedido que el SDK hace a GAM o a iADServer (cortes, gráficas, prelecturas)
   - Foco del control remoto, QR y Atrás en el panel de producto.
   - Confirmar que Fire TV se detecta como TV.
 - **iOS.**
+  - `load` con un bundle id registrado, renovación, Comprar con `break_url` con un anuncio real de iADServer y cortes de la app con IMA.
   - IMA real (3.34.1 y una versión menor posterior) con `adsResponse`, y caída a MP4.
   - Overlay con GMA y App ID.
   - Una app que fija otra versión menor de GMA o IMA.
   - Tarjeta y Comprar, rotación y área segura.
   - Volumen del anuncio con el contenido silenciado.
 - **tvOS.**
+  - `load`, renovación, Comprar con `break_url` y cortes de la app en una Apple TV.
   - IMA 4.18.1 real.
   - Foco del control, QR, tarjeta y Comprar durante un corte.
 - **Roku.**
+  - `loadPlan` con `roku:dev` y con el id de un canal publicado registrado, y la renovación de un plan versión 2.
+  - Comprar con `break_url`: cuál de las dos ramas (`adId` de RAF o URL de impresión) se da en un equipo real.
+  - Cortes de la app con su propio RAF y el canal de ejemplo en modo `host`.
   - RAF real con tags de GAM e iADServer.
   - Un servidor de anuncios que nunca responde: el temporizador debe devolver el contenido, aunque la tarea de RAF siga bloqueada.
   - Atrás durante los anuncios: el contenido debe reanudarse.
@@ -160,6 +231,9 @@ Cada pedido que el SDK hace a GAM o a iADServer (cortes, gráficas, prelecturas)
   - Consentimiento pasado por el host.
   - La revisión de Roku por ADS 1.1 antes de publicar.
 - **Samsung Tizen.**
+  - Que la app empaquetada pueda leer la ruta de apps sin CORS con `<access origin>` en `config.xml`, y el modo `host` de `examples/tizen`.
+  - `attachAvPlayAppAds` con un `app=tizen:` registrado, y la renovación de un plan versión 2.
+  - Comprar durante un corte con `break_url`, en un corte del plan y en uno de la app.
   - AVPlay con MP4 y wrappers, y la impresión en el primer cuadro.
   - `reopenContent` con DRM y subtítulos.
   - Un MP4 que no se prepara.
