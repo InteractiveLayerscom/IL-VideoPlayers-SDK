@@ -39,6 +39,7 @@ sub readFeed()
             end if
         else
             transfer.asyncCancel()
+            response.timedOut = true
         end if
     end if
     m.top.result = response

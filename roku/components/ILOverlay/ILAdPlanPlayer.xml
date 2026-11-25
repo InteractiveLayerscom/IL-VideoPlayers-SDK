@@ -9,14 +9,26 @@
         <function name="finishBreak" />
         <function name="applySpot" />
         <function name="breakGuardAt" />
+        <function name="loadPlan" />
+        <function name="receivePlan" />
+        <function name="renewPlan" />
+        <function name="replacePlan" />
+        <function name="setBreaks" />
+        <function name="breakStarted" />
+        <function name="adStarted" />
+        <function name="adEnded" />
+        <function name="breakEnded" />
+        <function name="setClock" />
         <field id="event" type="assocarray" alwaysNotify="true" />
         <field id="linearSpot" type="assocarray" alwaysNotify="true" />
         <field id="contentReady" type="boolean" alwaysNotify="true" />
+        <field id="planUrl" type="string" />
     </interface>
     <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILAdPlan.brs" />
     <script type="text/brightscript" uri="pkg:/components/ILOverlay/ILAdPlanPlayer.brs" />
     <children>
         <Timer id="ilPlanClock" duration="0.25" repeat="true" />
         <Timer id="ilBreakGuard" duration="1" repeat="true" />
+        <Timer id="ilPlanRenew" duration="100" repeat="false" />
     </children>
 </component>

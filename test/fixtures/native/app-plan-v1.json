@@ -1,0 +1,197 @@
+{
+  "asset_id": "asset-40edc822d6f24974a9af51695a88184b",
+  "asset_version": "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc",
+  "commerce": {
+    "break_url": "http://localhost:8000/il-player/break-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.178311e8ffa4791646c0d0f6c728aa73.600687f5743c48db.4dcba3919b8dc03db03d06fdf95fb8f489b26a9ff2e86ae03cd9a1019f36777a",
+    "kind": "scene_product",
+    "lead_ms": 5000,
+    "pacing": {
+      "cut_clearance_seconds": 0.0,
+      "gap_after_seconds": 0.0,
+      "max_per_video": null,
+      "max_seconds": null,
+      "min_seconds": 1.5
+    },
+    "url": "http://localhost:8000/il-player/scene-product?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b&grant=1793639100.178311e8ffa4791646c0d0f6c728aa73.600687f5743c48db.4dcba3919b8dc03db03d06fdf95fb8f489b26a9ff2e86ae03cd9a1019f36777a",
+    "windows": [
+      {
+        "end_ms": 9000,
+        "id": "p1",
+        "start_ms": 0
+      },
+      {
+        "end_ms": 24000,
+        "id": "p2",
+        "start_ms": 15000
+      },
+      {
+        "end_ms": 58000,
+        "id": "m1",
+        "start_ms": 50000
+      },
+      {
+        "end_ms": 63000,
+        "id": "m2",
+        "start_ms": 60000
+      },
+      {
+        "end_ms": 178000,
+        "id": "t1",
+        "start_ms": 175000
+      },
+      {
+        "end_ms": 239000,
+        "id": "m3",
+        "start_ms": 235000
+      }
+    ],
+    "session": "178311e8ffa4791646c0d0f6c728aa73"
+  },
+  "cuts": [
+    {
+      "at": 0,
+      "contextual": false,
+      "id": "pre",
+      "position": "preroll",
+      "requests": [
+        {
+          "provider": "iadserver",
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_pre&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=0"
+        }
+      ]
+    },
+    {
+      "at": 58.0,
+      "contextual": true,
+      "id": "mid-1",
+      "position": "midroll",
+      "requests": [
+        {
+          "provider": "iadserver",
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=58"
+        },
+        {
+          "provider": "gam",
+          "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&sz=640x360&vpos=midroll"
+        }
+      ]
+    },
+    {
+      "at": 178.0,
+      "contextual": false,
+      "id": "mid-3",
+      "position": "midroll",
+      "requests": [
+        {
+          "provider": "gam",
+          "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&sz=640x360&vpos=midroll"
+        }
+      ],
+      "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&sz=640x360&vpos=midroll"
+    },
+    {
+      "at": 239.0,
+      "contextual": true,
+      "id": "mid-4",
+      "position": "midroll",
+      "requests": [
+        {
+          "provider": "iadserver",
+          "tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=239"
+        },
+        {
+          "provider": "gam",
+          "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&sz=640x360&vpos=midroll"
+        }
+      ]
+    }
+  ],
+  "duration": 300.0,
+  "expires_at": "2026-11-02T16:15:00.000Z",
+  "revision": "ab970cf290b9a95658d6767b53a1ce784eca0e458f9d56b1395fdf03fed49cc7",
+  "scenes": {
+    "formats": [
+      "super",
+      "l_shape",
+      "overlay_300x250"
+    ],
+    "graphics": [
+      {
+        "format": "super",
+        "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&cust_params=il_format%3Dsuper&sz=640x360"
+      },
+      {
+        "format": "l_shape",
+        "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&cust_params=il_format%3Dl_shape&sz=640x360"
+      }
+    ],
+    "overlay": {
+      "ad_unit": "/123/site/overlay",
+      "size": [
+        300,
+        250
+      ]
+    },
+    "pacing": {
+      "cut_clearance_seconds": 0.0,
+      "gap_after_seconds": 0.0,
+      "max_per_video": null,
+      "max_seconds": null,
+      "min_seconds": 1.5
+    },
+    "windows": [
+      {
+        "end_ms": 9000,
+        "id": "p1",
+        "start_ms": 0,
+        "targeting": {
+          "ilayers_context": "deportes",
+          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+        }
+      },
+      {
+        "end_ms": 24000,
+        "id": "p2",
+        "start_ms": 15000,
+        "targeting": {
+          "ilayers_context": "viajes"
+        }
+      },
+      {
+        "end_ms": 58000,
+        "id": "m1",
+        "start_ms": 50000,
+        "targeting": {
+          "ilayers_context": "deportes",
+          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+        }
+      },
+      {
+        "end_ms": 63000,
+        "id": "m2",
+        "start_ms": 60000,
+        "targeting": {
+          "ilayers_context": "viajes"
+        }
+      },
+      {
+        "end_ms": 178000,
+        "id": "t1",
+        "start_ms": 175000,
+        "targeting": {
+          "ilayers_context": "viajes"
+        }
+      },
+      {
+        "end_ms": 239000,
+        "id": "m3",
+        "start_ms": 235000,
+        "targeting": {
+          "ilayers_context": "deportes",
+          "ilayers_link": "097bb6bc68607089cf61dfc7736eabef,cdb6d5e1d852567f487346497febbb2e"
+        }
+      }
+    ]
+  },
+  "version": 1
+}

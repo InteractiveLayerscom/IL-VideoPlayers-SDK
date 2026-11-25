@@ -1,0 +1,40 @@
+{
+  "eligible": true,
+  "reason": "provider_inventory",
+  "context": {
+    "campaign_ids": [],
+    "excluded_campaign_ids": [],
+    "exclusions": [],
+    "pending_conditions": [],
+    "topics": [],
+    "line_item_ids": [],
+    "expected_creative_ids": [],
+    "evidence": [
+      {
+        "start": 175.0,
+        "end": 178.0,
+        "text": "t1"
+      }
+    ],
+    "analysis_id": "scan-7d8c50da07ab45f9",
+    "content_version": "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc",
+    "ai_mode": "fixture",
+    "iab_matched": [],
+    "fallback": "unmatched",
+    "skipped_steps": [
+      {
+        "step": 0,
+        "provider": "iadserver",
+        "kind": "contextual",
+        "reason": "no_eligible_campaign"
+      }
+    ]
+  },
+  "ad_tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&sz=640x360&cust_params=&correlator=971569889123729",
+  "provider": "gam",
+  "step": 1,
+  "steps_left": 0,
+  "kind": "common",
+  "connection_id": "default",
+  "ad_profile_id": "default"
+}
