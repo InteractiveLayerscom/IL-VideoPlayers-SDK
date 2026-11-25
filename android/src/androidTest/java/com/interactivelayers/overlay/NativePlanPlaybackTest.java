@@ -154,8 +154,8 @@ public final class NativePlanPlaybackTest {
 
     private void load() {
         activity.onActivity(a -> {
-            plan = AdPlanPlayer.load(overlays, player, origin, "proj_8e4cb338d66e4ec6bc6b99fd21f651f6",
-                    "asset-40edc822d6f24974a9af51695a88184b", null, "es", (type, format, id) -> events.add(type + " " + id));
+            plan = AdPlanPlayer.load(overlays, player, origin, "proj_f76ed12b1f1a409589564fbbeade5c21",
+                    "asset-a0a377d6c8214c1498674e53c97721d2", null, "es", (type, format, id) -> events.add(type + " " + id));
             plan.start(() -> ready.set(true));
         });
     }
@@ -191,7 +191,7 @@ public final class NativePlanPlaybackTest {
         await(ready::get);
         String sent = planRequest();
         String app = InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName();
-        assertEquals("/il-player/app-plan?project=proj_8e4cb338d66e4ec6bc6b99fd21f651f6&asset=asset-40edc822d6f24974a9af51695a88184b"
+        assertEquals("/il-player/app-plan?project=proj_f76ed12b1f1a409589564fbbeade5c21&asset=asset-a0a377d6c8214c1498674e53c97721d2"
                 + "&app=android%3A" + app, sent);
         assertTrue(events.isEmpty());
     }
@@ -200,7 +200,7 @@ public final class NativePlanPlaybackTest {
         planStatus = 204;
         load();
         await(ready::get);
-        assertTrue(events.contains("plan_unavailable null"));
+        assertTrue(events.toString(), events.stream().anyMatch(e -> e.startsWith("plan_unavailable app=android:") && e.endsWith(" status=204")));
     }
 
     @Test public void a404NamesTheAppValueSent() throws Exception {
@@ -208,7 +208,7 @@ public final class NativePlanPlaybackTest {
         load();
         await(ready::get);
         String app = InstrumentationRegistry.getInstrumentation().getTargetContext().getPackageName();
-        assertTrue(events.toString(), events.contains("plan_not_found app=android:" + app));
+        assertTrue(events.toString(), events.contains("plan_unavailable app=android:" + app + " status=404"));
     }
 
     @Test public void aSlowPlanNeverHoldsTheContentPastTheLimit() throws Exception {
@@ -218,7 +218,7 @@ public final class NativePlanPlaybackTest {
         await(ready::get);
         long waited = SystemClock.elapsedRealtime() - started;
         assertTrue("released after " + waited + " ms", waited < AdPlanLoader.LOAD_TIMEOUT_MS + 1500);
-        assertTrue(events.toString(), events.stream().anyMatch(event -> event.startsWith("plan_error")));
+        assertTrue(events.toString(), events.stream().anyMatch(event -> event.startsWith("plan_unavailable") && event.endsWith("status=0")));
         // Let the late answer finish so the server shuts down cleanly; the plan that arrives late is not used.
         Thread.sleep(Math.max(0, planDelayMs + 1000 - (SystemClock.elapsedRealtime() - started)));
         assertFalse(events.toString(), events.stream().anyMatch(event -> event.startsWith("host_break")));

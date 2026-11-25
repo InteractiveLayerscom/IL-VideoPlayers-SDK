@@ -122,6 +122,11 @@ final class AdPlan {
     /** The {@code grant} of {@code commerce.url}: what a renewal sends as {@code renew}. Null without one. */
     final String grant;
     private final JSONArray sceneWindows;
+    /** The plan has a break route, but the host's own session id keeps Buy during breaks off (web: sid rule). */
+    boolean breakSessionMismatch;
+
+    /** The app's identity on GAM requests the reader issues itself (Google: msid and an for direct VAST calls). */
+    static volatile String appId, appName;
     /** The {@code sid} on every iADServer request, chosen as web/ads.mjs does. */
     final String sid;
     /** Buy during a break: IL's grant names the plan's session, so only when the sid is that session. */
@@ -263,10 +268,13 @@ final class AdPlan {
                 String own = origin(candidate);
                 if (own != null && own.equals(origin(commerce.getString("url")))) breakUrl = candidate;
             }
+            boolean mismatch = !breakShop && shopValid && commerce.opt("break_url") instanceof String;
             String grant = commerce != null && commerce.opt("url") instanceof String ? query(commerce.getString("url"), "grant") : "";
-            return new AdPlan(cuts, windows, graphics, pacing, readShop(commerce, origin, breaks), page, session, breakShop,
+            AdPlan read = new AdPlan(cuts, windows, graphics, pacing, readShop(commerce, origin, breaks), page, session, breakShop,
                     version.intValue(), expires, breakUrl, grant.isEmpty() ? null : grant,
                     scenes == null ? null : scenes.getJSONArray("windows"));
+            read.breakSessionMismatch = mismatch;
+            return read;
         } catch (JSONException | ParseException e) {
             return null;
         }
@@ -581,6 +589,18 @@ final class AdPlan {
         }
     }
 
+    /**
+     * Adds {@code msid} (package name) and {@code an} (app name) to a GAM request the reader sends itself, unless the
+     * tag carries them: Google asks for both on direct VAST calls from apps; IMA adds them on its own requests.
+     */
+    static String withApp(String url) {
+        if (!"https://pubads.g.doubleclick.net".equals(origin(url))) return url;
+        String id = appId, name = appName;
+        if (id != null && !id.isEmpty() && query(url, "msid").isEmpty() && !url.contains("msid=")) url = setQuery(url, "msid", id);
+        if (name != null && !name.isEmpty() && query(url, "an").isEmpty() && !url.contains("&an=") && !url.contains("?an=")) url = setQuery(url, "an", name);
+        return url;
+    }
+
     static String correlated(String url) {
         return withConsent(setQuery(url, "correlator", System.currentTimeMillis() + String.format(Locale.US, "%06d", RANDOM.nextInt(1000000))));
     }
@@ -612,7 +632,7 @@ final class AdPlan {
         }
         String url = setQuery(tagUrl, "cust_params", joined.toString());
         if (page != null) url = setQuery(setQuery(url, "url", page), "description_url", page);
-        return correlated(url);
+        return correlated(withApp(url));
     }
 
     private static String joinValues(List<String> parts) {

@@ -62,7 +62,12 @@ final class AdPlanDriver {
          * then its card. The same drawing path as the session feed's midroll card.
          */
         void setBreakCard(String creativeId, String deliveryId, OverlayCue card);
+        /** Time to ask for a renewed version 2 plan, with the current plan's grant (null without one). */
+        void renew(String grant);
     }
+
+    /** A host break with no report for this long (foreground) is treated as over: the app's ad player may have died. */
+    static final long HOST_BREAK_GUARD_MS = 180000;  // the longest any one ad may hold the reader's own break
 
     private static final long TICK_MS = 250;
     private static final long HOLD_MS = 8000;
@@ -114,6 +119,12 @@ final class AdPlanDriver {
     // Buy during a break: a token that outdates a late card, and whether the current ad has a shop identity.
     private long shopToken;
     private boolean shopSpot;
+    private long hostBreakElapsedMs;
+    private final Runnable renewTask = this::renewNow;
+
+    private void renewNow() {
+        if (!closed) host.renew(plan.grant);
+    }
 
     AdPlanDriver(Host host, AdPlan plan, String locale) {
         this.host = host;
@@ -126,6 +137,9 @@ final class AdPlanDriver {
         if (closed || started) return;
         started = true;
         host.later(pulse, TICK_MS);
+        scheduleRenewal();
+        // Web's sid rule: a host with its own session id gets no Buy during breaks. Said once rather than silently.
+        if (plan.breakSessionMismatch) emit("buy_unavailable", "session", null);
         if (checkExpired()) {
             if (ready != null) ready.run();
             return;
@@ -163,6 +177,9 @@ final class AdPlanDriver {
         // The host's own break: nothing of IL's is asked for or shown but the Buy button of its ad.
         if (hostBreak) {
             if (displayLive != null) host.display().setVisible(false);
+            if (host.appActive()) hostBreakElapsedMs += TICK_MS;
+            // Safety net: a break the app never ended must not keep graphics away for the rest of the view.
+            if (hostBreakElapsedMs >= HOST_BREAK_GUARD_MS) endHostBreak("break_error");
             return;
         }
         if (!host.contentPlaying()) {
@@ -481,7 +498,7 @@ final class AdPlanDriver {
             return;
         }
         host.background(() -> {
-            Fetched found = fetchLinear(tag);
+            Fetched found = fetchLinear(AdPlan.withApp(tag));
             host.foreground(() -> {
                 if (closed || walk != current || !inBreak) return;
                 if (found == null || found.ad.mediaUrl == null) current.noFill(token);
@@ -619,21 +636,47 @@ final class AdPlanDriver {
         schedule = next.schedule(schedule);
         if (hostBreaks != null) schedule.sceneWindows = next.windowsAround(hostBreaks);
         expired = false;
+        // A version 1 answer stops the renewals; a version 2 answer (re)starts them.
+        if (started) scheduleRenewal();
+    }
+
+    // About 20 s before expires_at (the server allows 120 s, so about 100 s after the plan was issued).
+    private void scheduleRenewal() {
+        host.cancel(renewTask);
+        long delay = AdPlanLoader.renewDelay(plan, host.nowMs());
+        if (delay >= 0) host.later(renewTask, delay);
     }
 
     /** The breaks the host will play, in content milliseconds: scene graphics keep the plan's clearance around them. */
     void setBreaks(long[] atMs) {
         if (closed || atMs == null) return;
         List<Long> breaks = new ArrayList<>();
-        for (long at : atMs) if (at >= 0) breaks.add(at);
+        boolean refused = false;
+        for (long at : atMs) {
+            if (at >= 0) breaks.add(at);
+            else refused = true;
+        }
+        if (refused) emit("break_refused", "position", null);
         hostBreaks = breaks;
         schedule.sceneWindows = plan.windowsAround(breaks);
     }
 
     void breakStarted(long atMs) {
         if (closed) return;
+        if (atMs < 0) {
+            emit("break_refused", "position", Long.toString(atMs));
+            return;
+        }
+        // The host plan's windows are not cleared around the app's breaks: the reported position gets the clearance.
+        if (hostBreaks == null || !hostBreaks.contains(atMs)) {
+            List<Long> breaks = hostBreaks == null ? new ArrayList<>() : new ArrayList<>(hostBreaks);
+            breaks.add(atMs);
+            hostBreaks = breaks;
+            schedule.sceneWindows = plan.windowsAround(breaks);
+        }
         hostBreak = true;
-        hostBreakAtMs = Math.max(0, atMs);
+        hostBreakElapsedMs = 0;
+        hostBreakAtMs = atMs;
         shopToken++;
         shopSpot = false;
         if (displayLive != null) host.display().setVisible(false);
@@ -644,6 +687,7 @@ final class AdPlanDriver {
 
     void hostAdStarted(String tagUrl, String adId, String creativeId) {
         if (closed || !hostBreak || expired) return;
+        hostBreakElapsedMs = 0;
         shopAdStarted("at-" + hostBreakAtMs, hostBreakAtMs == 0 ? "preroll" : "midroll", tagUrl, adId, creativeId);
     }
 
@@ -653,16 +697,22 @@ final class AdPlanDriver {
     }
 
     void hostAdEnded() {
-        if (!closed && hostBreak) shopAdEnded();
+        if (closed || !hostBreak) return;
+        hostBreakElapsedMs = 0;
+        shopAdEnded();
     }
 
     void breakEnded() {
-        if (closed || !hostBreak) return;
+        if (!closed && hostBreak) endHostBreak("host_break_end");
+    }
+
+    // Only the reader's own state and the overlay: the host's player is never touched here.
+    private void endHostBreak(String type) {
         hostBreak = false;
         shopToken++;
         shopSpot = false;
         host.setLinear(false, null, null);
-        emit("host_break_end", null, "at-" + hostBreakAtMs);
+        emit(type, null, "at-" + hostBreakAtMs);
     }
 
     /**
@@ -721,7 +771,12 @@ final class AdPlanDriver {
         if (closed) return;
         closing = true;
         if (inBreak) endBreak(false);
+        if (hostBreak) {
+            hostBreak = false;
+            host.setLinear(false, null, null);
+        }
         closed = true;
+        host.cancel(renewTask);
         host.cancel(pulse);
         host.cancel(holdExpired);
         host.cancel(displayExpired);

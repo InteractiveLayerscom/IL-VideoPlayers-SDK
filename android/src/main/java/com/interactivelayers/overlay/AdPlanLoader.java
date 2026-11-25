@@ -30,10 +30,19 @@ final class AdPlanLoader {
     interface Listener {
         void loaded(String json);
         /**
-         * No plan: {@code plan_unavailable} (204), {@code plan_not_found} (404, {@code detail} is the {@code app=}
-         * value sent, since an unregistered app gets the same opaque 404) or {@code plan_error}.
+         * No plan. {@code status} is the HTTP status, 0 without an answer; {@code reason} is {@code http_<status>},
+         * {@code timeout} or {@code network}.
          */
-        void unavailable(String type, String detail);
+        void unavailable(int status, String reason);
+    }
+
+    /** What an Android package name may be on the plan route (IL's pattern for {@code android:} ids). */
+    static final java.util.regex.Pattern PACKAGE = java.util.regex.Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_]{0,63}(\\.[A-Za-z][A-Za-z0-9_]{0,63}){1,9}");
+
+    /** Whether IL would accept this {@code app=} value at all (at most 155 characters, the package pattern). */
+    static boolean appAccepted(String app) {
+        return app != null && app.length() <= 155 && app.startsWith("android:") && PACKAGE.matcher(app.substring(8)).matches();
     }
 
     final String origin, project, asset, app;
@@ -70,14 +79,24 @@ final class AdPlanLoader {
         StringBuilder body = new StringBuilder();
         try {
             status = http.get(url, body);
+        } catch (java.net.SocketTimeoutException e) {
+            listener.unavailable(0, "timeout");
+            return;
         } catch (IOException | RuntimeException e) {
-            listener.unavailable("plan_error", e.getClass().getSimpleName());
+            listener.unavailable(0, "network");
             return;
         }
-        if (status == 200 && body.length() > 0) listener.loaded(body.toString());
-        else if (status == 204) listener.unavailable("plan_unavailable", null);
-        else if (status == 404) listener.unavailable("plan_not_found", "app=" + app);
-        else listener.unavailable("plan_error", "HTTP " + status);
+        if (status == 200) listener.loaded(body.toString());
+        else listener.unavailable(status, "http_" + status);
+    }
+
+    /** Why a 200 body was refused: a server-insertion plan (a {@code timeline}) is {@code stitched}, anything else {@code invalid}. */
+    static String refusal(String json) {
+        try {
+            return !new org.json.JSONObject(json).isNull("timeline") ? "stitched" : "invalid";
+        } catch (org.json.JSONException e) {
+            return "invalid";
+        }
     }
 
     /** When to renew {@code plan}, in ms from {@code nowMs}; -1 for a plan that does not need it. */

@@ -88,7 +88,10 @@ public final class AdPlanDriverTest {
             throw new IOException("no reply");
         }
         @Override public void ping(String url) { pings.add(url); }
-        @Override public void event(String type, String format, String id) { events.add(type); }
+        final List<String> eventLog = new ArrayList<>();
+        final List<String> renewals = new ArrayList<>();
+        @Override public void event(String type, String format, String id) { events.add(type); eventLog.add(type + "|" + format + "|" + id); }
+        @Override public void renew(String grant) { renewals.add(String.valueOf(grant)); }
         @Override public AdPlanDisplay display() { return slot; }
         @Override public boolean displayFits() { return fits; }
         long now = 1793635200000L;

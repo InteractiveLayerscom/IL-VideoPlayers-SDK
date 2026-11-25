@@ -43,8 +43,7 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     private AdPlanLoader loader;
     private boolean loading, startCalled;
     private Runnable pendingReady;
-    private final Runnable loadTimedOut = () -> loadFinished(null, "plan_error", "timeout");
-    private final Runnable renew = this::renew;
+    private final Runnable loadTimedOut = () -> loadFinished(null, 0, "timeout");
     // Host-driven state reported before the plan arrived, applied when it does.
     private long[] hostBreaks;
     private Long hostBreakAt;
@@ -97,8 +96,26 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
                                      String sessionId, String locale, AdPlanIma ima, boolean ownsIma, AdPlanDisplay display,
                                      Events events) {
         Context context = overlay.playerView().getContext();
-        AdPlanLoader loader = new AdPlanLoader(AdPlanLoader.HTTPS, origin, project, asset, AdPlanLoader.appId(context.getPackageName()));
-        AdPlanPlayer out = new AdPlanPlayer(overlay, player, loader.origin, sessionId, locale, ima, ownsIma, display, events);
+        String app = AdPlanLoader.appId(context.getPackageName());
+        AdPlanLoader loader = null;
+        String refused = null;
+        if (!AdPlanLoader.appAccepted(app)) {
+            refused = "app_id";
+        } else {
+            try {
+                loader = new AdPlanLoader(AdPlanLoader.HTTPS, origin, project, asset, app);
+            } catch (IllegalArgumentException e) {
+                refused = "request";
+            }
+        }
+        AdPlanPlayer out = new AdPlanPlayer(overlay, player, loader == null ? null : loader.origin, sessionId, locale, ima,
+                ownsIma, display, events);
+        out.app = app;
+        if (loader == null) {
+            // Nothing is sent: the content plays without ads, and the host learns why.
+            out.unavailable(0, refused);
+            return out;
+        }
         out.loader = loader;
         out.loading = true;
         out.main.postDelayed(out.loadTimedOut, AdPlanLoader.LOAD_TIMEOUT_MS);
@@ -108,35 +125,42 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
 
     private void requestPlan(String renewGrant) {
         background(() -> loader.fetch(renewGrant, new AdPlanLoader.Listener() {
-            @Override public void loaded(String json) { main.post(() -> answered(json, null, null, renewGrant != null)); }
-            @Override public void unavailable(String type, String detail) {
-                main.post(() -> answered(null, type, detail, renewGrant != null));
+            @Override public void loaded(String json) { main.post(() -> answered(json, 200, null, renewGrant != null)); }
+            @Override public void unavailable(int status, String reason) {
+                main.post(() -> answered(null, status, reason, renewGrant != null));
             }
         }));
     }
 
-    private void answered(String json, String type, String detail, boolean renewal) {
-        if (closed) return;
-        if (renewal) {
-            // A failed renewal leaves the current plan to expire on its own (plan_expired).
-            if (json == null || !replacePlan(json)) event(type == null ? "plan_invalid" : type, null, detail);
-            return;
-        }
-        if (loading) loadFinished(json, type, detail);
+    private String app;
+
+    /** {@code plan_unavailable}: {@code format} is the reason, {@code id} the exact {@code app=} value and the status. */
+    private void unavailable(int status, String reason) {
+        if (status == 404) Log.w("AdPlanPlayer", "IL answered 404 for the plan: check that app=" + app + " is registered in the console");
+        event("plan_unavailable", reason, "app=" + app + " status=" + status);
     }
 
-    private void loadFinished(String json, String type, String detail) {
+    private void answered(String json, int status, String reason, boolean renewal) {
+        if (closed) return;
+        if (renewal) {
+            // A failed renewal leaves the current plan in use until it expires on its own (plan_expired).
+            if (json != null && replacePlan(json)) {
+                event("plan_renewed", Integer.toString(current.version), null);
+            } else {
+                event("plan_renew_failed", json != null ? AdPlanLoader.refusal(json) : reason, "app=" + app + " status=" + status);
+            }
+            return;
+        }
+        if (loading) loadFinished(json, status, reason);
+    }
+
+    private void loadFinished(String json, int status, String reason) {
         if (!loading || closed) return;
         loading = false;
         main.removeCallbacks(loadTimedOut);
         AdPlan plan = json == null ? null : read(overlay, json, planOrigin, sessionId);
-        if (plan != null) {
-            use(plan);
-        } else {
-            String reason = json != null ? "plan_invalid" : type;
-            if ("plan_not_found".equals(reason)) Log.w("AdPlanPlayer", "IL answered 404 for the plan: check that " + detail + " is registered in the console");
-            event(reason, null, detail);
-        }
+        if (plan != null) use(plan);
+        else unavailable(status, json != null ? AdPlanLoader.refusal(json) : reason);
         if (!startCalled) return;
         Runnable ready = pendingReady;
         pendingReady = null;
@@ -150,20 +174,14 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         overlay.useContentClock(driver::cueVisible);
         if (hostBreaks != null) driver.setBreaks(hostBreaks);
         if (hostBreakAt != null) driver.breakStarted(hostBreakAt);
-        scheduleRenewal(plan);
-    }
-
-    private void scheduleRenewal(AdPlan plan) {
-        main.removeCallbacks(renew);
-        long delay = AdPlanLoader.renewDelay(plan, System.currentTimeMillis());
-        if (loader != null && delay >= 0) main.postDelayed(renew, delay);
     }
 
     private AdPlan current;
 
-    private void renew() {
-        if (closed || loader == null || current == null) return;
-        requestPlan(current.grant == null ? "" : current.grant);
+    // The driver times it (expires_at - 20 s); only a plan this player loaded itself is renewed here.
+    @Override public void renew(String grant) {
+        if (closed || loader == null) return;
+        requestPlan(grant == null ? "" : grant);
     }
 
     /**
@@ -177,7 +195,7 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         if (plan == null) return false;
         if (driver == null) {
             if (loading) {
-                loadFinished(planJson, null, null);
+                loadFinished(planJson, 200, null);
                 return true;
             }
             use(plan);
@@ -186,7 +204,6 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         }
         current = plan;
         driver.replace(plan);
-        scheduleRenewal(plan);
         return true;
     }
 
@@ -244,6 +261,9 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         Context app = overlay.playerView().getContext().getApplicationContext();
         SharedPreferences stored = app.getSharedPreferences(app.getPackageName() + "_preferences", Context.MODE_PRIVATE);
         AdPlan.consent = stored::getAll;
+        AdPlan.appId = app.getPackageName();
+        CharSequence label = app.getApplicationInfo().loadLabel(app.getPackageManager());
+        AdPlan.appName = label == null ? null : label.toString();
         return AdPlan.read(planJson, System.currentTimeMillis(), planOrigin, sessionId);
     }
 

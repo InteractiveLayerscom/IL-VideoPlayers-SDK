@@ -1,6 +1,6 @@
 # Native SDK fixtures: real IL responses
 
-These are real response bodies from the IL backend (branch `native-app-plan`, commit 6600f7c). They come from its test
+These are real response bodies from the IL backend (branch `native-app-plan`, commits 6600f7c..HEAD; regenerated after the stable-tag `correlator` was added). They come from its test
 environment, not production data. `_generator.py` is the throwaway pytest that produced them. It must be run from inside
 the repo's `tests/` folder. `_log.json` holds each call's exact request, status and headers.
 
@@ -12,7 +12,7 @@ the repo's `tests/` folder. `_log.json` holds each call's exact request, status 
 - **The console origin is `http://localhost:8000`** (the test `public_base_url`). In production it is
   `https://<console host>`. Treat `commerce.url` and `commerce.break_url` as opaque: never rebuild or re-host them.
 - The iADServer ads origin is `https://ads.iadserver.com`.
-- `project` is `proj_8e4cb338d66e4ec6bc6b99fd21f651f6` and `asset` is `asset-40edc822d6f24974a9af51695a88184b`. The video
+- `project` is `proj_f76ed12b1f1a409589564fbbeade5c21` and `asset` is `asset-a0a377d6c8214c1498674e53c97721d2`. The video
   is 300 s long. Grants are signed with the test secret.
 - The iADServer answers behind the product routes are recorded fakes, built with iADServer's own types. The card shapes
   are real IL output.
@@ -25,10 +25,10 @@ the repo's `tests/` folder. `_log.json` holds each call's exact request, status 
 | File | Request | Status / headers |
 |---|---|---|
 | `app-plan-v1.json` | `GET /il-player/app-plan?project=<proj>&asset=<asset>&app=android:com.example.tv` | 200; `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Content-Type: application/json`, CSP `default-src 'none'`. **No `Access-Control-*`.** |
-| `app-plan-renewed.json` | same + `&renew=<grant>`, where `<grant>` is the `grant` query parameter of `app-plan-v1.json` `commerce.url` | 200, same headers. `commerce.session` = `178311e8ffa4791646c0d0f6c728aa73`, the same as v1. It comes with a new grant. |
+| `app-plan-renewed.json` | same + `&renew=<grant>`, where `<grant>` is the `grant` query parameter of `app-plan-v1.json` `commerce.url` | 200, same headers. `commerce.session` = `31fd74b20d30ef0688bb8b51c2e156fc`, the same as v1. It comes with a new grant. |
 | `app-plan-v2.json` | same as v1 (a separate view, so it has its own session) | 200. `version: 2`, `native_gam.contract: "native-gam-plan-v1"`, `expires_at` = now + 120 s. |
 | `playback-created.json` | `POST /v1/vod/playbacks` with API key (write), body `{"asset_id","channel_id","graphics":true}` | 201. Echoes `"graphics": true` and `"routing": "steps"`. |
-| `host-plan.json` | `GET /v1/vod/playbacks/{playback_id}/plan` with API key (read) | 200, `Cache-Control: no-store`. `cuts: []`, `commerce.session` = `ed4c7d84521a3bc4faba519c687146f0`, and both URLs carry `host=1`. |
+| `host-plan.json` | `GET /v1/vod/playbacks/{playback_id}/plan` with API key (read) | 200, `Cache-Control: no-store`. `cuts: []`, `commerce.session` = `a1443784d8c5306265cc64d6ab475db2`, and both URLs carry `host=1`. |
 | `break-request-stable.json` | `POST /v1/vod/playbacks/{id}/opportunities/{oid}/request` (write) after preparing `{"cue_seconds":58}` | 200. iADServer step 0 with a tag: `ad_tag_url` is the stable tag with `sid` = the host session. |
 | `break-request-gam.json` | same, for `{"cue_seconds":178}` | 200. iADServer contextual step skipped (`no_eligible_campaign`), so GAM step 1 answers. |
 | `scene-product-card.json` | `GET <commerce.url of app-plan-v1>&window=p1&locale=es` | 200, same header set as the app plan |
@@ -95,12 +95,19 @@ No `Origin` is needed. Requests must not carry credentials.
 
 **Per-break API with graphics.**
 
+- `commerce.break_url` is optional in a host plan. It is present only when the playback was created with
+  `graphics: true`, walks the project's ordered steps (`routing: "steps"`), has no AdRouter placement, the product
+  feature is on, and the project saved at least one iADServer step with a `tag`. Without it, offer no Buy during
+  breaks.
+- For a server-insertion project, the app plan is the stitched plan (`cuts: []` plus `timeline`), the same body as
+  `/il-player/ad-plan`. Native readers refuse a plan with `timeline` for now and play without IL ads.
+
 - Only a playback created with `"graphics": true` gets stable-tag answers. Read `GET …/plan` once per playback, again
   when it expires, and again for `version: 2`.
-- Its `commerce.session` is the `sid` already inside every stable `ad_tag_url`. Don't add or replace `sid`.
+- Its `commerce.session` is the `sid` already inside every stable `ad_tag_url`, which also carries a `correlator` (16 digits) IL generated for that break. Fetch the URL exactly as given: don't add, replace or strip `sid` or `correlator`. Fetching it again (a retry, or a prefetch then play) returns the same delivery, so the `Ad@id` you use for the Buy card stays valid.
 - When the stable tag returns no ad, call `/next` with `{"after_step": <step>}` exactly as before.
 - `GET …/plan` returns 204 when there is nothing to draw: AdRouter on, no analysis, server-side insertion, the playback
   ended, or nothing selected.
 
-**Timing.** Plan URLs (`tag_url`, `ad_tag_url` of GAM) carry no `correlator` in the plan; the player adds one per
-attempt. The GAM `ad_tag_url` from `/request` already includes one.
+**Correlators.** The plan's `tag_url`s carry no `correlator`; the player adds one per attempt. Every `ad_tag_url` from
+`/request` (GAM and the stable iADServer tag) already includes one: use it as is.

@@ -67,7 +67,7 @@ public final class NativePlanTest {
         JSONObject commerce = new JSONObject(json).getJSONObject("commerce");
         assertEquals(commerce.getString("break_url"), plan.breakUrl);
         assertEquals(grantOf(commerce.getString("url")), plan.grant);
-        assertEquals("178311e8ffa4791646c0d0f6c728aa73", plan.sid);
+        assertEquals("31fd74b20d30ef0688bb8b51c2e156fc", plan.sid);
         assertEquals("preroll", plan.cuts.get(0).position);
     }
 
@@ -98,7 +98,7 @@ public final class NativePlanTest {
         assertNotNull(plan);
         assertTrue(plan.cuts.isEmpty());
         assertTrue(plan.breakUrl.contains("&host=1"));
-        assertEquals("ed4c7d84521a3bc4faba519c687146f0", plan.sid);
+        assertEquals("a1443784d8c5306265cc64d6ab475db2", plan.sid);
     }
 
     @Test public void theBreakRouteNeedsThePlansSessionAndOrigin() throws Exception {
@@ -393,14 +393,14 @@ public final class NativePlanTest {
 
     // --- A. Loading the plan ---------------------------------------------------------------------------------------
 
-    private static final String PROJECT = "proj_8e4cb338d66e4ec6bc6b99fd21f651f6";
-    private static final String ASSET = "asset-40edc822d6f24974a9af51695a88184b";
+    private static final String PROJECT = "proj_f76ed12b1f1a409589564fbbeade5c21";
+    private static final String ASSET = "asset-a0a377d6c8214c1498674e53c97721d2";
 
     private static final class Answer implements AdPlanLoader.Listener {
-        String json, type, detail;
-        int calls;
+        String json, type;
+        int status = -1, calls;
         @Override public void loaded(String body) { json = body; calls++; }
-        @Override public void unavailable(String kind, String why) { type = kind; detail = why; calls++; }
+        @Override public void unavailable(int code, String reason) { status = code; type = reason; calls++; }
     }
 
     private static AdPlanLoader loader(AdPlanLoader.Http http) {
@@ -436,19 +436,37 @@ public final class NativePlanTest {
         assertEquals(plan, ok.json);
         Answer none = new Answer();
         loader((url, body) -> 204).fetch(null, none);
-        assertEquals("plan_unavailable", none.type);
+        assertEquals("http_204", none.type);
+        assertEquals(204, none.status);
         Answer missing = new Answer();
         loader((url, body) -> 404).fetch(null, missing);
-        assertEquals("plan_not_found", missing.type);
-        assertEquals("the app= value sent, to check its registration", "app=android:com.example.tv", missing.detail);
+        assertEquals("http_404", missing.type);
         Answer slow = new Answer();
         loader((url, body) -> { throw new SocketTimeoutException("read timed out"); }).fetch(null, slow);
-        assertEquals("plan_error", slow.type);
+        assertEquals("timeout", slow.type);
+        assertEquals(0, slow.status);
+        Answer down = new Answer();
+        loader((url, body) -> { throw new java.net.ConnectException("refused"); }).fetch(null, down);
+        assertEquals("network", down.type);
         Answer broken = new Answer();
         loader((url, body) -> 500).fetch(null, broken);
-        assertEquals("plan_error", broken.type);
-        for (Answer answer : new Answer[] {ok, none, missing, slow, broken}) assertEquals(1, answer.calls);
+        assertEquals("http_500", broken.type);
+        for (Answer answer : new Answer[] {ok, none, missing, slow, down, broken}) assertEquals(1, answer.calls);
         assertTrue("bounded like the reader's other requests", AdPlanLoader.TIMEOUT_MS <= 2500 && AdPlanLoader.LOAD_TIMEOUT_MS <= 8000);
+    }
+
+    @Test public void theAppIdIsCheckedBeforeAnythingIsSent() {
+        assertTrue(AdPlanLoader.appAccepted("android:com.example.tv"));
+        assertFalse(AdPlanLoader.appAccepted("android:example"));
+        assertFalse(AdPlanLoader.appAccepted("android:1com.example"));
+        assertFalse(AdPlanLoader.appAccepted("apple:com.example.tv"));
+    }
+
+    @Test public void aRefused200SaysWhy() throws Exception {
+        assertEquals("stitched", AdPlanLoader.refusal(new JSONObject(fixture("app-plan-v1.json"))
+                .put("timeline", new JSONObject().put("kind", "stitched")).toString()));
+        assertEquals("invalid", AdPlanLoader.refusal("{\"version\": 9}"));
+        assertEquals("invalid", AdPlanLoader.refusal("<html>"));
     }
 
     @Test public void aVersion2PlanIsRenewed20SecondsBeforeItExpires() throws Exception {
@@ -464,5 +482,211 @@ public final class NativePlanTest {
             new JSONObject(fixture(name));
         }
         assertEquals(0, new JSONArray(new JSONObject(fixture("host-plan.json")).getJSONArray("cuts").toString()).length());
+    }
+
+    // --- Contract clarifications and cross-platform rules -------------------------------------------------------
+
+    private static JSONObject withClearance(String json, int seconds) throws Exception {
+        JSONObject plan = new JSONObject(json);
+        plan.getJSONObject("scenes").getJSONObject("pacing").put("cut_clearance_seconds", seconds);
+        return plan;
+    }
+
+    private boolean askedGraphic() { return host.fetched.stream().anyMatch(url -> url.contains("doubleclick")); }
+
+    @Test public void aHostPlanHasNoClearanceUntilTheAppReportsABreak() throws Exception {
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", "");
+        AdPlanDriver driver = started(withClearance(fixture("host-plan.json"), 5).toString());
+        host.position = 47000;
+        driver.tick();
+        driver.tick();
+        assertTrue("nothing reported: m1 keeps its window", askedGraphic());
+    }
+
+    @Test public void aStartedBreakGetsTheClearanceEvenWithoutSetBreaks() throws Exception {
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", "");
+        AdPlanDriver driver = started(withClearance(fixture("host-plan.json"), 5).toString());
+        driver.breakStarted(52000);
+        driver.breakEnded();
+        host.position = 47000;
+        driver.tick();
+        driver.tick();
+        assertFalse("m1 (50-58 s) is within 5 s of the reported break", askedGraphic());
+    }
+
+    @Test public void aHostBreakNeverEndedStopsBlockingGraphics() throws Exception {
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", "");
+        AdPlanDriver driver = started(fixture("host-plan.json"));
+        driver.breakStarted(10000);
+        host.position = 15500;
+        for (int i = 0; i < AdPlanDriver.HOST_BREAK_GUARD_MS / 250 - 1; i++) driver.tick();
+        assertFalse(askedGraphic());
+        driver.tick();
+        assertTrue(host.eventLog.contains("break_error|null|at-10000"));
+        assertFalse(host.linear);
+        driver.tick();
+        driver.tick();
+        assertTrue("graphics come back", askedGraphic());
+    }
+
+    @Test public void closeExpiryAndReplaceDuringAHostBreakNeverTouchTheHostsPlayer() throws Exception {
+        JSONObject v2 = new JSONObject(fixture("host-plan.json")).put("version", 2).put("expires_at", "2026-11-02T16:02:00Z")
+                .put("native_gam", new JSONObject().put("contract", "native-gam-plan-v1"));
+        AdPlanDriver driver = started(v2.toString());
+        host.calls.clear();
+        driver.breakStarted(58000);
+        driver.replace(read(fixture("host-plan.json")));
+        driver.replace(read(v2.toString()));
+        host.now = NOW + 120000;
+        driver.tick();
+        assertTrue(host.events.contains("plan_expired"));
+        driver.close();
+        for (String call : host.calls) {
+            assertFalse(call, call.equals("play") || call.equals("pause") || call.startsWith("restore") || call.equals("capture") || call.startsWith("mp4"));
+        }
+        assertFalse("the overlay gets its graphics back", host.linear);
+    }
+
+    @Test public void aNegativePositionIsRefusedOnce() throws Exception {
+        AdPlanDriver driver = started(fixture("host-plan.json"));
+        driver.breakStarted(-1);
+        assertEquals(1, host.eventLog.stream().filter(e -> e.startsWith("break_refused|position")).count());
+        assertFalse(host.linear);
+        driver.hostAdStarted(new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url"), "il-shop-midroll-" + DELIVERY, "cr1");
+        assertTrue(host.fetched.isEmpty());
+        driver.setBreaks(new long[] {-5, 1000});
+        assertEquals(2, host.eventLog.stream().filter(e -> e.startsWith("break_refused|position")).count());
+    }
+
+    @Test public void aHostWithItsOwnSessionIsToldWhyThereIsNoBuy() throws Exception {
+        AdPlanDriver driver = new AdPlanDriver(host, AdPlan.read(fixture("host-plan.json"), NOW, ORIGIN, "app-view-1"), "es");
+        driver.start(null);
+        assertEquals(1, host.eventLog.stream().filter("buy_unavailable|session|null"::equals).count());
+        JSONObject without = new JSONObject(fixture("host-plan.json"));
+        without.getJSONObject("commerce").remove("break_url");
+        AdPlanDriverTest.FakeHost other = new AdPlanDriverTest.FakeHost();
+        AdPlanDriver silent = new AdPlanDriver(other, AdPlan.read(without.toString(), NOW, ORIGIN, null), "es");
+        silent.start(null);
+        silent.breakStarted(58000);
+        silent.hostAdStarted(new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url"), "il-shop-midroll-" + DELIVERY, "cr1");
+        assertTrue("no break_url: no Buy, no event, no request", other.fetched.isEmpty());
+        assertFalse(other.events.contains("buy_unavailable"));
+    }
+
+    @Test public void renewalIsTimedFromExpiryAndAFailedOneKeepsThePlanUntilItExpires() throws Exception {
+        String v2 = fixture("app-plan-v2.json");
+        AdPlanDriver driver = started(v2);
+        assertEquals(Long.valueOf(100000), host.timers.values().stream().filter(d -> d == 100000L).findFirst().orElse(null));
+        host.fire(100000);
+        assertEquals(java.util.Collections.singletonList(read(v2).grant), host.renewals);
+        host.ima.started(0);
+        host.ima.completed();
+        host.playing = true;
+        // The renewal failed: nothing replaces the plan. It is still used at 119.999 s and expires at 120 s.
+        host.now = NOW + 119999;
+        driver.tick();
+        assertFalse(host.events.contains("plan_expired"));
+        host.now = NOW + 120000;
+        driver.tick();
+        assertTrue(host.events.contains("plan_expired"));
+    }
+
+    @Test public void aVersion1AnswerStopsRenewalsAndAVersion2AnswerStartsThem() throws Exception {
+        AdPlanDriver driver = started(fixture("app-plan-v2.json"));
+        assertTrue(host.timers.containsValue(100000L));
+        driver.replace(read(fixture("app-plan-v1.json")));
+        assertFalse("a version 1 plan is not renewed", host.timers.containsValue(100000L));
+        host.now = NOW + 30000;
+        driver.replace(AdPlan.read(new JSONObject(fixture("app-plan-v2.json")).put("expires_at", "2026-11-02T16:02:30Z").toString(), host.now, ORIGIN, null));
+        assertTrue(host.timers.containsValue(100000L));
+    }
+
+    @Test public void expiryDuringAnMp4AdResumesTheContentWhereItWas() throws Exception {
+        host.imaAvailable = false;
+        host.replies.put("https://pubads.g.doubleclick.net", "<VAST><Ad><InLine><Creatives><Creative><Linear><Duration>00:00:20</Duration><MediaFiles>"
+                + "<MediaFile delivery=\"progressive\" type=\"video/mp4\" width=\"640\">https://c.example/ad.mp4</MediaFile></MediaFiles></Linear></Creative></Creatives></InLine></Ad></VAST>");
+        JSONObject plan = new JSONObject(fixture("app-plan-v2.json"));
+        plan.getJSONArray("cuts").remove(0);
+        AdPlanDriver driver = started(plan.toString());
+        host.position = 58300;
+        driver.tick();
+        driver.adPlaying();
+        host.calls.clear();
+        host.now = NOW + 120000;
+        driver.tick();
+        assertTrue(host.calls.contains("restore 58300"));
+        assertEquals("play", host.calls.get(host.calls.size() - 1));
+        assertTrue(host.events.contains("break_error"));
+        assertTrue(host.events.contains("plan_expired"));
+    }
+
+    @Test public void theGrantNeverReachesWhatTheHostObserves() throws Exception {
+        String json = fixture("host-plan.json");
+        String grant = read(json).grant;
+        String breakUrl = new JSONObject(json).getJSONObject("commerce").getString("break_url");
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", fixture("scene-product-card.json"));
+        host.replies.put(breakUrl, fixture("break-product-card.json"));
+        AdPlanDriver driver = started(json);
+        host.position = 1000;
+        driver.tick();
+        driver.breakStarted(58000);
+        driver.hostAdStarted(new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url"), "il-shop-midroll-" + DELIVERY, "cr1");
+        driver.breakEnded();
+        assertTrue(host.fetched.stream().anyMatch(url -> url.contains(grant)));
+        for (String event : host.eventLog) assertFalse(event, event.contains(grant) || event.contains("grant="));
+        // load and renewal: only the reason and the app value come back.
+        List<String> seen = new ArrayList<>();
+        AdPlanLoader.Listener listener = new AdPlanLoader.Listener() {
+            @Override public void loaded(String body) { }
+            @Override public void unavailable(int status, String reason) { seen.add(status + reason); }
+        };
+        loader((url, body) -> 404).fetch(grant, listener);
+        loader((url, body) -> { throw new IOException("failed " + url); }).fetch(grant, listener);
+        for (String text : seen) assertFalse(text, text.contains(grant));
+    }
+
+    @Test public void gamRequestsTheReaderSendsCarryTheAppNotAPage() throws Exception {
+        AdPlan.appId = "com.example.tv";
+        AdPlan.appName = "Example TV";
+        try {
+            host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+            host.replies.put(ORIGIN + "/il-player/scene-product", "");
+            AdPlanDriver driver = started(fixture("host-plan.json"));
+            host.position = 1000;
+            driver.tick();
+            driver.tick();
+            String graphic = host.fetched.stream().filter(url -> url.contains("doubleclick")).findFirst().orElse("");
+            assertTrue(graphic, graphic.contains("&msid=com.example.tv") && graphic.contains("&an=Example%20TV"));
+            assertFalse(graphic.contains("&url=") || graphic.contains("description_url"));
+            assertEquals("a tag that already names the app keeps it", "https://pubads.g.doubleclick.net/gampad/ads?msid=x&an=y",
+                    AdPlan.withApp("https://pubads.g.doubleclick.net/gampad/ads?msid=x&an=y"));
+            assertEquals("never on iADServer", "https://ads.iadserver.com/gampad/ads?tag=t", AdPlan.withApp("https://ads.iadserver.com/gampad/ads?tag=t"));
+        } finally {
+            AdPlan.appId = null;
+            AdPlan.appName = null;
+        }
+    }
+
+    @Test public void theMp4FallbackForAGamTagCarriesTheApp() throws Exception {
+        AdPlan.appId = "com.example.tv";
+        AdPlan.appName = "Example TV";
+        try {
+            host.imaAvailable = false;
+            host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+            JSONObject plan = new JSONObject(fixture("app-plan-v2.json"));
+            plan.getJSONArray("cuts").remove(0);
+            AdPlanDriver driver = started(plan.toString());
+            host.position = 58300;
+            driver.tick();
+            String fallback = host.fetched.get(host.fetched.size() - 1);
+            assertTrue(fallback, fallback.contains("vpos=midroll") && fallback.contains("msid=com.example.tv"));
+        } finally {
+            AdPlan.appId = null;
+            AdPlan.appName = null;
+        }
     }
 }
