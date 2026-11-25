@@ -142,7 +142,7 @@ Cada lector puede pedir `GET <consola>/il-player/app-plan?project=…&asset=…&
 
 Un 204 (no hay plan todavía o se alcanzó un límite) no se reintenta: la próxima vista vuelve a preguntar. El contenido nunca espera más que el límite. La entrada en la que el host pasa el plan sigue igual en todas las plataformas.
 
-Con un plan versión 2, el lector vuelve a pedirlo con `&renew=<grant de commerce.url>` hasta tres veces, a 20, 12 y 5 s del vencimiento, de a un pedido, y se detiene en el primer éxito. La renovación conserva la sesión de compra y el estado de la vista (lo mostrado, intentado y cerrado, el pacing); lo que sale del plan se reconstruye. Una respuesta versión 1 se adopta y termina las renovaciones; una versión 2 que reemplaza un plan versión 1 las empieza. Un host que obtiene el plan por su cuenta usa `replacePlan`. Al vencer sin renovación, el lector deja de usar el plan, emite `plan_expired` y el contenido sigue.
+Con un plan versión 2, el lector vuelve a pedirlo con `&renew=<grant de commerce.url>` hasta tres veces, a 20, 12 y 5 s del vencimiento, de a un pedido, y se detiene en el primer éxito. Si un intento falla, `plan_renew_failed` sale una sola vez, con el último motivo; desde el vencimiento no se envía nada más, y un plan que vence antes de cualquier intento emite sólo `plan_expired`. En Roku y Apple el evento de fallo puede llegar en el último instante antes de `plan_expired`; la web y Samsung no dicen nada en el vencimiento ni después, sólo `plan_expired`. La renovación conserva la sesión de compra y el estado de la vista (lo mostrado, intentado y cerrado, el pacing); lo que sale del plan se reconstruye. Una respuesta versión 1 se adopta y termina las renovaciones; una versión 2 que reemplaza un plan versión 1 las empieza. Un host que obtiene el plan por su cuenta usa `replacePlan`. Al vencer sin renovación, el lector deja de usar el plan, emite `plan_expired` y el contenido sigue.
 
 ### Cortes que reproduce la app (API por corte)
 
@@ -169,10 +169,23 @@ Mientras dura un corte informado no se dibuja nada de IL salvo Comprar. La ficha
 | `plan_renew_failed` | Fallaron los intentos de renovación; una vez, con el último motivo. |
 | `plan_expired` | El plan versión 2 venció; sin más datos. |
 | `break_error` | Un corte terminó de forma anormal, también la red de seguridad de un corte de la app. |
-| `break_refused` | Una posición de corte informada que no se acepta (motivo `position`). |
+| `break_refused` | Un aviso de corte que no se acepta: motivo `position` (posición negativa o no finita) o, en Apple (y Android), `plan_has_cuts` (llamadas de la app sobre un plan que trae sus propios cortes). |
 | `buy_unavailable` | Hay `break_url` pero la sesión no es `commerce.session` (motivo `session`). |
 
 Ningún evento ni campo público lleva el `grant`, el valor de `renew` ni las URLs de `commerce`.
+
+### Diferencias entre plataformas
+
+Donde las plataformas difieren a propósito o por su API, esta tabla lo dice. Android figura con lo que ya se sabe de su API; su rama todavía no está en main.
+
+| Tema | Web y Samsung | Roku | Apple (iOS, tvOS) | Android |
+| --- | --- | --- | --- | --- |
+| Red de seguridad de un corte de la app sin `breakEnded` | 120 s | 130 s | 300 s (`hostBreakLimitSeconds`) | Todavía no en main |
+| Límite del pedido del plan (ruta de apps) | 4 s | 5 s | 5 s (`planTimeoutSeconds`) | Todavía no en main |
+| Unidad de `setBreaks` y `breakStarted` | Segundos | Milisegundos | Segundos | Milisegundos (`long`); todavía no en main |
+| Forma de los eventos | `onEvent({ type, ... })`: `plan_unavailable` trae `{ app, status, reason }`, `plan_renew_failed` trae `{ reason }` | Campo `event` con `{ type, ... }`: `plan_unavailable` trae `{ status, app, reason }`, `plan_renew_failed` trae `{ status, reason }` | Callback `(tipo, formato, id)`: en `plan_unavailable` el `id` es el `app` y el `formato` el motivo, sin estado numérico; en `plan_renewed` el `id` es la versión | Todavía no en main |
+| `msid` y `an` en pedidos a GAM | Sólo si el host los pasa en `appParams`, y sólo con un plan de la ruta de apps | Nunca los agrega | Los agrega el SDK (bundle id y nombre visible) en sus propios pedidos a GAM, no en los tags que pasa a IMA | Todavía no en main |
+| Avisos de corte de la app sobre un plan con sus propios cortes | Se aceptan por diseño: es el uso existente y soportado de una página cuyo propio ad manager reproduce los cortes del plan (por ejemplo el de Shaka, con `ads.vmap()` o `ads.cuts`) y se los informa al módulo con `setBreaks` y `setBreakActive` | Se aceptan | Se rechazan con `break_refused` (motivo `plan_has_cuts`) | Todavía no en main |
 
 ### Identidad de la app en Google Ad Manager
 
