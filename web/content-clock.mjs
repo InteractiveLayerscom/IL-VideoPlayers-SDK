@@ -14,10 +14,10 @@ export function videoClock(video) {
 // the graphic before the ad's first frame.
 const AD_EDGE_SECONDS = 0.25;
 const AD_LEAD_SECONDS = 0.5;
-// `inAd()` also says yes this close before an ad: a player's position can trail the frame it presents by a few
-// milliseconds (Video.js put the first ad frame 15–20 ms before the ad segment's start in the browser tests), and a
-// kept product closed one frame early is never one left over the ad.
-const AD_FRAME_SECONDS = 0.05;
+// `inAd()` also says yes this close before an ad: Video.js (VHS) puts the first ad frame before the ad segment's start
+// in its own timeline, by 15–20 ms on the local fixture and 40–70 ms on a real MediaTailor stream, so the position of
+// that frame still falls in the content segment. A kept product closed a few frames early is never one left over the ad.
+const AD_FRAME_SECONDS = 0.2;
 // How far content PDTs may be from where the layout puts them: IL writes milliseconds, playlists round
 // #EXTINF to the millisecond.
 const PDT_TOLERANCE = 0.05;
@@ -357,6 +357,8 @@ export function shakaContentClock({ player, video = player?.getMediaElement?.(),
   if (player.getManifest?.())
     throw new TypeError('shakaContentClock must be created before player.load(): the playlists are read as Shaka downloads them');
   const layouts = new Map();
+  // The multivariant playlists downloaded: the variant URIs they write are relative to them.
+  const masters = [];
   const decoder = new TextDecoder();
   let switches = null;   // [{ from, uris }] in stream order, the active video variant from `from` on
   let missingSaid = false;
@@ -432,8 +434,15 @@ export function shakaContentClock({ player, video = player?.getMediaElement?.(),
     } catch {
       return;
     }
-    if (!text.includes('#EXTINF')) return;
     const uri = response.originalUri ?? response.uri;
+    if (!text.includes('#EXTINF')) {
+      // Both the URL asked for and the one after redirects: Shaka resolves the variants against the latter.
+      if (text.includes('#EXT-X-STREAM-INF')) {
+        for (const base of [response.uri, response.originalUri])
+          if (typeof base === 'string' && !masters.includes(base)) masters.push(base);
+      }
+      return;
+    }
     const layout = report(layoutSegments(parseMediaPlaylist(text), bounds));
     layouts.set(uri, layout);
     const index = new Map();
@@ -453,14 +462,16 @@ export function shakaContentClock({ player, video = player?.getMediaElement?.(),
     clock.notify();
   };
   // Shaka names a variant by the playlist URIs as the master writes them (often relative): a downloaded
-  // playlist is that variant's when the written URI, resolved against the playlist's own URL, is that URL.
-  const named = (written, uri) => {
+  // playlist is that variant's when the written URI, resolved against the master that wrote it, is that URL.
+  // MediaTailor writes them relative to the master in another directory (`../../../manifest/…/0.m3u8`); resolving
+  // against the playlist's own URL only works when both sit side by side, and stays as the fallback.
+  const named = (written, uri) => [...masters, uri].some((base) => {
     try {
-      return new URL(written, uri).href === uri;
+      return new URL(written, base).href === uri;
     } catch {
       return false;
     }
-  };
+  });
   // A downloaded playlist is a video one when some variant names it as its video.
   const videoPlaylist = (uri) => {
     try {

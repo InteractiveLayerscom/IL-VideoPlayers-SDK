@@ -9,6 +9,7 @@ sub init()
     m.fixedNow = invalid
     m.loader = invalid
     m.loadRevision = 0
+    m.renewAttempt = 0
     m.load = invalid
 end sub
 
@@ -91,8 +92,19 @@ sub receivePlan(result as Dynamic)
     load = m.load
     plan = invalid
     if result.status = 200 and adPlanIsText(result.body) then plan = parseJson(result.body)
+    reason = planFailure(result, plan)
     if load.renewing
-        if plan <> invalid then replacePlan(plan)
+        if plan <> invalid
+            if replacePlan(plan) then return
+            reason = planFailure(result, plan)
+            if reason = "" then reason = "invalid"
+        end if
+        ' Up to three attempts (expires_at - 20 s, - 12 s, - 5 s); only the last failure is reported.
+        if m.renewAttempt < 2
+            scheduleRenewal(m.renewAttempt + 1, result.status, reason)
+        else
+            m.top.event = { type: "plan_renew_failed", status: result.status, reason: reason }
+        end if
         return
     end if
     if plan <> invalid
@@ -105,23 +117,44 @@ sub receivePlan(result as Dynamic)
         end if
     end if
     ' 404 is the same answer for an unknown project, video or app: the app id sent is what to check first.
-    reason = "http_" + result.status.toStr()
-    if result.status = 0
-        reason = "network"
-        if result.timedOut = true then reason = "timeout"
-    end if
+    if reason = "" then reason = "invalid"
     m.top.event = { type: "plan_unavailable", status: result.status, app: load.app, reason: reason }
     m.load = invalid
     m.top.contentReady = true
 end sub
 
-' About 20 s before a version 2 plan expires, ask again with the current grant to keep the commerce session.
-sub scheduleRenewal()
+' Why a plan answer is not usable: "" for a 200 the reader accepted (or has yet to read).
+function planFailure(result as Object, plan as Dynamic) as String
+    if result.status = 200
+        if type(plan) = "roAssociativeArray"
+            ' A server-insertion project answers with its stitched plan, which native readers refuse for now.
+            if plan.timeline <> invalid then return "stitched"
+            return ""
+        end if
+        return "invalid"
+    end if
+    if result.status = 0
+        if result.timedOut = true then return "timeout"
+        return "network"
+    end if
+    return "http_" + result.status.toStr()
+end function
+
+' Before a version 2 plan expires, ask again with the current grant to keep the commerce session: at
+' expires_at - 20 s, then - 12 s and - 5 s if the earlier attempt failed.
+sub scheduleRenewal(attempt = 0 as Integer, lastStatus = 0 as Integer, lastReason = "" as String)
     m.renewTimer.control = "stop"
+    m.renewAttempt = attempt
     if m.load = invalid or m.plan = invalid then return
     if m.plan.version <> 2 then return
-    delay = m.plan.expires - planNow() - 20
-    if delay < 1 then delay = 1
+    left# = (m.plan.expiresMs - planNowMs()) / 1000#
+    ' A missed slot still before expiry goes out at once; one that could only fire at or after expiry is not sent.
+    if left# <= 0.1
+        if attempt > 0 then m.top.event = { type: "plan_renew_failed", status: lastStatus, reason: lastReason }
+        return
+    end if
+    delay = left# - [20, 12, 5][attempt]
+    if delay < 0.1 then delay = 0.1
     m.renewTimer.duration = delay
     m.renewTimer.control = "start"
 end sub

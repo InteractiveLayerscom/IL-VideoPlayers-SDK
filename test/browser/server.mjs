@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { makeStitched } from './stitched-fixture.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
-const fixture = makeStitched(process.env.IL_STITCHED_FIXTURE || resolve(tmpdir(), 'il-sdk-stitched-fixture'));
+const fixture = makeStitched(process.env.IL_STITCHED_FIXTURE || resolve(tmpdir(), 'il-sdk-stitched-fixture-2'));
 const types = {
   '.html': 'text/html; charset=utf-8', '.mjs': 'application/javascript', '.js': 'application/javascript',
   '.css': 'text/css', '.woff2': 'font/woff2', '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.mp4': 'video/mp4',
@@ -15,6 +15,12 @@ const types = {
 
 createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
+  // The plan IL built for the real stream, when the opt-in real-stream run gives one (IL_STITCHED_REAL_PLAN).
+  if (url.pathname === '/real/plan.json') {
+    if (!process.env.IL_STITCHED_REAL_PLAN) return res.writeHead(404).end();
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return createReadStream(process.env.IL_STITCHED_REAL_PLAN).pipe(res);
+  }
   const stitched = url.pathname.startsWith('/stitched/');
   const base = stitched ? fixture : root;
   const path = resolve(base, '.' + (stitched ? url.pathname.slice('/stitched'.length) : url.pathname));

@@ -5,6 +5,9 @@
 // tone is sounding (440 Hz content, 1000 Hz ads), to check picture and sound stay together after the ads.
 // With &product=1 (or 2) the plan has no graphics but a scene product (`commerce`) in one window before (or after) the
 // mid-roll, and each sample also records whether the product card and its open panel are visible.
+// With &src=<master URL>&plan=<plan JSON path> it plays an external stitched stream (a real MediaTailor session) with
+// the plan IL built for it instead of the local fixture; with &product=1 the plan gets a scene product in the two
+// windows of REAL_WINDOWS, both in one load.
 import { attachHtmlVideo, attachVideoJs } from '/web/index.mjs';
 import { attachAds, hlsContentClock, nativeHlsContentClock, shakaContentClock, videoJsContentClock } from '/web/ads.mjs';
 
@@ -12,12 +15,20 @@ const params = new URLSearchParams(location.search);
 const kind = params.get('player');
 const plain = params.get('plain') === '1';
 const productMode = ['1', '2'].includes(params.get('product'));
-const src = new URL(`/stitched/${params.get('stream') || 'master'}.m3u8`, location.href).href;
+const real = params.has('src');
+let src = real ? params.get('src') : new URL(`/stitched/${params.get('stream') || 'master'}.m3u8`, location.href).href;
+// Safari's clock needs the explicit session (its manifest can be read again without opening another session): the
+// page asks MediaTailor for one, as a publisher's page does, and plays its manifestUrl.
+if (real && params.get('player') === 'native') {
+  const res = await fetch(src.replace('/v1/master/', '/v1/session/'), { method: 'POST', body: '{}',
+    headers: { 'Content-Type': 'application/json' } });
+  src = new URL((await res.json()).manifestUrl, src).href;
+}
 const TAG = 'https://pubads.g.doubleclick.net/gampad/ads?iu=/123/site/graphic&env=vp&output=vast&cust_params=il_format%3Dsuper';
 const CREATIVE = 'https://creative.test/super.png';
 const VAST = `<VAST version="3.0"><Ad id="ad"><InLine><AdTitle>C</AdTitle><Impression>https://creative.test/i</Impression><Creatives><Creative><NonLinearAds><NonLinear width="720" height="108"><StaticResource creativeType="image/png">${CREATIVE}</StaticResource></NonLinear></NonLinearAds></Creative></Creatives></InLine></Ad></VAST>`;
 // The window straddles the mid-roll (content 14): content 10–20 is stream 14–18 and 22–28.
-const plan = {
+let plan = {
   version: 1, expires_at: new Date(Date.now() + 3600000).toISOString(), page_url: 'https://publisher.example/v', duration: 30,
   timeline: { kind: 'stitched', pdt_origin: '2000-01-01T00:00:00.000Z', breaks: [0, 14] }, cuts: [],
   scenes: {
@@ -32,12 +43,21 @@ const plan = {
 // from the host (not loadPlan), so commerce.url must be on the `planOrigin` it states.
 const PLAN_ORIGIN = 'https://console.test';
 const PRODUCT_ROUTE = PLAN_ORIGIN + '/il-player/scene-product';
-const PRODUCT_WINDOWS = [{ id: 'w1', start_ms: 6000, end_ms: 11000 }, { id: 'w2', start_ms: 16000, end_ms: 21000 }];
+// On the real stream (300 s of content, the mid-roll at content 60): content 40–50 s before it and 70–78 s after it,
+// 30 s apart as the SDK requires between window starts.
+const REAL_WINDOWS = [{ id: 'w1', start_ms: 40000, end_ms: 50000 }, { id: 'w2', start_ms: 70000, end_ms: 78000 }];
+const PRODUCT_WINDOWS = real ? REAL_WINDOWS
+  : [{ id: 'w1', start_ms: 6000, end_ms: 11000 }, { id: 'w2', start_ms: 16000, end_ms: 21000 }];
+if (real) {
+  // The plan as IL built it; only its expiry is moved forward (a saved plan has expired) for this page.
+  plan = await (await fetch(params.get('plan'))).json();
+  plan.expires_at = new Date(Date.now() + 3600000).toISOString();
+}
 if (productMode) {
-  delete plan.scenes;
+  if (!real) delete plan.scenes;
   plan.commerce = { kind: 'scene_product', url: PRODUCT_ROUTE + '?project=p1&asset=a&grant=x.y', lead_ms: 2000,
     pacing: { min_seconds: 1.5, max_seconds: null, gap_after_seconds: 0, max_per_video: null, cut_clearance_seconds: 0 },
-    windows: [PRODUCT_WINDOWS[Number(params.get('product')) - 1]] };
+    windows: real ? REAL_WINDOWS : [PRODUCT_WINDOWS[Number(params.get('product')) - 1]] };
 }
 // The card IL answers for a window (docs/scene-product.md, section 3).
 const productCard = (id) => {
@@ -70,6 +90,8 @@ const loadScript = (url) => new Promise((resolve, reject) => {
 const stage = document.querySelector('#stage');
 let video = document.querySelector('#video');
 if (plain) video.muted = false;
+// Safari plays the real stream itself: without CORS mode its frames would taint the canvas the sampler reads.
+if (real) video.crossOrigin = 'anonymous';
 let clock = null;
 let session;
 // The session renders commerce only for the product page; the graphics checks keep a session without it.
@@ -117,7 +139,8 @@ if (kind === 'hls') {
 } else if (kind === 'native') {
   if (!video.canPlayType('application/vnd.apple.mpegurl')) throw new Error('no native HLS');
   // A fixture stands for the session's own manifest: with MediaTailor this is the explicit session's manifestUrl.
-  if (!plain) clock = nativeHlsContentClock({ video, plan, playlistUrl: src, sessionManifest: true });
+  if (!plain) clock = nativeHlsContentClock({ video, plan, playlistUrl: src, sessionManifest: !real,
+    onEvent: (event) => events.push(event) });
   video.src = src;
 }
 let ads = null;
@@ -169,21 +192,23 @@ const shown = (element) => !!element && element.checkVisibility({ opacityPropert
   element.getBoundingClientRect().width > 0;
 const productVisible = () => [...stage.querySelectorAll('.il-commerce')].some(shown);
 const panelVisible = () => [...stage.querySelectorAll('.il-commerce-panel')].some(shown);
-function sample() {
+function sample(metadata) {
   context.drawImage(video, 0, 0, 16, 9);
   const data = context.getImageData(0, 0, 16, 9).data;
   const at = (x, y) => [...data.slice((y * 16 + x) * 4, (y * 16 + x) * 4 + 3)];
   const [r, g, b] = at(8, 4);
   // The four bands of a content frame (see stitched-fixture.mjs), each read at its center.
   const bands = [2, 6, 10, 14].map((x) => at(x, 4));
-  samples.push({ t: video.currentTime, r, g, b, bands, clock: clock ? clock.time() : null, graphic: graphicVisible(),
+  // Four points of the top row, for the real stream's pictures (the test pattern's bars, or the ad's light slide).
+  const top = [1, 4, 6, 8].map((x) => at(x, 1));
+  samples.push({ t: video.currentTime, media: metadata?.mediaTime ?? null, r, g, b, bands, top, rate: video.playbackRate, clock: clock ? clock.time() : null, graphic: graphicVisible(),
     images: creatives().length, product: productVisible(), panel: panelVisible(),
-    products: stage.querySelectorAll('.il-commerce').length, hidden: document.visibilityState === 'hidden',
+    products: stage.querySelectorAll('.il-commerce').length, panels: stage.querySelectorAll('.il-commerce-panel').length, hidden: document.visibilityState === 'hidden',
     paused: video.paused, seeking: video.seeking, sinceSeek: performance.now() - seekedAt,
     tone: tone(), wall: performance.now() });
 }
-function onFrame() {
-  sample();
+function onFrame(now, metadata) {
+  sample(metadata);
   // The product is read again once every frame callback of this rendering step has run (the SDK's own included),
   // in an animation frame callback of the same step: what is painted with this frame.
   if (productMode) {
@@ -214,6 +239,7 @@ window.harness = {
   duration: () => video.duration,
   waiting: () => waiting,
   switchRendition: () => switchRendition(),
+  setRate: (rate) => { video.playbackRate = rate; },
   destroy: () => ads?.destroy(),
   // Opens the detail of the product card on screen, as the viewer's click on its button.
   openProduct() {
