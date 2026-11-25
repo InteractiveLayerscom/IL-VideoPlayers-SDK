@@ -58,6 +58,13 @@ public final class ILAdPlanPlayer {
     private var hostCut: AdPlan.Cut?
     /// Bumped by every ad start and end: a card that answers late for an ad already gone is dropped.
     private var spotToken = 0
+    /// The app's identity on the GAM requests this reader sends itself (`msid`, `an`). Replaced in tests.
+    var appIdentity = AdPlan.bundleIdentity
+    /// Waits until a version 2 plan expires. Replaced in tests; setting it reschedules the wait.
+    var expirySleep: (TimeInterval) async -> Void = { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } {
+        didSet { scheduleExpiry() }
+    }
+    private var expiryTask: Task<Void, Never>?
     /// The wall clock. Replaced in tests, which run on the fixtures' frozen time.
     let now: () -> Date
     private let locale: String
@@ -121,6 +128,7 @@ public final class ILAdPlanPlayer {
         session = URLSession(configuration: sessionConfiguration)
         overlay.useContentClock { [weak self] id in self?.cueVisible(id) }
         announceSessionMismatch()
+        scheduleExpiry()
     }
 
     /// Call before playing content. Returns once the host may play it.
@@ -134,9 +142,11 @@ public final class ILAdPlanPlayer {
     }
 
     /// When `load` gets no plan it reports `plan_unavailable` through `events`, once: the format is the reason and the
-    /// id is the exact `app` value sent (or that would have been sent). Reasons: `204` (no plan right now; ask again on
-    /// the next view), `404` (unknown project, video or app: check that this `app` value is registered in the Console),
-    /// `http_<status>`, `timeout`, `network`, `invalid_plan`, `invalid_origin`, `invalid_bundle_id`.
+    /// id is the exact `app` value sent (or that would have been sent). Reasons: `http_<status>` — `http_204` (no plan
+    /// right now; ask again on the next view), `http_404` (unknown project, video or app: check that this `app` value is
+    /// registered in the Console) or any other status —, `app_id` (a bundle id the server would refuse; nothing is sent),
+    /// `request` (the URL cannot be built, e.g. an origin without HTTPS), `timeout`, `network`, `stitched` (a plan with a
+    /// server-insertion `timeline`) and `invalid` (any other unreadable answer). A cancelled caller gets nil and no event.
     public static let planTimeoutSeconds: TimeInterval = 5
 
     /// Requests the plan of `asset` from IL (`GET <origin>/il-player/app-plan?project=…&asset=…&app=apple:<bundle id>`)
@@ -165,10 +175,9 @@ public final class ILAdPlanPlayer {
         }
         guard let url = planURL(origin: origin, project: project, asset: asset, app: app) else { return unavailable("request") }
         let answer = await fetchPlan(url, configuration: sessionConfiguration)
-        guard case .success(let (status, data)) = answer else {
-            if case .failure(let error) = answer, (error as? URLError)?.code == .timedOut { return unavailable("timeout") }
-            return unavailable("network")
-        }
+        // The caller gave up (its view went away): nothing is built, installed or scheduled.
+        if Task.isCancelled { return nil }
+        guard case .success(let (status, data)) = answer else { return unavailable(failureReason(answer)) }
         switch status {
         case 200: break
         // No plan right now: play without ads and ask again on the next view, never in a loop.
@@ -188,6 +197,13 @@ public final class ILAdPlanPlayer {
         reader.loadURL = url
         reader.scheduleRenewal()
         return reader
+    }
+
+    static func failureReason(_ answer: Result<(Int, Data), Error>) -> String {
+        switch answer {
+        case .success(let (status, _)): return "http_\(status)"
+        case .failure(let error): return (error as? URLError)?.code == .timedOut ? "timeout" : "network"
+        }
     }
 
     /// The app-plan URL, HTTPS only, as every plan and product URL of this SDK.
@@ -240,9 +256,7 @@ public final class ILAdPlanPlayer {
                 return
             }
             // Never the URL: it carries the grant.
-            let reason: String
-            if case .success(let (status, _)) = answer { reason = "http_\(status)" } else { reason = "network" }
-            self.emit("plan_renew_failed", reason, "")
+            self.emit("plan_renew_failed", Self.failureReason(answer), "")
         }
     }
 
@@ -278,6 +292,7 @@ public final class ILAdPlanPlayer {
         measures = measures.filter { id, _ in kept2.contains { $0.id == id } }
         if displayLive != nil { display?.clear(); displayLive = nil }
         announceSessionMismatch()
+        scheduleExpiry()
     }
 
     private var mismatchAnnounced = false
@@ -286,6 +301,20 @@ public final class ILAdPlanPlayer {
         guard !mismatchAnnounced, plan.breakURLOffered, plan.breakURL == nil, !plan.breakShop, !sessionID.isEmpty else { return }
         mismatchAnnounced = true
         emit("buy_unavailable", "session", "")
+    }
+
+    /// As the web's timer: a paused player or a host break moves no playhead, yet the approval still ends on time.
+    private func scheduleExpiry() {
+        expiryTask?.cancel()
+        expiryTask = nil
+        guard plan.native, !closed, !expired else { return }
+        let wait = max(0, plan.expiresAt.timeIntervalSince(now()))
+        let sleep = expirySleep
+        expiryTask = Task { @MainActor [weak self] in
+            await sleep(wait)
+            guard !Task.isCancelled, let self, !self.closed else { return }
+            _ = self.checkExpiry()
+        }
     }
 
     /// The version 2 approval is over: what it drew goes, pending answers are dropped, nothing new starts.
@@ -300,6 +329,9 @@ public final class ILAdPlanPlayer {
         displayLive = nil
         planCues = []
         overlay.setPlanCues([])
+        // A Buy card asked or shown in a host break goes too; the break itself, and the host's player, are the app's.
+        spotToken += 1
+        if inBreak, overlay.midrollIdentity != nil { overlay.setLinearAdBreak(true) }
         emit("plan_expired", nil, "")
         return true
     }
@@ -323,6 +355,11 @@ public final class ILAdPlanPlayer {
     /// nothing of IL's is drawn except Buy for a reported ad, and answers still pending are dropped.
     public func breakStarted(at position: TimeInterval) {
         guard !closed, !inBreak else { return }
+        // One break driver per plan: host calls go with a host plan (`cuts: []`), never with the reader's own breaks.
+        guard plan.cuts.isEmpty else {
+            emit("break_refused", "plan_has_cuts", "")
+            return
+        }
         guard position.isFinite, position >= 0 else {
             emit("break_refused", "position", "")
             return
@@ -410,8 +447,8 @@ public final class ILAdPlanPlayer {
         overlay.setLinearAdBreak(true, creativeID: creativeID, deliveryID: delivery)
         let token = spotToken
         emit("request", "break_product", cut.id)
-        Task {
-            guard let (status, data) = await body(target), !closed, token == spotToken, inBreak else { return }
+        Task { [weak self] in
+            guard let self, let (status, data) = await self.body(target), !self.closed, token == self.spotToken, self.inBreak else { return }
             guard status == 200, let card = AdPlan.breakCue(data, creative: creativeID, delivery: delivery) else {
                 emit("no_fill", "break_product", cut.id)
                 return
@@ -436,6 +473,7 @@ public final class ILAdPlanPlayer {
         guard !closed else { return }
         closed = true
         renewal?.cancel()
+        expiryTask?.cancel()
         if let observer { player.removeTimeObserver(observer) }
         observer = nil
         session.invalidateAndCancel()
@@ -536,7 +574,7 @@ public final class ILAdPlanPlayer {
             askDisplay(window, unit: graphic.tagURL)
             return
         }
-        let tag = AdPlan.graphicTag(graphic.tagURL, format: graphic.format, targeting: window.targeting, page: plan.page)
+        let tag = AdPlan.graphicTag(graphic.tagURL, format: graphic.format, targeting: window.targeting, page: plan.page, app: appIdentity)
         let available = window.end - max(window.start, now)
         Task {
             var answer = AdPlan.GraphicAnswer.unusable
@@ -656,7 +694,7 @@ public final class ILAdPlanPlayer {
     private func followWrappers(_ tag: String) async -> (ad: AdPlan.LinearAd, vast: String)? {
         var ad = AdPlan.LinearAd()
         // A GAM VAST this reader fetches itself (no engine, or the MP4 fallback) carries the app's identity.
-        var next = AdPlan.withAppIdentity(tag)
+        var next = AdPlan.withAppIdentity(tag, app: appIdentity)
         var first: String?
         for _ in 0...Self.maxWrappers {
             guard let url = URL(string: next), let (status, data) = await body(url), (200..<300).contains(status) else { return nil }

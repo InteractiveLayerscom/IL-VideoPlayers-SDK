@@ -426,8 +426,8 @@ struct AdPlan {
     }
 
     /// The app's identity for Google Ad Manager (`msid` = bundle id, `an` = app name), as Google's "VAST ad tag URL
-    /// parameters" asks for in-app requests. Replaced in tests.
-    nonisolated(unsafe) static var appIdentity: (id: String, name: String)? = {
+    /// parameters" asks for in-app requests. Immutable; a reader takes it as its default and tests inject their own.
+    static let bundleIdentity: (id: String, name: String)? = {
         guard let id = Bundle.main.bundleIdentifier, !id.isEmpty else { return nil }
         let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? id
@@ -436,8 +436,9 @@ struct AdPlan {
 
     /// Adds `msid`/`an` to a GAM request this SDK sends itself, unless the tag already carries them. IMA adds the
     /// app's identity to the requests it makes, so tags handed to IMA are left alone. Never page parameters for an app.
-    static func withAppIdentity(_ url: String) -> String {
-        guard let app = appIdentity, URLComponents(string: url)?.host?.lowercased() == "pubads.g.doubleclick.net" else { return url }
+    /// Only the exact host `pubads.g.doubleclick.net`: it is the only GAM origin the plan reader accepts (`allowed`).
+    static func withAppIdentity(_ url: String, app: (id: String, name: String)?) -> String {
+        guard let app, URLComponents(string: url)?.host?.lowercased() == "pubads.g.doubleclick.net" else { return url }
         var out = url
         if query(out, "msid").isEmpty { out = setQuery(out, "msid", app.id) }
         if query(out, "an").isEmpty { out = setQuery(out, "an", app.name) }
@@ -497,7 +498,8 @@ struct AdPlan {
         }
     }
 
-    static func graphicTag(_ tagURL: String, format: String, targeting: [String: String], page: String?) -> String {
+    static func graphicTag(_ tagURL: String, format: String, targeting: [String: String], page: String?,
+                           app: (id: String, name: String)? = nil) -> String {
         var pairs = query(tagURL, "cust_params").split(separator: "&").map(String.init)
         let replaced = Set(targeting.keys).union(["il_format"])
         pairs.removeAll { replaced.contains(String($0.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)[0])) }
@@ -505,7 +507,7 @@ struct AdPlan {
         pairs.append("il_format=" + encode(format))
         var url = setQuery(tagURL, "cust_params", pairs.joined(separator: "&"))
         if let page { url = setQuery(setQuery(url, "url", page), "description_url", page) }
-        return withAppIdentity(correlated(url))
+        return withAppIdentity(correlated(url), app: app)
     }
 
     func productURL(windowID: String, locale: String) -> URL? {

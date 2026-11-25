@@ -278,7 +278,7 @@ final class AdPlanPlayerTests: XCTestCase {
         await player.start()
         XCTAssertEqual(played?.absoluteString, "https://c.example/a.mp4")
         // Same request as IMA got, plus the app's identity that IMA would have added itself.
-        XCTAssertEqual(StubNetwork.seen.first, engine.tags.first.map(AdPlan.withAppIdentity))
+        XCTAssertEqual(StubNetwork.seen.first, engine.tags.first.map { AdPlan.withAppIdentity($0, app: AdPlan.bundleIdentity) })
         XCTAssertEqual(events.last?.type, "break_end")
         player.stop()
     }

@@ -429,12 +429,12 @@ final class NativePlayerTests: XCTestCase {
         avPlayer.replaceCurrentItem(with: content)
         avPlayer.rate = 1
         let view = overlay()
-        let reader = try XCTUnwrap(ILAdPlanPlayer(overlay: view, player: avPlayer, planJSON: NativeFixtures.data("app-plan-v2"),
+        let reader = try XCTUnwrap(ILAdPlanPlayer(overlay: view, player: avPlayer, planJSON: hostPlanV2(),
                                                   planOrigin: NativeFixtures.console, sessionID: "", locale: "es", engine: nil,
                                                   displaySlot: nil, sessionConfiguration: configuration,
                                                   events: { [weak self] in self?.record($0, $1, $2) }, now: { [weak self] in self?.clock ?? Date() }))
         reader.breakStarted(at: 30)
-        XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("app-plan-v2")))
+        XCTAssertTrue(reader.replacePlan(try hostPlanV2()))
         clock = NativeFixtures.frozenNow.addingTimeInterval(121)
         reader.advance(nowMs: 31000)
         XCTAssertTrue(events.contains { $0.type == "plan_expired" })
@@ -533,24 +533,23 @@ final class NativePlayerTests: XCTestCase {
     }
 
     func testGAMRequestsTheReaderSendsCarryTheAppIdentity() async throws {
-        let saved = AdPlan.appIdentity
-        AdPlan.appIdentity = ("com.example.app", "Example App")
-        defer { AdPlan.appIdentity = saved }
-        let tag = AdPlan.graphicTag("https://pubads.g.doubleclick.net/gampad/ads?iu=/1/a", format: "super", targeting: [:], page: nil)
+        let app = (id: "com.example.app", name: "Example App")
+        let tag = AdPlan.graphicTag("https://pubads.g.doubleclick.net/gampad/ads?iu=/1/a", format: "super", targeting: [:], page: nil, app: app)
         XCTAssertEqual(AdPlan.query(tag, "msid"), "com.example.app")
         XCTAssertEqual(AdPlan.query(tag, "an"), "Example App")
         XCTAssertEqual(AdPlan.query(tag, "url"), "")
         XCTAssertEqual(AdPlan.query(tag, "description_url"), "")
         // A tag that already names the app keeps its values; other hosts are untouched.
-        let own = AdPlan.withAppIdentity("https://pubads.g.doubleclick.net/gampad/ads?msid=x.y&an=Mine")
+        let own = AdPlan.withAppIdentity("https://pubads.g.doubleclick.net/gampad/ads?msid=x.y&an=Mine", app: app)
         XCTAssertEqual(AdPlan.query(own, "msid"), "x.y")
         XCTAssertEqual(AdPlan.query(own, "an"), "Mine")
-        XCTAssertEqual(AdPlan.withAppIdentity("https://ads.iadserver.com/gampad/ads?tag=t"), "https://ads.iadserver.com/gampad/ads?tag=t")
+        XCTAssertEqual(AdPlan.withAppIdentity("https://ads.iadserver.com/gampad/ads?tag=t", app: app), "https://ads.iadserver.com/gampad/ads?tag=t")
         // The MP4 path (no engine) fetches the GAM VAST with the identity.
         FixtureNetwork.reset([:])
         let reader = try attach(try NativeFixtures.data([
             "version": 1, "expires_at": "2099-01-01T00:00:00Z",
             "cuts": [["id": "pre", "at": 0, "tag_url": "https://pubads.g.doubleclick.net/gampad/ads?iu=/1/a"]]]), overlay: overlay())
+        reader.appIdentity = app
         await reader.start()
         let asked = try XCTUnwrap(FixtureNetwork.seen.first { $0.contains("doubleclick") })
         XCTAssertTrue(asked.contains("msid=com.example.app") && asked.contains("an=Example%20App"), asked)
@@ -632,6 +631,92 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertTrue(avPlayer.currentItem === content)
         XCTAssertEqual(avPlayer.rate, 1, "playing as it was")
         reader.stop()
+    }
+    /// The host plan as a version 2 approval (the backend sends one when the GAM campaign has a native approval).
+    private func hostPlanV2() throws -> Data {
+        var plan = try NativeFixtures.object("host-plan")
+        plan["version"] = 2
+        plan["native_gam"] = ["contract": "native-gam-plan-v1"]
+        plan["expires_at"] = "2026-11-02T16:02:00.000Z"
+        return try NativeFixtures.data(plan)
+    }
+
+    func testAVersion2PlanExpiresOnTimeWhileThePlayerIsPaused() async throws {
+        FixtureNetwork.reset([:])
+        let reader = try attach(NativeFixtures.data("app-plan-v2"), overlay: overlay())
+        var waits: [TimeInterval] = []
+        var release: CheckedContinuation<Void, Never>?
+        reader.expirySleep = { seconds in
+            waits.append(seconds)
+            await withCheckedContinuation { release = $0 }
+        }
+        try await waitFor({ release != nil }, "the expiry wait")
+        XCTAssertEqual(waits, [120], "slept until expires_at")
+        // No tick, no advance: the playhead does not move.
+        clock = NativeFixtures.frozenNow.addingTimeInterval(120)
+        release?.resume()
+        try await waitFor({ self.events.contains { $0.type == "plan_expired" } }, "plan_expired")
+        XCTAssertEqual(events.filter { $0.type == "plan_expired" }.count, 1)
+        reader.stop()
+    }
+
+    func testAVersion2PlanExpiringDuringAHostBreakRemovesBuyAndLeavesThePlayer() async throws {
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("break-product-card"))])
+        let avPlayer = AVPlayer()
+        let content = AVPlayerItem(url: URL(fileURLWithPath: "/dev/null"))
+        avPlayer.replaceCurrentItem(with: content)
+        avPlayer.rate = 1
+        let view = overlay()
+        let reader = try XCTUnwrap(ILAdPlanPlayer(overlay: view, player: avPlayer, planJSON: hostPlanV2(),
+                                                  planOrigin: NativeFixtures.console, sessionID: "", locale: "es", engine: nil,
+                                                  displaySlot: nil, sessionConfiguration: configuration,
+                                                  events: { [weak self] in self?.record($0, $1, $2) }, now: { [weak self] in self?.clock ?? Date() }))
+        var release: CheckedContinuation<Void, Never>?
+        reader.expirySleep = { _ in await withCheckedContinuation { release = $0 } }
+        reader.breakStarted(at: 58)
+        reader.adStarted(tagURL: stableTag, adID: "il-shop-midroll-" + NativeFixtures.delivery, creativeID: "cr1")
+        try await waitFor({ self.events.contains { $0.type == "fill" && $0.format == "break_product" } }, "Buy")
+        view.showMidroll(at: Date())
+        XCTAssertNotNil(panel(view))
+        clock = NativeFixtures.frozenNow.addingTimeInterval(121)
+        try await waitFor({ release != nil }, "the expiry wait")
+        release?.resume()
+        try await waitFor({ self.events.contains { $0.type == "plan_expired" } }, "plan_expired")
+        view.showMidroll(at: Date())
+        XCTAssertNil(panel(view), "Buy removed at expiry")
+        XCTAssertEqual(events.filter { $0.type == "plan_expired" }.count, 1)
+        XCTAssertTrue(avPlayer.currentItem === content)
+        XCTAssertEqual(avPlayer.rate, 1)
+        reader.stop()
+        XCTAssertTrue(avPlayer.currentItem === content)
+        XCTAssertEqual(avPlayer.rate, 1)
+    }
+
+    func testACancelledLoadBuildsNothing() async throws {
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v2"), delay: 0.3)])
+        let view = overlay()
+        let task = Task { await self.load(overlay: view) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+        let reader = await task.value
+        XCTAssertNil(reader)
+        XCTAssertTrue(events.isEmpty, "no event for a caller that gave up")
+    }
+
+    func testHostCallsOnAPlanWithItsOwnCutsAreRefused() throws {
+        FixtureNetwork.reset([:])
+        let view = overlay()
+        let reader = try attach(NativeFixtures.data("app-plan-v1"), overlay: view)
+        reader.breakStarted(at: 58)
+        XCTAssertEqual(events.map { "\($0.type) \($0.format ?? "")" }, ["break_refused plan_has_cuts"])
+        XCTAssertFalse(view.isInLinearAdBreak)
+        reader.stop()
+    }
+
+    func testARenewalThatTimesOutSaysTimeout() {
+        XCTAssertEqual(ILAdPlanPlayer.failureReason(.failure(URLError(.timedOut))), "timeout")
+        XCTAssertEqual(ILAdPlanPlayer.failureReason(.failure(URLError(.notConnectedToInternet))), "network")
+        XCTAssertEqual(ILAdPlanPlayer.failureReason(.success((503, Data()))), "http_503")
     }
 }
 #endif
