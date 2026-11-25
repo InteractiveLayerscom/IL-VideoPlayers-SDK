@@ -6,7 +6,7 @@ import UIKit
 //   load: the SDK asks IL for the plan (`ILAdPlanPlayer.load`) and plays the breaks itself.
 //   host: the app plays its own breaks through the customer's relay (IL's per-break API) and reports them.
 // Everything comes from launch arguments, never from hosts written here (see README.md):
-//   -ILMode load|host  -ILOrigin <IL console origin>  -ILRelay <relay origin>  -ILProject <id>  -ILAsset <id>
+//   -ILMode load|host|bare (bare: plays -ILVideo on a plain AVPlayerLayer, for diagnostics)  -ILOrigin <IL console origin>  -ILRelay <relay origin>  -ILProject <id>  -ILAsset <id>
 //   -ILVideo <content URL>  -ILStartAt <s>  -ILBreakAt <s>  -ILAdServer <origin that answers the ad tag, for local runs>
 
 private func setting(_ key: String) -> String? { UserDefaults.standard.string(forKey: key) }
@@ -57,6 +57,16 @@ final class PlayerController: UIViewController {
 
     private func run() async {
         guard let video = setting("ILVideo").flatMap(URL.init(string:)) else { return status("missing -ILVideo") }
+        if setting("ILMode") == "bare" {
+            // Diagnostics: the same URL on a plain AVPlayerLayer, with no IL surface at all.
+            surface.removeFromSuperview()
+            let layer = AVPlayerLayer(player: player)
+            layer.frame = view.bounds
+            view.layer.insertSublayer(layer, at: 0)
+            player.replaceCurrentItem(with: AVPlayerItem(url: video))
+            player.play()
+            return status("bare: \(video.lastPathComponent)")
+        }
         player.replaceCurrentItem(with: AVPlayerItem(url: video))
         if let start = setting("ILStartAt").flatMap(Double.init) {
             await player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
@@ -149,7 +159,8 @@ final class PlayerController: UIViewController {
     }
 
     private func mediaFile(_ vast: String) -> URL? {
-        guard let start = vast.range(of: "<MediaFile"), let open = vast.range(of: ">", range: start.upperBound..<vast.endIndex),
+        // "<MediaFile " with the space: "<MediaFiles>" comes first and is the container, not the file.
+        guard let start = vast.range(of: "<MediaFile "), let open = vast.range(of: ">", range: start.upperBound..<vast.endIndex),
               let close = vast.range(of: "</MediaFile>", range: open.upperBound..<vast.endIndex) else { return nil }
         let text = vast[open.upperBound..<close.lowerBound].replacingOccurrences(of: "<![CDATA[", with: "")
             .replacingOccurrences(of: "]]>", with: "").trimmingCharacters(in: .whitespacesAndNewlines)

@@ -120,7 +120,7 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertNil(reader)
         XCTAssertEqual(FixtureNetwork.seen.count, 1)
         XCTAssertEqual(events.map(\.type), ["plan_unavailable"])
-        XCTAssertEqual(events.first?.format, "204")
+        XCTAssertEqual(events.first?.format, "http_204")
         XCTAssertEqual(events.first?.id, "apple:com.example.app")
     }
 
@@ -129,7 +129,7 @@ final class NativePlayerTests: XCTestCase {
         let reader = await load(overlay: overlay())
         XCTAssertNil(reader)
         XCTAssertEqual(events.first?.type, "plan_unavailable")
-        XCTAssertEqual(events.first?.format, "404")
+        XCTAssertEqual(events.first?.format, "http_404")
         XCTAssertEqual(events.first?.id, "apple:com.example.app")
     }
 
@@ -150,7 +150,7 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertNil(reader)
         XCTAssertTrue(FixtureNetwork.seen.isEmpty)
         XCTAssertEqual(events.map(\.type), ["plan_unavailable"])
-        XCTAssertEqual(events.first?.format, "invalid_origin")
+        XCTAssertEqual(events.first?.format, "request")
     }
 
     // MARK: version 2: renewal and expiry
@@ -400,7 +400,7 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertNil(reader)
         XCTAssertTrue(FixtureNetwork.seen.isEmpty)
         XCTAssertEqual(events.first?.type, "plan_unavailable")
-        XCTAssertEqual(events.first?.format, "invalid_bundle_id")
+        XCTAssertEqual(events.first?.format, "app_id")
         XCTAssertEqual(events.first?.id, "apple:not a bundle")
     }
 
@@ -445,7 +445,7 @@ final class NativePlayerTests: XCTestCase {
         let reader = try attach(NativeFixtures.data("host-plan"), overlay: overlay())
         reader.breakStarted(at: -1)
         reader.breakStarted(at: .nan)
-        XCTAssertEqual(events.filter { $0.type == "break_error" }.count, 2)
+        XCTAssertEqual(events.filter { $0.type == "break_refused" && $0.format == "position" }.count, 2)
         XCTAssertFalse(events.contains { $0.type == "break_start" })
         reader.breakStarted(at: 57.9996)
         XCTAssertEqual(events.last?.id, "at-58000")
@@ -495,7 +495,7 @@ final class NativePlayerTests: XCTestCase {
     func testAHostWithItsOwnSessionIsToldOnceThatBuyDuringBreaksIsOff() throws {
         let reader = try attach(NativeFixtures.data("host-plan"), overlay: overlay(), sessionID: "app-view-1")
         XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("host-plan")))
-        XCTAssertEqual(events.filter { $0.type == "break_shop_unavailable" }.count, 1)
+        XCTAssertEqual(events.filter { $0.type == "buy_unavailable" }.count, 1)
         XCTAssertEqual(events.first?.format, "session")
         reader.stop()
     }
@@ -550,6 +550,83 @@ final class NativePlayerTests: XCTestCase {
         await reader.start()
         let asked = try XCTUnwrap(FixtureNetwork.seen.first { $0.contains("doubleclick") })
         XCTAssertTrue(asked.contains("msid=com.example.app") && asked.contains("an=Example%20App"), asked)
+        reader.stop()
+    }
+    func testAStitchedOrUnreadablePlanIsReportedWithItsReason() async throws {
+        var stitched = try NativeFixtures.object("app-plan-v1")
+        stitched["timeline"] = ["kind": "stitched", "pdt_origin": "2026-11-02T16:00:00Z"]
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: String(decoding: try NativeFixtures.data(stitched), as: UTF8.self))])
+        let first = await load(overlay: overlay())
+        XCTAssertNil(first)
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: "not json")])
+        let second = await load(overlay: overlay())
+        XCTAssertNil(second)
+        XCTAssertEqual(events.map { "\($0.type) \($0.format ?? "")" }, ["plan_unavailable stitched", "plan_unavailable invalid"])
+    }
+
+    func testTheRenewalIsScheduled20SecondsBeforeExpiryAndAFailureKeepsThePlan() async throws {
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v1"))])
+        let loaded = await load(overlay: overlay())
+        let reader = try XCTUnwrap(loaded)
+        var waits: [TimeInterval] = []
+        reader.renewalSleep = { waits.append($0) }
+        FixtureNetwork.reset([consoleHost: .init(status: 500, body: "")])
+        XCTAssertTrue(reader.replacePlan(try NativeFixtures.data("app-plan-v2")))   // expires at now + 120 s
+        try await waitFor({ self.events.contains { $0.type == "plan_renew_failed" } }, "the renewal")
+        XCTAssertEqual(waits.count, 1)
+        XCTAssertEqual(waits[0], 100, accuracy: 0.001)
+        XCTAssertEqual(events.last?.format, "http_500")
+        // The current approval stays until it expires, then stops.
+        XCTAssertTrue(reader.schedule.plan.native)
+        reader.advance(nowMs: 60500)
+        XCTAssertFalse(events.contains { $0.type == "plan_expired" })
+        clock = NativeFixtures.frozenNow.addingTimeInterval(120)
+        reader.advance(nowMs: 60600)
+        XCTAssertTrue(events.contains { $0.type == "plan_expired" })
+        reader.stop()
+    }
+
+    func testASuccessfulRenewalSaysSoWithTheNewVersion() async throws {
+        clock = NativeFixtures.frozenNow.addingTimeInterval(105)
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-v2"))])
+        let loaded = await load(overlay: overlay())
+        let reader = try XCTUnwrap(loaded)
+        FixtureNetwork.reset([consoleHost: .init(status: 200, body: try NativeFixtures.text("app-plan-renewed"))])
+        try await waitFor({ self.events.contains { $0.type == "plan_renewed" } }, "plan_renewed")
+        XCTAssertEqual(events.first { $0.type == "plan_renewed" }?.id, "1")
+        reader.stop()
+    }
+
+    func testExpiryDuringTheReadersMP4AdEndsTheBreakAndBringsTheContentBack() async throws {
+        let vast = """
+        <VAST><Ad><InLine><Creatives><Creative><Linear><Duration>00:00:30</Duration><MediaFiles>\
+        <MediaFile delivery="progressive" type="video/mp4" width="640">https://c.example/a.mp4</MediaFile></MediaFiles></Linear></Creative></Creatives></InLine></Ad></VAST>
+        """
+        FixtureNetwork.reset(["ads.iadserver.com": .init(status: 200, body: vast)])
+        let avPlayer = AVPlayer()
+        // A content item that does not fail on its own (a /dev/null item fails and the simulator's player drops it).
+        let composition = AVMutableComposition()
+        composition.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: CMTime(seconds: 60, preferredTimescale: 600)))
+        let content = AVPlayerItem(asset: composition)
+        avPlayer.replaceCurrentItem(with: content)
+        avPlayer.rate = 1
+        let reader = try XCTUnwrap(ILAdPlanPlayer(overlay: overlay(), player: avPlayer, planJSON: NativeFixtures.data("app-plan-v2"),
+                                                  planOrigin: NativeFixtures.console, sessionID: "", locale: "es", engine: nil,
+                                                  displaySlot: nil, sessionConfiguration: configuration,
+                                                  events: { [weak self] in self?.record($0, $1, $2) }, now: { [weak self] in self?.clock ?? Date() }))
+        reader.playMedia = { [weak self] _, url in
+            avPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
+            self?.clock = NativeFixtures.frozenNow.addingTimeInterval(121)
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            return true
+        }
+        let begun = Date()
+        await reader.start()
+        XCTAssertLessThan(Date().timeIntervalSince(begun), 5, "the ad does not run to its end")
+        XCTAssertTrue(events.contains { $0.type == "plan_expired" })
+        XCTAssertEqual(events.last?.type, "break_error")
+        XCTAssertTrue(avPlayer.currentItem === content)
+        XCTAssertEqual(avPlayer.rate, 1, "playing as it was")
         reader.stop()
     }
 }

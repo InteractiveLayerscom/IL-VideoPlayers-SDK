@@ -52,6 +52,8 @@ public final class ILAdPlanPlayer {
     /// Where `load` asked for the plan, for the renewal of a version 2 plan.
     private var loadURL: URL?
     private var renewal: Task<Void, Never>?
+    /// Waits until the renewal is due. Replaced in tests to observe the delay.
+    var renewalSleep: (TimeInterval) async -> Void = { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
     /// The break the host reports it is playing (`breakStarted`), as the break-card `cut`: `at-<ms>`.
     private var hostCut: AdPlan.Cut?
     /// Bumped by every ad start and end: a card that answers late for an ad already gone is dropped.
@@ -159,9 +161,9 @@ public final class ILAdPlanPlayer {
         }
         // The server's own rule for an Apple bundle id: a refused id is not sent at all.
         guard appID.count <= 149, appID.range(of: "^[A-Za-z0-9-]{1,63}(\\.[A-Za-z0-9-]{1,63}){1,9}$", options: .regularExpression) != nil else {
-            return unavailable("invalid_bundle_id")
+            return unavailable("app_id")
         }
-        guard let url = planURL(origin: origin, project: project, asset: asset, app: app) else { return unavailable("invalid_origin") }
+        guard let url = planURL(origin: origin, project: project, asset: asset, app: app) else { return unavailable("request") }
         let answer = await fetchPlan(url, configuration: sessionConfiguration)
         guard case .success(let (status, data)) = answer else {
             if case .failure(let error) = answer, (error as? URLError)?.code == .timedOut { return unavailable("timeout") }
@@ -170,15 +172,18 @@ public final class ILAdPlanPlayer {
         switch status {
         case 200: break
         // No plan right now: play without ads and ask again on the next view, never in a loop.
-        case 204: return unavailable("204")
+        case 204: return unavailable("http_204")
         // Unknown project, video or app give the same 404: the `app` value sent is what to check first.
-        case 404: return unavailable("404")
+        case 404: return unavailable("http_404")
         default: return unavailable("http_\(status)")
         }
         guard let reader = ILAdPlanPlayer(overlay: overlay, player: player, planJSON: data, planOrigin: AdPlan.origin(url.absoluteString),
                                           sessionID: sessionID, locale: locale, engine: engine, displaySlot: displaySlot,
                                           sessionConfiguration: sessionConfiguration, events: events, now: now) else {
-            return unavailable("invalid_plan")
+            // A server-insertion project (`timeline`) is refused by this reader on purpose.
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if let timeline = body?["timeline"], !(timeline is NSNull) { return unavailable("stitched") }
+            return unavailable("invalid")
         }
         reader.loadURL = url
         reader.scheduleRenewal()
@@ -223,16 +228,20 @@ public final class ILAdPlanPlayer {
         let wait = plan.expiresAt.timeIntervalSince(now()) - 20
         let target = plan.renewGrant.map { URL(string: AdPlan.setQuery(base.absoluteString, "renew", $0)) ?? base } ?? base
         renewal = Task { [weak self] in
-            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            guard let sleep = self?.renewalSleep else { return }
+            await sleep(max(0, wait))
             guard !Task.isCancelled, let self, !self.closed else { return }
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = self.session.configuration.protocolClasses
             let answer = await Self.fetchPlan(target, configuration: configuration)
             guard !self.closed else { return }
-            if case .success(let (status, data)) = answer, status == 200, self.replacePlan(data) { return }
+            if case .success(let (status, data)) = answer, status == 200, self.replacePlan(data) {
+                self.emit("plan_renewed", nil, self.plan.native ? "2" : "1")
+                return
+            }
             // Never the URL: it carries the grant.
             let reason: String
-            if case .success(let (status, _)) = answer { reason = String(status) } else { reason = "network" }
+            if case .success(let (status, _)) = answer { reason = "http_\(status)" } else { reason = "network" }
             self.emit("plan_renew_failed", reason, "")
         }
     }
@@ -276,7 +285,7 @@ public final class ILAdPlanPlayer {
     private func announceSessionMismatch() {
         guard !mismatchAnnounced, plan.breakURLOffered, plan.breakURL == nil, !plan.breakShop, !sessionID.isEmpty else { return }
         mismatchAnnounced = true
-        emit("break_shop_unavailable", "session", "")
+        emit("buy_unavailable", "session", "")
     }
 
     /// The version 2 approval is over: what it drew goes, pending answers are dropped, nothing new starts.
@@ -315,7 +324,7 @@ public final class ILAdPlanPlayer {
     public func breakStarted(at position: TimeInterval) {
         guard !closed, !inBreak else { return }
         guard position.isFinite, position >= 0 else {
-            emit("break_error", "invalid_position", "")
+            emit("break_refused", "position", "")
             return
         }
         let ms = Int64((position * 1000).rounded())
@@ -710,10 +719,28 @@ public final class ILAdPlanPlayer {
         guard !closed else { return }
         // Nothing starts once the hold deadline has passed.
         if let found, let media = found.mediaURL.flatMap(OverlayCue.httpsURL), AdPlan.AdWatch.mayStart(now: Date(), deadline: deadline) {
-            if let playMedia {
-                complete = await playMedia(found, media)
-            } else {
-                complete = await play(found, media: media, deadline: deadline, request: foundRequest, cut: cut)
+            let playMedia = self.playMedia
+            // As on the web, an approval that expires during the ad ends the break and the content comes back.
+            complete = await withTaskGroup(of: Bool?.self) { group in
+                group.addTask { @MainActor [weak self] in
+                    guard let self else { return false }
+                    if let playMedia { return await playMedia(found, media) }
+                    return await self.play(found, media: media, deadline: deadline, request: foundRequest, cut: cut)
+                }
+                group.addTask { @MainActor [weak self] in
+                    while !Task.isCancelled {
+                        guard let self, !self.closed else { return nil }
+                        if self.checkExpiry() { return false }
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    return nil
+                }
+                var result = false
+                for await value in group {
+                    if let value { result = value; break }
+                }
+                group.cancelAll()
+                return result
             }
             guard !closed else { return }
             // The ad leaves the player before graphics are allowed back.
