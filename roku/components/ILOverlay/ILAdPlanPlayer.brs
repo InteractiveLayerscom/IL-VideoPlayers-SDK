@@ -595,6 +595,17 @@ sub breakStarted(atMs as Dynamic)
     position = "midroll"
     if ms& = 0 then position = "preroll"
     m.cut = { id: "at-" + ms&.toStr(), at: ms& / 1000#, position: position }
+    ' A host plan's windows are clear only of IL's own break positions: an unreported break gains clearance now.
+    seconds = ms& / 1000#
+    if m.hostBreaks = invalid then m.hostBreaks = []
+    known = false
+    for each other in m.hostBreaks
+        if other = seconds then known = true
+    end for
+    if not known
+        m.hostBreaks.push(seconds)
+        adPlanSetBreaks(m.plan, m.hostBreaks)
+    end if
     m.hostBreak = true
     m.inBreak = true
     m.spotSeen = false

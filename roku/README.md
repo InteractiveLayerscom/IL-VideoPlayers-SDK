@@ -178,6 +178,12 @@ m.plan.callFunc("adEnded")
 m.plan.callFunc("breakEnded")
 ```
 
+**Separación alrededor de tus cortes.** Las ventanas del plan del host sólo están separadas de los cortes que IL ubicaría, no de los que reproduce el canal. El componente aplica `scenes.pacing.cut_clearance_seconds` (y la del producto) alrededor de cada posición informada con `setBreaks` o, si faltó, con `breakStarted`. Sin cortes informados no hay separación: informarlos antes de que lleguen es obligación del canal.
+
+**Sin `break_url`.** Un plan del host trae `commerce.break_url` sólo si el playback se creó con `"graphics": true` y recorre pasos ordenados. Sin ella no hay Comprar durante los cortes ni ninguna llamada; el resto funciona igual.
+
+**Identidad de la app en Google Ad Manager.** El plan de una app no trae `page_url`, y el componente nunca agrega `url` ni `description_url` para un canal. Tampoco agrega `msid` ni `an`: Google los recomienda para CTV pero no define el formato para Roku, y no se pudo confirmar en la documentación de RAF qué macros de identidad del canal expande. Si tu acuerdo con Google los pide, deben venir ya en los tags del proyecto.
+
 Mientras el corte está activo no se dibuja nada de IL salvo **Comprar**, y las respuestas pendientes de gráficas se descartan, igual que en los cortes propios del componente. La ficha se pide con `cut=at-<ms>`. **Obligación del canal:** si no informa los cortes, el componente no puede saber que hay un anuncio en pantalla. Dibuja las gráficas sólo por el tiempo de contenido, sin Comprar, y puede dibujarlas encima de un corte que el canal no avisó.
 
 `setClock(segundos)` fija la hora del componente y existe para las pruebas.

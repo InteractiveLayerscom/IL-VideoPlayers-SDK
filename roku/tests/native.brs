@@ -17,6 +17,8 @@ sub main()
     testHostBreaks()
     testHostClearance()
     testRafShop()
+    testNoBreakUrl()
+    testNoPageForChannel()
     if m.failures = 0 then print "ROKU_NATIVE_OK " + m.checks.toStr()
 end sub
 
@@ -298,6 +300,25 @@ sub testHostClearance()
     clear.player.callFunc("planTick")
     check(clear.player.event.type = "request" and clear.player.event.window = "m2", "the window after the break starts past the clearance")
     clear.player.callFunc("stopPlan")
+    late = hostStage(plan)
+    late.player.callFunc("breakStarted", 58000)
+    late.player.callFunc("breakEnded")
+    at(late, 55.5)
+    late.player.callFunc("planTick")
+    check(late.player.event.type = "break_end", "a break reported only by breakStarted gets the same clearance")
+    late.player.callFunc("stopPlan")
+end sub
+
+sub testNoBreakUrl()
+    plan = fixture("host-plan.json")
+    plan.commerce.delete("break_url")
+    s = hostStage(plan)
+    s.player.callFunc("breakStarted", 58000)
+    s.player.callFunc("adStarted", "https://ads.iadserver.com/gampad/ads?tag=T_mid", { adId: "il-shop-midroll-" + m.delivery, creativeId: "cr1", tracking: [] })
+    check(s.player.event.type = "break_start" and not s.overlay.findNode("ilCommerce").visible, "a host plan without break_url has no Buy and asks nothing")
+    s.player.callFunc("breakEnded")
+    check(s.player.event.type = "break_end", "the break still ends normally")
+    s.player.callFunc("stopPlan")
 end sub
 
 sub testRafShop()
@@ -329,4 +350,11 @@ sub testRafShop()
     gam = { spot: invalid, cancelled: false }
     adPlanRunBreak([{ provider: "gam", tagUrl: "https://pubads.g.doubleclick.net/gampad/ads?tag=T" }], raf, invalid, gam)
     check(raf.during.shop.tag = "", "a GAM request names no tag")
+end sub
+
+sub testNoPageForChannel()
+    read = adPlanRead(fixture("app-plan-v1.json"), m.now, m.origin, "")
+    gam = read.cuts[1].requests[0].tagUrl
+    graphic = adPlanGraphicTag(read.graphics[0].tagUrl, "super", invalid, read.page)
+    check(read.page = invalid and adPlanQuery(gam, "url") = "" and adPlanQuery(gam, "description_url") = "" and adPlanQuery(graphic, "url") = "", "an app plan sends no page parameters to GAM")
 end sub
