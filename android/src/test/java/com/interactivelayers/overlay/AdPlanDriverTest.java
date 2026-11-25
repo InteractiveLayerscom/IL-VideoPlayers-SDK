@@ -24,7 +24,7 @@ public final class AdPlanDriverTest {
             + "<NonLinear width=\"600\" height=\"90\"><StaticResource creativeType=\"image/png\">https://c.example/s.png</StaticResource></NonLinear>"
             + "</NonLinearAds></Creative></Creatives></InLine></Ad></VAST>";
 
-    private static final class FakeDisplay implements AdPlanDisplay {
+    static final class FakeDisplay implements AdPlanDisplay {
         String unit;
         Map<String, String> targeting;
         Callback callback;
@@ -37,7 +37,8 @@ public final class AdPlanDriverTest {
         @Override public void clear() { cleared++; visible = false; }
     }
 
-    private static final class FakeHost implements AdPlanDriver.Host {
+    static class FakeHost implements AdPlanDriver.Host {
+        List<Runnable> pendingAnswers;
         long position;
         boolean playing = true, playWhen = true, imaAvailable = true;
         final List<String> calls = new ArrayList<>();
@@ -87,9 +88,19 @@ public final class AdPlanDriverTest {
             throw new IOException("no reply");
         }
         @Override public void ping(String url) { pings.add(url); }
-        @Override public void event(String type, String format, String id) { events.add(type); }
+        final List<String> eventLog = new ArrayList<>();
+        final List<String> renewals = new ArrayList<>();
+        @Override public void event(String type, String format, String id) { events.add(type); eventLog.add(type + "|" + format + "|" + id); }
+        @Override public void renew(String grant) { renewals.add(String.valueOf(grant)); }
         @Override public AdPlanDisplay display() { return slot; }
         @Override public boolean displayFits() { return fits; }
+        long now = 1793635200000L;
+        String cardCreative, cardDelivery;
+        OverlayCue card;
+        @Override public long nowMs() { return now; }
+        @Override public void setBreakCard(String c, String d, OverlayCue next) {
+            linear = true; cardCreative = c; cardDelivery = d; card = next; calls.add("card " + (next == null ? "identity" : next.id));
+        }
 
         void fire(long delay) {
             for (Runnable task : new ArrayList<>(timers.keySet())) {

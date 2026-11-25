@@ -50,7 +50,11 @@ final class AdPlan {
         final String id;
         final long atMs;
         final List<Request> requests;
-        Cut(String id, long atMs, List<Request> requests) { this.id = id; this.atMs = atMs; this.requests = requests; }
+        /** {@code preroll} or {@code midroll}: it must match the position in a shop-linked ad's {@code Ad@id}. */
+        final String position;
+        Cut(String id, long atMs, List<Request> requests, String position) {
+            this.id = id; this.atMs = atMs; this.requests = requests; this.position = position;
+        }
     }
 
     static final class Window {
@@ -98,6 +102,8 @@ final class AdPlan {
     /** One step of a linear answer: a wrapper to follow, a playable ad, or nothing. */
     static final class LinearAd {
         String wrapperUrl, mediaUrl, creativeId, deliveryId;
+        /** VAST {@code Ad@id} of the first answer and {@code Creative@id} of the playing linear, as IMA exposes them. */
+        String adId, linearCreativeId;
         long durationMs;
         final List<String> impressions = new ArrayList<>();
         final Map<String, List<String>> tracking = new HashMap<>();
@@ -109,16 +115,32 @@ final class AdPlan {
     final Pacing pacing;
     final Shop shop;
     final String page;
+    final int version;
+    final long expiresAtMs;
+    /** {@code commerce.break_url}, only when Buy during a break may use it (as web/ads.mjs {@code breakUrl}). */
+    final String breakUrl;
+    /** The {@code grant} of {@code commerce.url}: what a renewal sends as {@code renew}. Null without one. */
+    final String grant;
+    private final JSONArray sceneWindows;
+    /** The plan has a break route, but the host's own session id keeps Buy during breaks off (web: sid rule). */
+    boolean breakSessionMismatch;
+
+    /** The app's identity on GAM requests the reader issues itself (Google: msid and an for direct VAST calls). */
+    static volatile String appId, appName;
     /** The {@code sid} on every iADServer request, chosen as web/ads.mjs does. */
     final String sid;
     /** Buy during a break: IL's grant names the plan's session, so only when the sid is that session. */
     final boolean breakShop;
 
     private AdPlan(List<Cut> cuts, List<Window> windows, List<Graphic> graphics, Pacing pacing, Shop shop, String page,
-                   String sid, boolean breakShop) {
+                   String sid, boolean breakShop, int version, long expiresAtMs, String breakUrl, String grant, JSONArray sceneWindows) {
         this.cuts = cuts; this.windows = windows; this.graphics = graphics; this.pacing = pacing; this.shop = shop; this.page = page;
-        this.sid = sid; this.breakShop = breakShop;
+        this.sid = sid; this.breakShop = breakShop; this.version = version; this.expiresAtMs = expiresAtMs;
+        this.breakUrl = breakUrl; this.grant = grant; this.sceneWindows = sceneWindows;
     }
+
+    /** A version 2 plan is a short-lived native GAM approval: at most this far ahead (web/ads.mjs readPlan). */
+    static final long NATIVE_MAX_AHEAD_MS = 120000;
 
     /** Where the app's consent platform keeps the IAB strings (the default SharedPreferences). */
     interface ConsentStore { Map<String, ?> read(); }
@@ -129,10 +151,13 @@ final class AdPlan {
      * Adds the consent the app's CMP stored under the IAB keys (TCF v2, US Privacy, GPP) as the standard ad
      * request parameters. Nothing stored, nothing added.
      */
-    static String withConsent(String url) {
+    static String withConsent(String url) { return withConsent(url, consent); }
+
+    /** As {@link #withConsent(String)}, with the consent store of one reader (two readers in a process stay apart). */
+    static String withConsent(String url, ConsentStore store) {
         Map<String, ?> stored;
         try {
-            stored = consent.read();
+            stored = store.read();
         } catch (RuntimeException e) {
             return url;
         }
@@ -195,12 +220,21 @@ final class AdPlan {
         }
     }
 
-    /** Null for anything but a current version 1 plan on a timeline this player can follow. */
+    /**
+     * Null for anything but a current plan on a timeline this player can follow: version 1, or version 2 with the
+     * native GAM contract and an expiry no more than 120 s ahead, as web/ads.mjs readPlan.
+     */
     static AdPlan read(String json, long nowMs, String origin, String sessionId) {
         try {
             JSONObject plan = new JSONObject(json);
-            if (plan.optInt("version", 0) != 1 || !(plan.opt("expires_at") instanceof String)) return null;
-            if (OverlayCue.timestamp(plan.getString("expires_at")) <= nowMs) return null;
+            Long version = integer(plan.opt("version"));
+            if (version == null || (version != 1 && version != 2) || !(plan.opt("expires_at") instanceof String)) return null;
+            long expires = OverlayCue.timestamp(plan.getString("expires_at"));
+            if (expires <= nowMs) return null;
+            if (version == 2) {
+                JSONObject nativeGam = plan.optJSONObject("native_gam");
+                if (nativeGam == null || !"native-gam-plan-v1".equals(nativeGam.opt("contract")) || expires - nowMs > NATIVE_MAX_AHEAD_MS) return null;
+            }
             // Stitched windows are content time and need a clock that knows when an ad is in the stream.
             if (!plan.isNull("timeline")) return null;
             String page = plan.opt("page_url") instanceof String ? plan.getString("page_url") : null;
@@ -229,8 +263,21 @@ final class AdPlan {
                 windows = readWindows(scenes.getJSONArray("windows"), pacing, breaks);
                 graphics = readGraphics(scenes);
             }
-            return new AdPlan(cuts, windows, graphics, pacing, readShop(commerce, origin, breaks), page, session,
-                    shopSession != null && shopSession.equals(session));
+            boolean breakShop = shopSession != null && shopSession.equals(session);
+            // As web/ads.mjs: the break product route on the scene product's own origin, for the plan's session only.
+            String breakUrl = null;
+            if (breakShop && commerce.opt("break_url") instanceof String) {
+                String candidate = commerce.getString("break_url");
+                String own = origin(candidate);
+                if (own != null && own.equals(origin(commerce.getString("url")))) breakUrl = candidate;
+            }
+            boolean mismatch = !breakShop && shopValid && commerce.opt("break_url") instanceof String;
+            String grant = commerce != null && commerce.opt("url") instanceof String ? query(commerce.getString("url"), "grant") : "";
+            AdPlan read = new AdPlan(cuts, windows, graphics, pacing, readShop(commerce, origin, breaks), page, session, breakShop,
+                    version.intValue(), expires, breakUrl, grant.isEmpty() ? null : grant,
+                    scenes == null ? null : scenes.getJSONArray("windows"));
+            read.breakSessionMismatch = mismatch;
+            return read;
         } catch (JSONException | ParseException e) {
             return null;
         }
@@ -282,7 +329,8 @@ final class AdPlan {
                 if ("iadserver".equals(provider) && session != null && !session.isEmpty()) url = setQuery(url, "sid", session);
                 requests.add(new Request(provider, url));
             }
-            if (!requests.isEmpty()) cuts.add(new Cut(cut.getString("id"), ms(cut.optDouble("at")), requests));
+            String position = cut.opt("position") instanceof String ? cut.getString("position") : null;
+            if (!requests.isEmpty()) cuts.add(new Cut(cut.getString("id"), ms(cut.optDouble("at")), requests, position));
         }
         Collections.sort(cuts, Comparator.comparingLong(cut -> cut.atMs));
         return cuts;
@@ -348,12 +396,25 @@ final class AdPlan {
 
     /** What has been asked and shown in one playback. */
     final class Schedule {
-        final Set<String> settled = new HashSet<>();
-        final Set<String> attempted = new HashSet<>();
-        final Map<String, String> products = new HashMap<>();
-        final List<Window> shown = new ArrayList<>();
-        final List<Window> pending = new ArrayList<>();
+        final Set<String> settled;
+        final Set<String> attempted;
+        final Map<String, String> products;
+        final List<Window> shown;
+        final List<Window> pending;
         boolean overlayAvailable;
+        /** The scene windows, cleared around the plan's cuts or around the breaks the host reported. */
+        List<Window> sceneWindows = windows;
+
+        Schedule() {
+            settled = new HashSet<>(); attempted = new HashSet<>(); products = new HashMap<>();
+            shown = new ArrayList<>(); pending = new ArrayList<>();
+        }
+
+        /** A renewed plan continues the same view: what was settled, attempted and shown stays (web: nativeViews). */
+        Schedule(Schedule view) {
+            settled = view.settled; attempted = view.attempted; products = view.products;
+            shown = view.shown; pending = view.pending; overlayAvailable = view.overlayAvailable;
+        }
 
         private List<Graphic> servable() {
             if (overlayAvailable) return graphics;
@@ -415,7 +476,7 @@ final class AdPlan {
 
         Window nextGraphic(long nowMs) {
             if (pacing == null || servable().isEmpty()) return null;
-            for (Window window : windows) {
+            for (Window window : sceneWindows) {
                 if (!attempted.contains(window.id) && eligible(window, pacing, PREPARE_MS, nowMs) && !productAwaited(window, nowMs)) return window;
             }
             return null;
@@ -428,6 +489,66 @@ final class AdPlan {
     }
 
     Schedule schedule() { return new Schedule(); }
+
+    /** This plan's schedule carrying on the view of {@code view}, the schedule of the plan it renews. */
+    Schedule schedule(Schedule view) { return new Schedule(view); }
+
+    /** The scene windows with the clearance kept around {@code breaks} instead of the plan's cuts (web: setBreaks). */
+    List<Window> windowsAround(List<Long> breaks) {
+        return sceneWindows == null ? windows : readWindows(sceneWindows, pacing, breaks);
+    }
+
+    /** iADServer names a shop-linked ad {@code il-shop-<position>-<delivery>} (web/ads.mjs SHOP_AD). */
+    static final Pattern SHOP_AD = Pattern.compile("^il-shop-(preroll|midroll)-([A-Za-z0-9_-]{43})$");
+
+    /** The break product URL: {@code commerce.break_url} verbatim with the five parameters appended. */
+    String breakProductUrl(String cut, String tag, String creative, String delivery, String locale) {
+        int hash = breakUrl.indexOf('#');
+        String base = hash >= 0 ? breakUrl.substring(0, hash) : breakUrl;
+        String fragment = hash >= 0 ? breakUrl.substring(hash) : "";
+        String joiner = base.indexOf('?') < 0 ? "?" : base.endsWith("?") || base.endsWith("&") ? "" : "&";
+        return base + joiner + "cut=" + form(cut) + "&tag=" + form(tag) + "&creative=" + form(creative)
+                + "&delivery=" + form(delivery) + "&locale=" + form(OverlayCommerce.language(locale)) + fragment;
+    }
+
+    // As URLSearchParams serialises: application/x-www-form-urlencoded, a space as `+`.
+    private static String form(String value) {
+        try {
+            return URLEncoder.encode(value, "UTF-8").replace("%7E", "~");
+        } catch (UnsupportedEncodingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * The break card for exactly this ad, or null: web/ads.mjs accepts only a {@code midroll} card whose id is the
+     * delivery and whose creative is the playing one. It follows the ad, not the content clock.
+     */
+    static OverlayCue breakCue(String json, String creativeId, String deliveryId) {
+        try {
+            JSONObject card = new JSONObject(json);
+            if (!deliveryId.equals(card.opt("id")) || !creativeId.equals(card.opt("linearCreativeId")) || !"midroll".equals(card.opt("format"))) return null;
+            card.put("start", 0).put("end", 9007199254740991L);
+            List<OverlayCue> cues = OverlayCue.fromSidecar(new JSONArray().put(card).toString());
+            return cues.size() == 1 && cues.get(0).commerce != null ? cues.get(0) : null;
+        } catch (JSONException e) {
+            return null;
+        }
+    }
+
+    /** {@code [Ad@id, Creative@id]} of the first ad's linear creative in a VAST the host's player received. */
+    static String[] vastIdentity(String xml) {
+        Element root = document(xml);
+        if (root == null) return null;
+        List<Element> ads = children(root, "Ad");
+        if (ads.isEmpty()) return null;
+        org.w3c.dom.NodeList linears = ads.get(0).getElementsByTagName("Linear");
+        if (linears.getLength() == 0) return null;
+        Node creative = linears.item(0).getParentNode();
+        String creativeId = creative instanceof Element && "Creative".equals(((Element) creative).getTagName())
+                ? ((Element) creative).getAttribute("id") : "";
+        return new String[] {ads.get(0).getAttribute("id"), creativeId};
+    }
 
     static String setQuery(String url, String key, String value) {
         int hash = url.indexOf('#');
@@ -471,11 +592,30 @@ final class AdPlan {
         }
     }
 
-    static String correlated(String url) {
-        return withConsent(setQuery(url, "correlator", System.currentTimeMillis() + String.format(Locale.US, "%06d", RANDOM.nextInt(1000000))));
+    /**
+     * Adds {@code msid} (package name) and {@code an} (app name) to a GAM request the reader sends itself, unless the
+     * tag carries them: Google asks for both on direct VAST calls from apps; IMA adds them on its own requests.
+     */
+    static String withApp(String url) { return withApp(url, appId, appName); }
+
+    static String withApp(String url, String id, String name) {
+        if (!"https://pubads.g.doubleclick.net".equals(origin(url))) return url;
+        if (id != null && !id.isEmpty() && query(url, "msid").isEmpty() && !url.contains("msid=")) url = setQuery(url, "msid", id);
+        if (name != null && !name.isEmpty() && query(url, "an").isEmpty() && !url.contains("&an=") && !url.contains("?an=")) url = setQuery(url, "an", name);
+        return url;
+    }
+
+    static String correlated(String url) { return correlated(url, consent); }
+
+    static String correlated(String url, ConsentStore store) {
+        return withConsent(setQuery(url, "correlator", System.currentTimeMillis() + String.format(Locale.US, "%06d", RANDOM.nextInt(1000000))), store);
     }
 
     static String graphicTag(String tagUrl, String format, JSONObject targeting, String page) {
+        return graphicTag(tagUrl, format, targeting, page, consent, appId, appName);
+    }
+
+    static String graphicTag(String tagUrl, String format, JSONObject targeting, String page, ConsentStore store, String id, String name) {
         Map<String, String> params = new LinkedHashMap<>();
         for (String pair : query(tagUrl, "cust_params").split("&")) {
             String[] parts = pair.split("=", 2);
@@ -502,10 +642,10 @@ final class AdPlan {
         }
         String url = setQuery(tagUrl, "cust_params", joined.toString());
         if (page != null) url = setQuery(setQuery(url, "url", page), "description_url", page);
-        return correlated(url);
+        return correlated(withApp(url, id, name), store);
     }
 
-    private static String joinValues(List<String> parts) {
+    static String joinValues(List<String> parts) {
         StringBuilder out = new StringBuilder();
         for (String part : parts) {
             if (out.length() > 0) out.append(',');
@@ -626,6 +766,7 @@ final class AdPlan {
         List<Element> ads = children(root, "Ad");
         if (ads.isEmpty()) return false;
         Element ad = ads.get(0);
+        if (out.adId == null) out.adId = ad.getAttribute("id");
         collect(ad, out);
         Element wrapper = one(ad, "Wrapper");
         if (wrapper != null) {
@@ -637,6 +778,9 @@ final class AdPlan {
         org.w3c.dom.NodeList linears = ad.getElementsByTagName("Linear");
         if (linears.getLength() == 0) return false;
         Element linear = (Element) linears.item(0);
+        if (linear.getParentNode() instanceof Element && "Creative".equals(((Element) linear.getParentNode()).getTagName())) {
+            out.linearCreativeId = ((Element) linear.getParentNode()).getAttribute("id");
+        }
         org.w3c.dom.NodeList files = linear.getElementsByTagName("MediaFile");
         int widest = -1;
         for (int i = 0; i < files.getLength(); i++) {

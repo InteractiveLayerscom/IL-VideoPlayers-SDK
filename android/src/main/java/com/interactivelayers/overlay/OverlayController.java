@@ -70,6 +70,9 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     private boolean closed;
     private boolean linearAd;
     private String midrollCreativeId, midrollDeliveryId;
+    // Buy during a break from the plan's break_url: the card comes from AdPlanDriver, not from the session feed.
+    private boolean planBreak;
+    private OverlayCue planBreakCue;
     private boolean secondaryVideo, secondaryVideoAudio;
     private LinearAdDetector adDetector;
     private final List<OverlayCue> planCues = new java.util.ArrayList<>();
@@ -153,7 +156,24 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
     public void setLinearAdActive(boolean active, String creativeId, String deliveryId) {
         checkMainThread();
         boolean shop = active && commerceLocale != null && OverlayCue.validIdentity(creativeId) && OverlayCue.validIdentity(deliveryId);
-        String creative = shop ? creativeId : null, delivery = shop ? deliveryId : null;
+        linear(active, shop ? creativeId : null, shop ? deliveryId : null, null, false);
+    }
+
+    /**
+     * The ad plan's Buy during a break: the playing ad's identity, then the card AdPlanDriver read from
+     * {@code commerce.break_url} (null until it arrives). It is drawn exactly like the session feed's midroll card.
+     */
+    void setPlanBreakCard(String creativeId, String deliveryId, OverlayCue card) {
+        checkMainThread();
+        if (!OverlayCue.validIdentity(creativeId) || !OverlayCue.validIdentity(deliveryId)) {
+            linear(true, null, null, null, false);
+            return;
+        }
+        linear(true, creativeId, deliveryId, card, true);
+    }
+
+    private void linear(boolean active, String creative, String delivery, OverlayCue breakCard, boolean fromPlan) {
+        planBreak = fromPlan;
         if (linearAd != active || !java.util.Objects.equals(creative, midrollCreativeId)
                 || !java.util.Objects.equals(delivery, midrollDeliveryId)) {
             cancelPoll();
@@ -165,6 +185,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         linearAd = active;
         midrollCreativeId = creative;
         midrollDeliveryId = delivery;
+        planBreakCue = breakCard;
         update();
     }
 
@@ -186,6 +207,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
 
     private List<OverlayCue> scheduled() {
         List<OverlayCue> all = new java.util.ArrayList<>(cues.values());
+        if (linearAd && planBreakCue != null) all.add(planBreakCue);
         if (!linearAd) all.addAll(planCues);
         return all;
     }
@@ -244,6 +266,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
         lastManifest = null;
         adDetector = null;
         planCues.clear();
+        planBreakCue = null;
         planVisibility = null;
         workers.shutdownNow();
     }
@@ -318,7 +341,7 @@ public final class OverlayController implements AutoCloseable, Player.Listener, 
             suspendRendering();
         } else {
             if (sidecar == null) readManifest();
-            else if ((planVisibility == null || midrollCreativeId != null) && player.isPlaying() && polling == null
+            else if ((planVisibility == null || midrollCreativeId != null) && !planBreak && player.isPlaying() && polling == null
                     && SystemClock.elapsedRealtime() >= nextPoll) poll(time);
             OverlayCue cue = OverlayCue.at(scheduled(), time);
             if (!player.isPlaying() && (cue == null || (cue.scene == null && cue.linearCreativeId == null))) {
