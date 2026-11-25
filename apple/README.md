@@ -66,13 +66,17 @@ Ambos modos usan `AVPlayerItem.currentDate()` y el intervalo `[start, end)`. El 
 
 ## Verificación
 
+`swift test` en macOS corre sólo las pruebas sin UIKit (lectura del plan, URLs, VAST: 41 pruebas). Las del lector (`load`, renovación, vencimiento, cortes del host, Comprar) están bajo `#if canImport(UIKit)` y corren únicamente en Mac Catalyst y en los simuladores de iOS y tvOS, con los comandos `xcodebuild` de abajo.
+
 Desde `apple`, en un Mac con Xcode, Python 3 y FFmpeg con `libx264` en el PATH, ejecutá las pruebas y compilá para ambos SDK. La prueba HLS genera segmentos con video H.264 y audio AAC, sirve la playlist desde loopback y comprueba que AVPlayer de macOS avanza. Después salta a una L, retrocede a un super y sale de ambos intervalos usando el reloj del medio.
 
 ```sh
 swift test
 swift build --triple arm64-apple-tvos16.0 --sdk "$(xcrun --sdk appletvos --show-sdk-path)"
 swift build --triple arm64-apple-ios16.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
-xcodebuild -scheme ILAVPlayerOverlay -destination 'platform=macOS,variant=Mac Catalyst' test
+xcodebuild -scheme ILAVPlayerOverlay-Package -destination 'platform=macOS,variant=Mac Catalyst' test
+xcodebuild -scheme ILAVPlayerOverlay-Package -destination 'platform=iOS Simulator,name=iPhone 17' test
+xcodebuild -scheme ILAVPlayerOverlay-Package -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation)' test
 ```
 
 Para la aceptación en una Apple TV podés generar un HLS con ambos formatos y servir sus dos creatividades por HTTPS desde un origen accesible al equipo. [Fixture del repositorio](../examples/README.md)
@@ -107,3 +111,64 @@ La superficie muestra **Comprar** durante el intervalo de una entrega cuyo ID y 
 ## Plan de anuncios
 
 Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.
+
+### Pedir el plan desde la app
+
+`ILAdPlanPlayer.load` pide el plan a IL y lo adjunta. Devuelve `nil` cuando no hay anuncios para esta vista; el contenido se reproduce igual.
+
+```swift
+let plan = await ILAdPlanPlayer.load(overlay: superficie, player: player, origin: "https://<host de la consola>",
+                                     project: proyecto, asset: video, locale: "es",
+                                     linearEngine: nil, events: { tipo, formato, id in print(tipo, formato ?? "-", id) })
+await plan?.start()
+player.play()
+```
+
+- La solicitud es `GET <origin>/il-player/app-plan?project=…&asset=…&app=apple:<Bundle.main.bundleIdentifier>`, sólo por HTTPS y sin cookies. Registrá ese bundle id en la Consola: un id no registrado recibe el mismo 404 que un proyecto o video desconocido.
+- Sin plan, `load` emite una vez `plan_unavailable`: el `id` es el valor `app=` exacto enviado (o que se habría enviado) y el formato, el motivo (el estado HTTP va dentro del motivo; sin respuesta, no hay estado):
+  - `http_204`: no hay plan todavía (IL lo prepara en segundo plano) o se alcanzó un límite. Sin reintentos: la próxima vista vuelve a preguntar.
+  - `http_404`: proyecto, video o app desconocidos; revisá primero que ese `app=` esté registrado.
+  - `http_<estado>` para otro estado, `timeout` (más de `ILAdPlanPlayer.planTimeoutSeconds`, 5 s), `network`, `request` (la URL no se puede armar, por ejemplo un origen sin HTTPS), `app_id` (un bundle id que el servidor rechazaría: no se envía nada), `stitched` (un 200 con `timeline`: proyecto con inserción en el servidor, que este lector no reproduce) e `invalid` (otro 200 ilegible).
+- `load` nunca retiene el contenido más de ese plazo. Si la tarea que llamó a `load` se cancela, devuelve `nil` sin evento y sin dejar nada en marcha. Ningún evento lleva el `grant`, el `renew` ni las URLs de `commerce`.
+- El inicializador con `planJSON:` sigue igual.
+
+### Planes versión 2 (aprobación nativa de GAM)
+
+Un plan `version: 2` se acepta sólo con `native_gam.contract == "native-gam-plan-v1"` y un `expires_at` a no más de 120 s, como en `web/ads.mjs`. Al vencer, el lector retira lo que dibujó, descarta respuestas pendientes, no empieza nada nuevo y emite `plan_expired`; el contenido sigue. Si vence durante un anuncio MP4 del propio lector, el corte termina (`break_error`) y el contenido vuelve a su posición, en pausa o reproduciéndose como estaba, como en la web. Con `load`, el SDK lo vuelve a pedir hasta tres veces, a 20 s, 12 s y 5 s del vencimiento, y se detiene en el primer éxito (`plan_renewed` con la versión nueva como `id`). Sólo si fallan los tres intentos emite `plan_renew_failed`, una vez, con el último motivo (`http_<estado>`, `timeout`, `network` o `invalid`); el plan actual sigue hasta vencer. Los intentos van de a uno; si el próximo ya cae en el vencimiento o después, no se pide nada más y se emite `plan_renew_failed`. Una respuesta tardía, después del vencimiento o de `stop()`, se ignora, y una renovación exitosa reinicia el ciclo para el plan nuevo con `&renew=<grant de commerce.url>`, que conserva la sesión de compra. Si el host obtiene el plan por su cuenta, pasá el nuevo con `replacePlan(_:)`. Una respuesta versión 1 a una renovación se adopta y deja de renovarse; una versión 2 que reemplaza un plan versión 1 empieza a renovarse. El vencimiento se compara en milisegundos y lo vigila un temporizador, así que llega a tiempo también con el contenido en pausa o durante un corte de la app. En ambos casos se reconstruye lo que sale del plan (cortes, ventanas, gráficas dibujadas) y se conservan los cortes jugados, las ventanas intentadas y mostradas, el pacing y la sesión: renovar no repite ni cuenta dos veces.
+
+### Comprar durante un corte
+
+Con `commerceEnabled = true` y un plan con `commerce.break_url`, cuando empieza un anuncio cuyo VAST `Ad@id` es `il-shop-<preroll|midroll>-<entrega de 43 caracteres>` del mismo tipo de corte, el SDK pide la ficha a `break_url` con `cut`, `tag` (del tag de iADServer), `creative` (`Creative@id`), `delivery` y `locale`, y dibuja **Comprar** mientras dure ese anuncio. Sin ese prefijo no hay producto ni pedido. La impresión es la del VAST; el SDK sólo envía `commerce.viewUrl` al abrir la ficha. Sin `break_url`, sigue funcionando el feed de sesión con `setLinearAdBreak(_:creativeID:deliveryID:)`.
+
+### Identidad de la app en Google Ad Manager
+
+El plan de una app no trae `page_url`. En los pedidos a GAM que hace el propio SDK (tags de gráficas, VAST leído para el camino MP4) agrega `msid` (bundle id) y `an` (nombre visible de la app) si el tag no los trae, como recomienda la guía [VAST ad tag URL parameters](https://support.google.com/admanager/answer/10678356) de Google para pedidos desde apps. Nunca agrega `url` ni `description_url`. Sólo se aplica al host exacto `pubads.g.doubleclick.net`, el único origen de GAM que acepta el lector del plan. Los tags que se entregan a IMA no se tocan: IMA agrega la identidad de la app por su cuenta.
+
+### Cortes que reproduce la app (API por corte)
+
+Cuando la app pide cada corte a la API de IL y lo reproduce con su propio reproductor, adjuntá el plan de la reproducción (`GET /v1/vod/playbacks/{id}/plan`, con `cuts: []`) y avisá al SDK. Sirve con el producto `ILAVPlayerOverlay` solo, sin IMA ni GMA.
+
+```swift
+plan.setBreaks([58, 178])                 // posiciones de tus cortes, en segundos de contenido
+// al empezar tu corte:
+plan.breakStarted(at: 58)                 // 0 para un pre-roll
+plan.adStarted(tagURL: adTagURL, adID: imaAd.adId, creativeID: imaAd.creativeID)
+// o, con el XML del VAST: plan.adStarted(tagURL: adTagURL, vastXML: vast)
+plan.adEnded()                            // al completar, saltar o fallar el anuncio
+plan.breakEnded()
+```
+
+Obligaciones de la app:
+
+- Informar las posiciones de tus cortes con `setBreaks` antes de llegar a ellos. Las ventanas de un plan de reproducción no dejan espacio alrededor de los cortes que reproduce la app: el SDK aplica `scenes.pacing.cut_clearance_seconds` sólo alrededor de los cortes informados (`setBreaks` o `breakStarted`). Sin cortes informados no hay margen.
+- Las llamadas del host van con un plan de reproducción (`cuts: []`). Con un plan que trae sus propios cortes, `breakStarted` se rechaza con `break_refused` (motivo `plan_has_cuts`): no se mezclan dos conductores de cortes, así que una app no puede sumar cortes propios a un plan normal.
+- La posición de `breakStarted` se redondea al milisegundo más cercano (`at-<ms>`); una negativa o no finita no abre el corte y emite `break_refused` con motivo `position`.
+- Buy durante el corte necesita que la sesión sea `commerce.session` del plan: no pases tu propio `sessionID`. Si lo pasás y el plan trae `break_url`, el SDK lo dice una vez con `buy_unavailable` (motivo `session`). Un plan sin `break_url` (reproducción creada sin `graphics: true`) simplemente no tiene Comprar.
+- Red de seguridad: un corte sin `breakEnded()` se da por terminado a los `ILAdPlanPlayer.hostBreakLimitSeconds` (300 s) con `break_error`, y las gráficas vuelven.
+- El SDK no controla tu reproductor durante tu corte: `stop()`, `replacePlan` o un vencimiento sólo limpian el estado y la superficie del SDK, nunca pausan, buscan ni reemplazan tu ítem.
+
+Además, informar **cada** corte con `breakStarted`/`breakEnded` y cada anuncio con `adStarted`/`adEnded`. Mientras un corte está informado, el SDK no dibuja nada salvo Comprar y descarta las respuestas pendientes; el `cut` de la ficha es `at-<ms>` de la posición. El SDK no puede saber que hay un anuncio en pantalla si la app no lo informa: sin avisos, las gráficas siguen el tiempo del contenido y no hay Comprar. En tvOS, Comprar toma el foco al aparecer como en los cortes propios del SDK, y el Overlay 300×250 sigue sin estar disponible.
+
+Diferencia con la web: en Apple la ficha de Comprar se cierra cuando termina el anuncio, también si el espectador la abrió; la web y Android la mantienen abierta hasta que el espectador la cierra.
+
+Ejemplo completo con ambos modos: [examples/apple](../examples/apple/README.md).

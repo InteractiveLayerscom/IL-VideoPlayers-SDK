@@ -3,7 +3,13 @@ import Foundation
 /// IL's ad plan, read with the rules of web/ads.mjs. No player or network access here.
 struct AdPlan {
     struct Request: Equatable { let provider: String; let tagURL: String }
-    struct Cut: Equatable { let id: String; let atMs: Int64; let requests: [Request] }
+    struct Cut: Equatable {
+        let id: String
+        let atMs: Int64
+        let requests: [Request]
+        /// `preroll` or `midroll`: an `il-shop-<position>-` ad only has a product in a break of that position.
+        var position: String { atMs == 0 ? "preroll" : "midroll" }
+    }
     struct Window: Equatable {
         let id: String
         let start: Int64
@@ -27,6 +33,9 @@ struct AdPlan {
         var durationMs: Int64 = 0
         var creativeID: String?
         var deliveryID: String?
+        /// VAST `Ad@id` and the linear `Creative@id`, as IMA exposes them (`adId`, `creativeID`).
+        var adID: String?
+        var linearCreativeID: String?
         var impressions: [String] = []
         var tracking: [String: [String]] = [:]
     }
@@ -47,12 +56,28 @@ struct AdPlan {
     let sid: String
     /// Buy during a break: IL's grant names the plan's session, so only when the sid is that session.
     let breakShop: Bool
+    /// `commerce.break_url`, when Buy during a break may use it (same rules as web/ads.mjs `breakUrl`).
+    let breakURL: String?
+    let expiresAt: Date
+    /// A version 2 plan: a short-lived native GAM approval that stops being used the moment it expires.
+    let native: Bool
+    /// The plan offers `commerce.break_url`, usable or not for this session.
+    let breakURLOffered: Bool
+    /// The `grant` of `commerce.url`, sent as `renew` so a renewed plan keeps the same commerce session.
+    let renewGrant: String?
 
-    /// Nil for anything but a current version 1 plan on a timeline this player can follow.
-    static func read(_ data: Data, now: Date, origin: String?, sessionID: String) -> AdPlan? {
+    /// Nil for anything but a current version 1 or 2 plan on a timeline this player can follow.
+    /// `breaks` are break positions the host reported (`setBreaks`): windows keep their clearance around them too.
+    static func read(_ data: Data, now: Date, origin: String?, sessionID: String, breaks hostBreaks: [Int64] = []) -> AdPlan? {
         guard let plan = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              (plan["version"] as? NSNumber)?.intValue == 1, !isBool(plan["version"]),
+              let version = (plan["version"] as? NSNumber)?.intValue, version == 1 || version == 2,
+              (plan["version"] as? NSNumber)?.doubleValue == Double(version), !isBool(plan["version"]),
               let expiry = (plan["expires_at"] as? String).flatMap(date), expiry > now else { return nil }
+        // As web/ads.mjs readPlan: version 2 only under the native GAM contract and never more than 120 s ahead.
+        if version == 2 {
+            guard (plan["native_gam"] as? [String: Any])?["contract"] as? String == "native-gam-plan-v1",
+                  expiry.timeIntervalSince(now) <= 120 else { return nil }
+        }
         // Stitched windows are content time and need a clock that knows when an ad is in the stream.
         if let timeline = plan["timeline"], !(timeline is NSNull) { return nil }
         let page = plan["page_url"] as? String
@@ -73,7 +98,7 @@ struct AdPlan {
         // The host's own view id first, then the plan's session, then a fresh id for this playback.
         let session = !sessionID.isEmpty ? sessionID : shopSession ?? randomID()
         let cuts = readCuts(plan["cuts"] as? [Any], page: page, session: session)
-        let breaks = cuts.map(\.atMs)
+        let breaks = (cuts.map(\.atMs) + hostBreaks).sorted()
         var windows: [Window] = []
         var graphics: [Graphic] = []
         var pacing: Pacing?
@@ -82,9 +107,60 @@ struct AdPlan {
             windows = readWindows(scenes.rows, pacing: scenes.rules, breaks: breaks)
             graphics = readGraphics(scenes.row["graphics"] as? [Any], formats: scenes.formats, overlay: scenes.row["overlay"] as? [String: Any])
         }
-        return AdPlan(cuts: cuts, windows: windows, graphics: graphics, pacing: pacing,
-                      shop: readShop(commerce, origin: origin, breaks: breaks), page: page,
-                      sid: session, breakShop: shopSession != nil && shopSession == session)
+        let shop = readShop(commerce, origin: origin, breaks: breaks)
+        let breakShop = shopSession != nil && shopSession == session
+        // The card of an ad comes from the plan's own origin, under the grant that names this session.
+        var breakURL: String?
+        if breakShop, let shop, let raw = commerce?["break_url"] as? String, OverlayCue.httpsURL(raw) != nil,
+           Self.origin(raw) != nil, Self.origin(raw) == Self.origin(shop.url) { breakURL = raw }
+        let grant = shop.map { query($0.url, "grant") }.flatMap { $0.isEmpty ? nil : $0 }
+        return AdPlan(cuts: cuts, windows: windows, graphics: graphics, pacing: pacing, shop: shop, page: page,
+                      sid: session, breakShop: breakShop, breakURL: breakURL, expiresAt: expiry, native: version == 2,
+                      breakURLOffered: commerce?["break_url"] is String,
+                      renewGrant: grant)
+    }
+
+    /// iADServer names a shop-linked ad `il-shop-<preroll|midroll>-<43-char delivery id>` (VAST `Ad@id`).
+    static func shopDelivery(adID: String?, position: String) -> String? {
+        guard let adID, adID.range(of: "^il-shop-(preroll|midroll)-[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil,
+              adID.hasPrefix("il-shop-" + position + "-") else { return nil }
+        return String(adID.dropFirst(("il-shop-" + position + "-").count))
+    }
+
+    /// `commerce.break_url` taken verbatim, with `cut`, `tag`, `creative`, `delivery` and `locale` appended.
+    func breakCardURL(cut: String, tag: String, creative: String, delivery: String, locale: String) -> URL? {
+        guard let breakURL else { return nil }
+        let pairs = [("cut", cut), ("tag", tag), ("creative", creative), ("delivery", delivery),
+                     ("locale", OverlayCommerce.language(locale))]
+        return URL(string: Self.withParams(breakURL, pairs.map { $0.0 + "=" + Self.encode($0.1) }.joined(separator: "&")))
+    }
+
+    /// web/ads.mjs `withParams`: appends to the query, before any fragment, without touching what is there.
+    static func withParams(_ href: String, _ extra: String) -> String {
+        let pieces = href.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let base = pieces[0]
+        let joiner = !base.contains("?") ? "?" : base.hasSuffix("?") || base.hasSuffix("&") ? "" : "&"
+        return base + joiner + extra + (pieces.count > 1 ? "#" + pieces[1] : "")
+    }
+
+    /// The break card of exactly this ad, drawn for as long as the ad plays, or nil.
+    static func breakCue(_ data: Data, creative: String, delivery: String) -> OverlayCue? {
+        guard var card = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              card["id"] as? String == delivery, card["linearCreativeId"] as? String == creative,
+              card["format"] as? String == "midroll" else { return nil }
+        // The ad decides how long it lasts, whatever the clock says: the card follows it.
+        card["start"] = 0
+        card["end"] = 9_000_000_000_000_000
+        guard let rows = try? JSONSerialization.data(withJSONObject: [card]),
+              let cues = try? OverlayCue.decodeSidecar(rows), cues.count == 1 else { return nil }
+        return cues[0]
+    }
+
+    /// `Ad@id` and the linear `Creative@id` of the first ad of a VAST document.
+    static func adIdentity(_ xml: String) -> (adID: String?, creativeID: String?) {
+        guard let root = document(xml), let ad = root.named("Ad").first else { return (nil, nil) }
+        let creative = ad.all("Creative").first { !$0.all("Linear").isEmpty }
+        return (ad.attributes["id"], creative?.attributes["id"])
     }
 
     private static func randomID() -> String {
@@ -151,7 +227,7 @@ struct AdPlan {
         return "https://" + host + (parts.port.map { $0 == 443 ? "" : ":\($0)" } ?? "")
     }
 
-    private static func origin(_ text: String) -> String? { URLComponents(string: text).flatMap(origin) }
+    static func origin(_ text: String) -> String? { URLComponents(string: text).flatMap(origin) }
 
     /// The path with `.` and `..` segments resolved, as a WHATWG URL does.
     private static func normalizedPath(_ path: String) -> String {
@@ -349,6 +425,26 @@ struct AdPlan {
         return ""
     }
 
+    /// The app's identity for Google Ad Manager (`msid` = bundle id, `an` = app name), as Google's "VAST ad tag URL
+    /// parameters" asks for in-app requests. Immutable; a reader takes it as its default and tests inject their own.
+    static let bundleIdentity: (id: String, name: String)? = {
+        guard let id = Bundle.main.bundleIdentifier, !id.isEmpty else { return nil }
+        let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? id
+        return (id, name)
+    }()
+
+    /// Adds `msid`/`an` to a GAM request this SDK sends itself, unless the tag already carries them. IMA adds the
+    /// app's identity to the requests it makes, so tags handed to IMA are left alone. Never page parameters for an app.
+    /// Only the exact host `pubads.g.doubleclick.net`: it is the only GAM origin the plan reader accepts (`allowed`).
+    static func withAppIdentity(_ url: String, app: (id: String, name: String)?) -> String {
+        guard let app, URLComponents(string: url)?.host?.lowercased() == "pubads.g.doubleclick.net" else { return url }
+        var out = url
+        if query(out, "msid").isEmpty { out = setQuery(out, "msid", app.id) }
+        if query(out, "an").isEmpty { out = setQuery(out, "an", app.name) }
+        return out
+    }
+
     static func correlated(_ url: String) -> String {
         let stamp = String(Int64(Date().timeIntervalSince1970 * 1000)) + String(format: "%06d", Int.random(in: 0..<1_000_000))
         return withConsent(setQuery(url, "correlator", stamp))
@@ -402,7 +498,8 @@ struct AdPlan {
         }
     }
 
-    static func graphicTag(_ tagURL: String, format: String, targeting: [String: String], page: String?) -> String {
+    static func graphicTag(_ tagURL: String, format: String, targeting: [String: String], page: String?,
+                           app: (id: String, name: String)? = nil) -> String {
         var pairs = query(tagURL, "cust_params").split(separator: "&").map(String.init)
         let replaced = Set(targeting.keys).union(["il_format"])
         pairs.removeAll { replaced.contains(String($0.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)[0])) }
@@ -410,16 +507,12 @@ struct AdPlan {
         pairs.append("il_format=" + encode(format))
         var url = setQuery(tagURL, "cust_params", pairs.joined(separator: "&"))
         if let page { url = setQuery(setQuery(url, "url", page), "description_url", page) }
-        return correlated(url)
+        return withAppIdentity(correlated(url), app: app)
     }
 
     func productURL(windowID: String, locale: String) -> URL? {
         guard let shop else { return nil }
-        let pieces = shop.url.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        let base = pieces[0]
-        let joiner = !base.contains("?") ? "?" : base.hasSuffix("?") || base.hasSuffix("&") ? "" : "&"
-        let tail = pieces.count > 1 ? "#" + pieces[1] : ""
-        return URL(string: base + joiner + "window=" + Self.encode(windowID) + "&locale=" + Self.encode(OverlayCommerce.language(locale)) + tail)
+        return URL(string: Self.withParams(shop.url, "window=" + Self.encode(windowID) + "&locale=" + Self.encode(OverlayCommerce.language(locale))))
     }
 
     /// The product card clipped to its window, or nil if it cannot be drawn with a Buy action.
@@ -543,6 +636,10 @@ struct AdPlan {
             return true
         }
         guard let linear = node.all("Linear").first else { return false }
+        if ad.adID == nil {
+            ad.adID = node.attributes["id"]
+            ad.linearCreativeID = node.all("Creative").first { !$0.all("Linear").isEmpty }?.attributes["id"]
+        }
         let files = linear.all("MediaFile").filter {
             $0.attributes["delivery"] == "progressive" && $0.attributes["type"]?.lowercased() == "video/mp4"
                 && OverlayCue.httpsURL($0.value) != nil && (Int($0.attributes["width"] ?? "") ?? 0) <= 1920
