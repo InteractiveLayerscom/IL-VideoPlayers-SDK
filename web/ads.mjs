@@ -39,6 +39,8 @@ const SID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SHOP_AD = /^il-shop-(preroll|midroll)-([A-Za-z0-9_-]{43})$/;
 // Where each plan returned by loadPlan came from, without a visible field on the plan.
 const planOrigins = new WeakMap();
+// Plans loadPlan fetched from the app route: only those take `appParams` (msid / an) on GAM requests.
+const appPlans = new WeakSet();
 // Delivery ids whose impression this page already fired: a re-attach or a second attachAds asking the same
 // window with the same sid gets the same delivery back and must not count it twice.
 const measuredDeliveries = new Set();
@@ -50,13 +52,18 @@ const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 const inert = Object.freeze({ cuts: Object.freeze([]), vmap: () => buildVmap([]), setBreaks() {}, setBreakActive() {}, start() {}, destroy() {},
   replacePlan: () => false, breakStarted() {}, setBreakAd() {}, clearBreakAd() {}, breakEnded() {} });
 
-// Ad@id and the linear Creative@id of a VAST the host's own ad player fetched (no IMA to ask).
+/**
+ * Ad@id and the linear Creative@id of a VAST the host's own ad player fetched (no IMA to ask). Pass the inline (final)
+ * VAST of the ad that is playing, not a wrapper: a wrapper's Ad@id never carries `il-shop-…`. When a document holds
+ * both, the `<Ad>` with an `<InLine>` wins.
+ */
 export function vastIdentity(xml, Parser = globalThis.DOMParser) {
   try {
     if (typeof xml !== 'string' || xml.length > 262144 || /<!DOCTYPE/i.test(xml) || typeof Parser !== 'function') return {};
     const doc = new Parser().parseFromString(xml, 'application/xml');
     if (doc.documentElement.localName !== 'VAST' || doc.getElementsByTagName('parsererror').length) return {};
-    const ad = Array.from(doc.getElementsByTagName('Ad'))[0];
+    const ads = Array.from(doc.getElementsByTagName('Ad'));
+    const ad = ads.find((entry) => entry.getElementsByTagName('InLine').length) ?? ads[0];
     const linear = ad && Array.from(ad.getElementsByTagName('Linear'))[0];
     const creative = linear?.parentElement?.localName === 'Creative' ? linear.parentElement : null;
     return { adId: ad?.getAttribute('id') ?? undefined, creativeId: creative?.getAttribute('id') ?? undefined };
@@ -389,7 +396,7 @@ export function planUrl({ origin, project, asset, app, renew } = {}) {
 // `onEvent` hears `plan_unavailable` { app, status, reason } when an app-route load (or any load given a timeout)
 // ends without a plan: `app` is the exact value sent, `status` the HTTP status (0 without a response), `reason`
 // 'http_<status>' (204: none right now, ask again on the next view, never in a loop; 404: unknown project, video or app,
-// all with the same answer, so check `app` first), 'timeout', 'network' or 'invalid_plan'. `timeoutMs` bounds the
+// all with the same answer, so check `app` first), 'timeout', 'network' or 'invalid'. `timeoutMs` bounds the
 // request; content never waits for a plan longer than that. No event carries the plan URL or its grants.
 export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal, onEvent, timeoutMs } = {}) {
   let app = null;
@@ -437,12 +444,13 @@ export async function loadPlan(url, { fetchImpl = globalThis.fetch, signal, onEv
     // Version 2 (a short-lived native GAM approval) only under the rules attachAds applies.
     if (!plan || typeof plan !== 'object' || Array.isArray(plan) || ![1, 2].includes(plan.version) ||
         (plan.version === 2 && !readPlan(plan, Date.now()))) {
-      unavailable(200, 'invalid_plan');
+      unavailable(200, 'invalid');
       return null;
     }
     // Remembering where it came from never costs the plan: without it the page-origin / planOrigin rule applies.
     try {
       planOrigins.set(plan, resolved.origin);
+      if (resolved.pathname === '/il-player/app-plan') appPlans.add(plan);
     } catch {
       // A plan object a WeakMap refuses keeps the handed-in rule.
     }
@@ -472,12 +480,14 @@ export async function loadAppPlan({ origin, project, asset, app, renew, fetchImp
   return loadPlan(url, { fetchImpl, onEvent, timeoutMs });
 }
 
-// Re-requests a version 2 plan RENEW_AHEAD_MS before it expires, with `renew=<grant of commerce.url>` (same commerce
+// Re-requests a version 2 plan before it expires (RENEW_ATTEMPTS_MS: 20, 12 and 5 s ahead, until one succeeds), with `renew=<grant of commerce.url>` (same commerce
 // session), and hands it to `replace`. A version 1 answer is adopted and ends the renewals. Returns stop(), which also
 // has rearm(plan) for a plan the host swapped in itself (a version 2 one starts renewals again).
+export const RENEW_ATTEMPTS_MS = [20000, 12000, 5000];
 export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fetchImpl = globalThis.fetch, onEvent, timeoutMs } = {}) {
   let timer = null;
   let stopped = false;
+  let generation = 0;
   const say = (event) => {
     try {
       onEvent?.(event);
@@ -485,9 +495,11 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
       // Diagnostics must never break playback.
     }
   };
-  const arm = (current) => {
+  // Up to three tries before expiry (RENEW_ATTEMPTS_MS ahead of it); one plan_renew_failed only after the last.
+  const arm = (current, attempt = 0) => {
     clearTimeout(timer);
     if (stopped || current?.version !== 2) return;
+    const own = attempt === 0 ? ++generation : generation;
     timer = setTimeout(async () => {
       let grant = null;
       try {
@@ -495,14 +507,20 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
       } catch {
         grant = null;
       }
-      const next = await loadAppPlan({ origin, project, asset, app, renew: grant ?? undefined, fetchImpl, onEvent, timeoutMs });
-      if (stopped) return;
+      let reason = 'refused';
+      const next = await loadAppPlan({ origin, project, asset, app, renew: grant ?? undefined, fetchImpl, timeoutMs,
+        onEvent: (event) => {
+          if (event?.type === 'plan_unavailable') reason = event.reason;
+          say(event);
+        } });
+      if (stopped || own !== generation) return;
       if (next && replace(next)) {
         say({ type: 'plan_renewed', version: next.version });
         return arm(next);
       }
-      say({ type: 'plan_renew_failed' });
-    }, Math.max(0, Date.parse(current.expires_at) - RENEW_AHEAD_MS - Date.now()));
+      if (attempt + 1 < RENEW_ATTEMPTS_MS.length) return arm(current, attempt + 1);
+      say({ type: 'plan_renew_failed', reason });
+    }, Math.max(0, Date.parse(current.expires_at) - RENEW_ATTEMPTS_MS[attempt] - Date.now()));
     timer.unref?.();
   };
   arm(plan);
@@ -510,7 +528,7 @@ export function keepPlanRenewed(plan, replace, { origin, project, asset, app, fe
     stopped = true;
     clearTimeout(timer);
   };
-  stop.rearm = arm;
+  stop.rearm = (next) => arm(next);
   return stop;
 }
 
@@ -586,7 +604,7 @@ export function attachAds({
     : typeof shop?.session === 'string' && SID.test(shop.session) ? shop.session : randomId();
   // App route only (attachAppAds / attachAvPlayAppAds): the app's identity on GAM requests, as Google asks of
   // direct VAST calls from connected TV, only when the host supplied it. The page route never gets it.
-  const app = appIdentity(appParams);
+  const app = appPlans.has(plan) ? appIdentity(appParams) : null;
   const cutsOf = (checked) => Object.freeze(stitched ? [] : planCuts(checked.cuts, page, sid, app).map(Object.freeze));
   let cuts = cutsOf(valid);
   // The Buy button during an ad: IL's grant names the view's session, and iADServer ties the delivery to that session,
@@ -1803,7 +1821,8 @@ export function attachAds({
     setBreakAd({ at, tagUrl, adId, creativeId, vastXml } = {}) {
       if (disposed || expired()) return;
       if (at !== undefined && !(isNumber(at) && at >= 0)) return refuse();
-      if (isNumber(at) && hostCut?.at !== at) api.breakStarted(at);
+      // An open break stays the break (a plan cut keeps its id and position); `at` only opens one when none is open.
+      if (isNumber(at) && !hostCut) api.breakStarted(at);
       if (!hostCut) return;
       if (typeof vastXml === 'string') ({ adId, creativeId } = vastIdentity(vastXml));
       let tag = null;

@@ -9,6 +9,8 @@ sigue la API probada con dobles en `test/avplay-native.test.mjs`, pero la app en
 - **`load`** (el SDK pide el plan): `attachAvPlayAppAds` pide `GET <consola>/il-player/app-plan?project=…&asset=…&app=tizen:<id de aplicación>`, reproduce los cortes del plan en AVPlay y dibuja gráficos y **Comprar**. Un plan `version: 2` se renueva solo con `renew=<grant>`.
 - **`host`** (API por corte): la app llama al relay (`examples/api-relay.mjs`, que hace de backend del cliente) con `POST /playback` y recibe el plan de host (`cuts: []`); en cada corte pide `POST /break`, descarga el VAST, reproduce el anuncio ella misma y avisa al SDK con `breakStarted(at)`, `setBreakAd({ tagUrl, adId, creativeId })`, `clearBreakAd()` y `breakEnded()`. El SDK pide la tarjeta con `cut=at-<ms>` y dibuja **Comprar**. La clave de la API queda sólo en el entorno del relay.
 
+> **El relay (`examples/api-relay.mjs`) es sólo un ejemplo: nunca lo despliegues.** En modo real le da el poder de `IL_API_KEY` a cualquiera que lo alcance (CORS `*`). Escucha en `127.0.0.1`; para que un televisor de tu red lo alcance tenés que pasar `--host <ip de tu Mac>`, y eso expone la clave a toda esa red: usalo así sólo con `--fixtures`.
+
 ## Configuración
 
 Todo se fija al compilar, en `settings.js`: `mode`, `consoleOrigin`, `relayUrl`, `project`, `asset` y `contentUrl`. Ningún host está en el código de la app. En `config.xml`:
@@ -22,7 +24,7 @@ Todo se fija al compilar, en `settings.js`: `mode`, `consoleOrigin`, `relayUrl`,
 
 1. Copiá el SDK dentro de la app: `cp -R ../../web sdk` (desde esta carpeta). La app importa `./sdk/index.mjs` y `./sdk/avplay-ads.mjs`. Para motores de TV antiguos pasá `sdk/` por el transpilador de tu app.
 2. Abrí la carpeta en Tizen Studio como proyecto web de TV (o `tizen package -t wgt -s <perfil de certificado>` desde `~/tizen-studio/tools/ide/bin`), firmá con tu certificado de Samsung e instalá en un televisor en modo desarrollador (`sdb connect <ip>`, `tizen install -n ILDemo.wgt`).
-3. Para el modo `host` sin backend: `node examples/api-relay.mjs --fixtures test/fixtures/native --cert cert.pem --key key.pem --public-base https://<ip de tu Mac>:8787` con un certificado de confianza local (las URL de producto tienen que ser HTTPS y del origen del plan; nunca uses un túnel público). En ese modo el relay sirve los planes con `expires_at` vigente y las URL de producto apuntando a sí mismo; las concesiones de los fixtures están vencidas, pero el relay contesta las rutas de producto sin verificarlas. Poné `consoleOrigin` y `relayUrl` en ese mismo origen. Con backend real: `IL_API_BASE=https://console.example IL_API_KEY=… node examples/api-relay.mjs`.
+3. Para el modo `host` sin backend: `node examples/api-relay.mjs --host <ip de tu Mac> --fixtures test/fixtures/native --cert cert.pem --key key.pem --public-base https://<ip de tu Mac>:8787` con un certificado de confianza local (las URL de producto tienen que ser HTTPS y del origen del plan; nunca uses un túnel público). En ese modo el relay sirve los planes con `expires_at` vigente y las URL de producto apuntando a sí mismo; las concesiones de los fixtures están vencidas, pero el relay contesta las rutas de producto sin verificarlas. Poné `consoleOrigin` y `relayUrl` en ese mismo origen. Con backend real: `IL_API_BASE=https://console.example IL_API_KEY=… node examples/api-relay.mjs`.
 
 ## Qué mirar
 

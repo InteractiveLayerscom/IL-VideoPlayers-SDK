@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { request as httpsRequest } from 'node:https';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { createRelay, redact } from '../examples/api-relay.mjs';
+import { createRelay, DEFAULT_HOST, redact, startRelay } from '../examples/api-relay.mjs';
 
 const FIXTURES = new URL('./fixtures/native/', import.meta.url).pathname;
 const file = (name) => JSON.parse(readFileSync(join(FIXTURES, name), 'utf8'));
@@ -218,6 +218,27 @@ test('--cert/--key serve HTTPS and the default public base is https://<Host>', a
       }).on('error', reject).end();
     });
     assert.ok(body.commerce.url.startsWith('https://localhost:9443/il-player/scene-product?'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a malformed static path answers 400 and the relay keeps serving', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-static-'));
+  const r = await listen({ fixtures: FIXTURES, staticDir: dir });
+  try {
+    assert.equal((await r.call('GET', '/%E0')).status, 400);
+    assert.equal((await r.call('POST', '/playback', { asset_id: 'a' })).status, 200);
+  } finally {
+    await r.close();
+  }
+});
+
+test('startRelay listens on 127.0.0.1 unless another host is named', async () => {
+  const server = await startRelay({ port: 0, fixtures: FIXTURES, log: () => {} });
+  try {
+    assert.equal(DEFAULT_HOST, '127.0.0.1');
+    assert.equal(server.address().address, '127.0.0.1');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

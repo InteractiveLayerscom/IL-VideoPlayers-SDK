@@ -572,3 +572,92 @@ test('app route only: msid and an from appParams go on GAM requests unless the t
   await r.at(11, 'playing');
   assert.ok(r.graphics.every((url) => url.searchParams.get('msid') === 'tag.own' && !url.searchParams.has('an')));
 });
+
+// Renewal answers per attempt: 'fail' (204) or 'ok' (a renewed v2).
+async function renewalRig(t, answers) {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const v2 = fixture('app-plan-v2.json');
+  const events = [];
+  let renewals = 0;
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname !== '/il-player/app-plan') return new Response(null, { status: 204 });
+    if (!url.searchParams.get('renew')) return new Response(JSON.stringify(v2));
+    return answers[renewals++] === 'ok' ? new Response(JSON.stringify(renewedV2(v2, Date.now()))) : new Response(null, { status: 204 });
+  };
+  const ads = await attachAppAds({ origin: CONSOLE, project: PROJECT, asset: ASSET, app: APP, session, video, fetchImpl, onEvent: (e) => events.push(e) });
+  cleanups.push(() => ads.destroy());
+  return { events, renewals: () => renewals };
+}
+
+test('renewal: a failed first attempt is retried at -12 s and succeeds without plan_renew_failed', async (t) => {
+  const r = await renewalRig(t, ['fail', 'ok']);
+  t.mock.timers.tick(100000);
+  await flush();
+  assert.equal(r.renewals(), 1);
+  t.mock.timers.tick(8000);
+  await flush();
+  assert.equal(r.renewals(), 2);
+  assert.deepEqual(r.events.filter((e) => e.type === 'plan_renewed'), [{ type: 'plan_renewed', version: 2 }]);
+  assert.ok(!r.events.some((e) => e.type === 'plan_renew_failed'));
+  t.mock.timers.tick(30000);
+  assert.ok(!r.events.some((e) => e.type === 'plan_expired'));
+});
+
+test('renewal: three failed attempts (-20, -12, -5 s) give one plan_renew_failed with the last reason, then plan_expired', async (t) => {
+  const r = await renewalRig(t, ['fail', 'fail', 'fail']);
+  for (const step of [100000, 8000, 7000]) {
+    t.mock.timers.tick(step);
+    await flush();
+  }
+  assert.equal(r.renewals(), 3);
+  assert.deepEqual(r.events.filter((e) => e.type === 'plan_renew_failed'), [{ type: 'plan_renew_failed', reason: 'http_204' }]);
+  assert.ok(!r.events.some((e) => e.type === 'plan_expired'));
+  t.mock.timers.tick(5000);
+  assert.deepEqual(r.events.filter((e) => e.type === 'plan_expired'), [{ type: 'plan_expired' }]);
+});
+
+test('appParams on a plan that did not come from the app route add nothing', async (t) => {
+  frozenClock(t);
+  const graphics = [];
+  const video = new EventTarget();
+  Object.assign(video, { currentTime: 0, paused: true, played: { length: 0 } });
+  const session = { setLinearAd() {}, addCue: () => true, removeCue: () => true, closeProduct() {} };
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/il-player/ad-plan') return new Response(JSON.stringify(fixture('app-plan-v1.json')));
+    if (url.hostname === 'pubads.g.doubleclick.net') { graphics.push(url); return new Response(superVast); }
+    return new Response(null, { status: 204 });
+  };
+  for (const plan of [fixture('app-plan-v1.json'), await loadPlan(planUrl({ origin: CONSOLE, project: PROJECT, asset: ASSET }), { fetchImpl })]) {
+    const ads = attachAds({ session, video, plan, fetchImpl, planOrigin: CONSOLE, appParams: { msid: 'x.y', an: 'Z' } });
+    cleanups.push(() => ads.destroy());
+    assert.ok(ads.cuts.flatMap((cut) => cut.requests).every((r) => !new URL(r.tagUrl).searchParams.has('msid') && !new URL(r.tagUrl).searchParams.has('an')));
+  }
+  video.currentTime = 11; video.paused = false; video.dispatchEvent(new Event('playing'));
+  await flush();
+  assert.ok(graphics.length > 0);
+  assert.ok(graphics.every((url) => !url.searchParams.has('msid') && !url.searchParams.has('an')));
+});
+
+test('vastIdentity prefers the inline Ad over a wrapper in the same document', () => {
+  const xml = `<VAST version="4.0"><Ad id="wrapper-1"><Wrapper><VASTAdTagURI>https://a.example/v</VASTAdTagURI></Wrapper></Ad><Ad id="il-shop-midroll-${DLV}"><InLine><Creatives><Creative id="cr1"><Linear/></Creative></Creatives></InLine></Ad></VAST>`;
+  assert.deepEqual(vastIdentity(xml), { adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+});
+
+test('setBreakAd with another at keeps the open break: same cut, no second break', async (t) => {
+  frozenClock(t, ['Date', 'setTimeout']);
+  const r = rig({ plan: fixture('host-plan.json') });
+  r.ads.breakStarted(58);
+  const linearBefore = r.linear.length;
+  r.ads.setBreakAd({ at: 60, tagUrl: STABLE.ad_tag_url, adId: `il-shop-midroll-${DLV}`, creativeId: 'cr1' });
+  await flush();
+  assert.equal(r.asked.at(-1).searchParams.get('cut'), 'at-58000');
+  assert.deepEqual(r.linear.slice(linearBefore).map(([on]) => on), [true]);
+  // The guard is the one of the open break: it fires once, 120 s after breakStarted.
+  t.mock.timers.tick(120000);
+  assert.deepEqual(r.events.filter((e) => e.type === 'break_error'), [{ type: 'break_error', cut: 'at-58000' }]);
+});

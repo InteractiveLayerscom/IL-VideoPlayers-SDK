@@ -1,10 +1,14 @@
 #!/usr/bin/env node
+// WARNING: EXAMPLE ONLY. NEVER DEPLOY THIS RELAY. In live mode it hands the full power of IL_API_KEY to anyone who can
+// reach it (it answers with CORS *). It listens on 127.0.0.1 by default; --host opens it to another interface (for
+// example a LAN address a TV can reach) and exposes the key's power to that whole network.
+//
 // Example relay: plays the CUSTOMER'S BACKEND for an app that uses IL's per-break API. The API key lives only here,
 // in the environment; the app never sees it. Dependency-free, Node >= 20. For local demos and tests, not production.
 //
 // Usage
 //   IL_API_BASE=https://console.example IL_API_KEY=... PORT=8787 node examples/api-relay.mjs
-//   node examples/api-relay.mjs --fixtures test/fixtures/native [--static <dir>] [--v2] [--public-base https://host:port]
+//   node examples/api-relay.mjs [--host <addr>] --fixtures test/fixtures/native [--static <dir>] [--v2] [--public-base https://host:port]
 //                                [--cert cert.pem --key key.pem]   (HTTPS with a locally trusted certificate)
 //
 // Endpoints (JSON in and out, permissive CORS for local demos)
@@ -176,7 +180,12 @@ export function redact(pathAndQuery) {
 }
 
 async function serveStatic(res, root, pathname) {
-  const file = normalize(join(root, decodeURIComponent(pathname)));
+  let file;
+  try {
+    file = normalize(join(root, decodeURIComponent(pathname)));
+  } catch {
+    return send(res, 400, { error: 'bad path' });
+  }
   if (file !== root && !file.startsWith(root + sep)) return send(res, 404, { error: 'not found' });
   try {
     if (!(await stat(file)).isFile()) return send(res, 404, { error: 'not found' });
@@ -235,7 +244,7 @@ export function createRelay({ base, apiKey, fixtures, staticDir, v2 = false, pub
         }
         if (url.pathname === '/il-player/scene-product') return send(res, 200, await backend.load('scene-product-card.json'), fixtureHeaders);
         if (url.pathname === '/il-player/break-product') return send(res, 200, await backend.load('break-product-card.json'), fixtureHeaders);
-        if (root) return serveStatic(res, root, url.pathname);
+        if (root) return await serveStatic(res, root, url.pathname);
       }
       send(res, 404, { error: 'not found' });
     } catch (error) {
@@ -246,6 +255,16 @@ export function createRelay({ base, apiKey, fixtures, staticDir, v2 = false, pub
   return tls ? createHttpsServer(tls, handler) : createServer(handler);
 }
 
+// Loopback unless the caller names another interface: see the warning at the top.
+export const DEFAULT_HOST = '127.0.0.1';
+export function startRelay({ port = 8787, host = DEFAULT_HOST, ...options } = {}) {
+  const server = createRelay(options);
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => resolve(server));
+  });
+}
+
 function argument(args, name) {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
@@ -253,16 +272,21 @@ function argument(args, name) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
-  const server = createRelay({
+  const fixtures = argument(args, '--fixtures');
+  const host = argument(args, '--host') ?? DEFAULT_HOST;
+  const server = await startRelay({
+    port: Number(process.env.PORT) || 8787,
+    host,
     base: process.env.IL_API_BASE,
     apiKey: process.env.IL_API_KEY,
-    fixtures: argument(args, '--fixtures'),
+    fixtures,
     staticDir: argument(args, '--static'),
     v2: args.includes('--v2'),
     publicBase: argument(args, '--public-base'),
     cert: argument(args, '--cert') ? readFileSync(argument(args, '--cert')) : undefined,
     key: argument(args, '--key') ? readFileSync(argument(args, '--key')) : undefined,
   });
-  const port = Number(process.env.PORT) || 8787;
-  server.listen(port, () => console.log(`relay listening on ${argument(args, '--cert') ? 'https' : 'http'}://localhost:${port}${argument(args, '--fixtures') ? ' (fixtures)' : ''}`));
+  const { port } = server.address();
+  console.log(`relay listening on ${argument(args, '--cert') ? 'https' : 'http'}://${host}:${port}${fixtures ? ' (fixtures)' : ''}`);
+  if (host !== DEFAULT_HOST && !fixtures) console.log('WARNING: this relay exposes IL_API_KEY to every client that can reach ' + host);
 }
