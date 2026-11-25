@@ -61,6 +61,8 @@ struct AdPlan {
     let expiresAt: Date
     /// A version 2 plan: a short-lived native GAM approval that stops being used the moment it expires.
     let native: Bool
+    /// The plan offers `commerce.break_url`, usable or not for this session.
+    let breakURLOffered: Bool
     /// The `grant` of `commerce.url`, sent as `renew` so a renewed plan keeps the same commerce session.
     let renewGrant: String?
 
@@ -114,6 +116,7 @@ struct AdPlan {
         let grant = shop.map { query($0.url, "grant") }.flatMap { $0.isEmpty ? nil : $0 }
         return AdPlan(cuts: cuts, windows: windows, graphics: graphics, pacing: pacing, shop: shop, page: page,
                       sid: session, breakShop: breakShop, breakURL: breakURL, expiresAt: expiry, native: version == 2,
+                      breakURLOffered: commerce?["break_url"] is String,
                       renewGrant: grant)
     }
 
@@ -422,6 +425,25 @@ struct AdPlan {
         return ""
     }
 
+    /// The app's identity for Google Ad Manager (`msid` = bundle id, `an` = app name), as Google's "VAST ad tag URL
+    /// parameters" asks for in-app requests. Replaced in tests.
+    nonisolated(unsafe) static var appIdentity: (id: String, name: String)? = {
+        guard let id = Bundle.main.bundleIdentifier, !id.isEmpty else { return nil }
+        let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? id
+        return (id, name)
+    }()
+
+    /// Adds `msid`/`an` to a GAM request this SDK sends itself, unless the tag already carries them. IMA adds the
+    /// app's identity to the requests it makes, so tags handed to IMA are left alone. Never page parameters for an app.
+    static func withAppIdentity(_ url: String) -> String {
+        guard let app = appIdentity, URLComponents(string: url)?.host?.lowercased() == "pubads.g.doubleclick.net" else { return url }
+        var out = url
+        if query(out, "msid").isEmpty { out = setQuery(out, "msid", app.id) }
+        if query(out, "an").isEmpty { out = setQuery(out, "an", app.name) }
+        return out
+    }
+
     static func correlated(_ url: String) -> String {
         let stamp = String(Int64(Date().timeIntervalSince1970 * 1000)) + String(format: "%06d", Int.random(in: 0..<1_000_000))
         return withConsent(setQuery(url, "correlator", stamp))
@@ -483,7 +505,7 @@ struct AdPlan {
         pairs.append("il_format=" + encode(format))
         var url = setQuery(tagURL, "cust_params", pairs.joined(separator: "&"))
         if let page { url = setQuery(setQuery(url, "url", page), "description_url", page) }
-        return correlated(url)
+        return withAppIdentity(correlated(url))
     }
 
     func productURL(windowID: String, locale: String) -> URL? {

@@ -118,6 +118,7 @@ public final class ILAdPlanPlayer {
         sessionConfiguration.timeoutIntervalForResource = 5
         session = URLSession(configuration: sessionConfiguration)
         overlay.useContentClock { [weak self] id in self?.cueVisible(id) }
+        announceSessionMismatch()
     }
 
     /// Call before playing content. Returns once the host may play it.
@@ -130,9 +131,10 @@ public final class ILAdPlanPlayer {
         if let preroll = schedule.join(positionMs: positionMs) { await runBreak(preroll) }
     }
 
-    /// What `load` reports through `events` when it gets no plan: `plan_no_content` (204, ask again on the next
-    /// view), `plan_not_found` (404: unknown project, video or app — check that the `app` value, given as the
-    /// event's id, is registered in the Console) and `plan_error` (network, timeout or an unusable plan).
+    /// When `load` gets no plan it reports `plan_unavailable` through `events`, once: the format is the reason and the
+    /// id is the exact `app` value sent (or that would have been sent). Reasons: `204` (no plan right now; ask again on
+    /// the next view), `404` (unknown project, video or app: check that this `app` value is registered in the Console),
+    /// `http_<status>`, `timeout`, `network`, `invalid_plan`, `invalid_origin`, `invalid_bundle_id`.
     public static let planTimeoutSeconds: TimeInterval = 5
 
     /// Requests the plan of `asset` from IL (`GET <origin>/il-player/app-plan?project=…&asset=…&app=apple:<bundle id>`)
@@ -151,27 +153,32 @@ public final class ILAdPlanPlayer {
                      sessionConfiguration: URLSessionConfiguration, events: Events?,
                      now: @escaping () -> Date = Date.init) async -> ILAdPlanPlayer? {
         let app = "apple:" + appID
-        guard let url = planURL(origin: origin, project: project, asset: asset, app: app) else {
-            events?("plan_error", nil, app)
+        let unavailable = { (reason: String) -> ILAdPlanPlayer? in
+            events?("plan_unavailable", reason, app)
             return nil
         }
-        guard let (status, data) = await fetchPlan(url, configuration: sessionConfiguration) else {
-            events?("plan_error", nil, app)
-            return nil
+        // The server's own rule for an Apple bundle id: a refused id is not sent at all.
+        guard appID.count <= 149, appID.range(of: "^[A-Za-z0-9-]{1,63}(\\.[A-Za-z0-9-]{1,63}){1,9}$", options: .regularExpression) != nil else {
+            return unavailable("invalid_bundle_id")
+        }
+        guard let url = planURL(origin: origin, project: project, asset: asset, app: app) else { return unavailable("invalid_origin") }
+        let answer = await fetchPlan(url, configuration: sessionConfiguration)
+        guard case .success(let (status, data)) = answer else {
+            if case .failure(let error) = answer, (error as? URLError)?.code == .timedOut { return unavailable("timeout") }
+            return unavailable("network")
         }
         switch status {
         case 200: break
         // No plan right now: play without ads and ask again on the next view, never in a loop.
-        case 204: events?("plan_no_content", nil, app); return nil
+        case 204: return unavailable("204")
         // Unknown project, video or app give the same 404: the `app` value sent is what to check first.
-        case 404: events?("plan_not_found", nil, app); return nil
-        default: events?("plan_error", nil, app); return nil
+        case 404: return unavailable("404")
+        default: return unavailable("http_\(status)")
         }
         guard let reader = ILAdPlanPlayer(overlay: overlay, player: player, planJSON: data, planOrigin: AdPlan.origin(url.absoluteString),
                                           sessionID: sessionID, locale: locale, engine: engine, displaySlot: displaySlot,
                                           sessionConfiguration: sessionConfiguration, events: events, now: now) else {
-            events?("plan_error", nil, app)
-            return nil
+            return unavailable("invalid_plan")
         }
         reader.loadURL = url
         reader.scheduleRenewal()
@@ -190,7 +197,7 @@ public final class ILAdPlanPlayer {
         return parts.url
     }
 
-    private static func fetchPlan(_ url: URL, configuration: URLSessionConfiguration) async -> (Int, Data)? {
+    private static func fetchPlan(_ url: URL, configuration: URLSessionConfiguration) async -> Result<(Int, Data), Error> {
         configuration.timeoutIntervalForRequest = planTimeoutSeconds
         // The whole transfer: a slow plan never holds the content longer than this.
         configuration.timeoutIntervalForResource = planTimeoutSeconds
@@ -199,8 +206,13 @@ public final class ILAdPlanPlayer {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
-        guard let (data, response) = try? await session.data(for: request), let http = response as? HTTPURLResponse else { return nil }
-        return (http.statusCode, data)
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .failure(URLError(.badServerResponse)) }
+            return .success((http.statusCode, data))
+        } catch {
+            return .failure(error)
+        }
     }
 
     /// A version 2 plan from `load` is asked again about 20 s before it expires, with `renew` so IL keeps the
@@ -215,9 +227,13 @@ public final class ILAdPlanPlayer {
             guard !Task.isCancelled, let self, !self.closed else { return }
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = self.session.configuration.protocolClasses
-            guard let (status, data) = await Self.fetchPlan(target, configuration: configuration), !self.closed else { return }
-            if status == 200, self.replacePlan(data) { return }
-            self.emit("plan_renew_failed", nil, String(status))
+            let answer = await Self.fetchPlan(target, configuration: configuration)
+            guard !self.closed else { return }
+            if case .success(let (status, data)) = answer, status == 200, self.replacePlan(data) { return }
+            // Never the URL: it carries the grant.
+            let reason: String
+            if case .success(let (status, _)) = answer { reason = String(status) } else { reason = "network" }
+            self.emit("plan_renew_failed", reason, "")
         }
     }
 
@@ -244,12 +260,31 @@ public final class ILAdPlanPlayer {
         plan = next
         schedule = kept
         expired = false
+        // What was drawn from the old plan is rebuilt from the new one; only a running ad's card stays.
+        let kept2 = planCues.filter { $0.format == .midroll }
+        if kept2.count != planCues.count {
+            planCues = kept2
+            overlay.setPlanCues(kept2)
+        }
+        measures = measures.filter { id, _ in kept2.contains { $0.id == id } }
+        if displayLive != nil { display?.clear(); displayLive = nil }
+        announceSessionMismatch()
+    }
+
+    private var mismatchAnnounced = false
+    /// Buy during a break needs the plan's `commerce.session` as the sid: a host with its own view id is told once.
+    private func announceSessionMismatch() {
+        guard !mismatchAnnounced, plan.breakURLOffered, plan.breakURL == nil, !plan.breakShop, !sessionID.isEmpty else { return }
+        mismatchAnnounced = true
+        emit("break_shop_unavailable", "session", "")
     }
 
     /// The version 2 approval is over: what it drew goes, pending answers are dropped, nothing new starts.
     private func checkExpiry() -> Bool {
         if expired { return true }
-        guard plan.native, now() >= plan.expiresAt else { return false }
+        // In milliseconds, like the acceptance rule.
+        guard plan.native, Int64((now().timeIntervalSince1970 * 1000).rounded(.down))
+                >= Int64((plan.expiresAt.timeIntervalSince1970 * 1000).rounded(.down)) else { return false }
         expired = true
         engine?.cancel()
         display?.clear()
@@ -266,6 +301,10 @@ public final class ILAdPlanPlayer {
     public func setBreaks(_ positions: [TimeInterval]) {
         guard !closed else { return }
         hostBreaks = positions.filter { $0.isFinite && $0 >= 0 }.map { Int64(($0 * 1000).rounded()) }
+        rebuildForBreaks()
+    }
+
+    private func rebuildForBreaks() {
         if let next = AdPlan.read(planJSON, now: now(), origin: planOrigin, sessionID: sessionID, breaks: hostBreaks) {
             adopt(next)
         }
@@ -275,11 +314,37 @@ public final class ILAdPlanPlayer {
     /// nothing of IL's is drawn except Buy for a reported ad, and answers still pending are dropped.
     public func breakStarted(at position: TimeInterval) {
         guard !closed, !inBreak else { return }
-        let ms = position.isFinite && position > 0 ? Int64((position * 1000).rounded(.down)) : 0
+        guard position.isFinite, position >= 0 else {
+            emit("break_error", "invalid_position", "")
+            return
+        }
+        let ms = Int64((position * 1000).rounded())
         let cut = AdPlan.Cut(id: "at-\(ms)", atMs: ms, requests: [])
         hostCut = cut
+        // A break the app did not announce with setBreaks still gets the plan's clearance from now on.
+        if !hostBreaks.contains(ms) {
+            hostBreaks.append(ms)
+            rebuildForBreaks()
+        }
         beginBreak(cut.id)
+        let token = hostBreakToken
+        let limit = hostBreakLimitOverride ?? Self.hostBreakLimitSeconds
+        hostGuard = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
+            guard !Task.isCancelled, let self, !self.closed, self.hostBreakToken == token, self.hostCut != nil else { return }
+            // Safety net: the app's ad player never reported the end. Graphics come back for the rest of the view.
+            self.hostCut = nil
+            self.finishBreak(cut.id, complete: false)
+        }
     }
+
+    /// A host break with no `breakEnded()` after this long is treated as over (`break_error`), as no ad of the
+    /// reader's own may hold the content past its 180 s cap; this allows a pod of several.
+    public static let hostBreakLimitSeconds: TimeInterval = 300
+    private var hostGuard: Task<Void, Never>?
+    /// Shortened in tests.
+    var hostBreakLimitOverride: TimeInterval?
+    private var hostBreakToken = 0
 
     /// An ad of the app's break started, identified by the tag it requested and the VAST `Ad@id` and `Creative@id`
     /// (with IMA: `IMAAd.adId` and `IMAAd.creativeID`). An `il-shop-` ad gets its Buy card.
@@ -315,6 +380,9 @@ public final class ILAdPlanPlayer {
     }
 
     private func finishBreak(_ id: String, complete: Bool) {
+        hostBreakToken += 1
+        hostGuard?.cancel()
+        hostGuard = nil
         spotEnded()
         currentAd = nil
         inBreak = false
@@ -364,7 +432,12 @@ public final class ILAdPlanPlayer {
         session.invalidateAndCancel()
         engine?.cancel()
         display?.clear()
-        if inBreak {
+        hostGuard?.cancel()
+        if inBreak, hostCut != nil {
+            // The app owns its break and its player: only the reader's own state and overlay are cleared.
+            hostCut = nil
+            overlay.setLinearAdBreak(false)
+        } else if inBreak {
             // The ad stops with the plan and the content is back where it was, paused for the host.
             player.pause()
             if let saved = breakContent {
@@ -573,7 +646,8 @@ public final class ILAdPlanPlayer {
 
     private func followWrappers(_ tag: String) async -> (ad: AdPlan.LinearAd, vast: String)? {
         var ad = AdPlan.LinearAd()
-        var next = tag
+        // A GAM VAST this reader fetches itself (no engine, or the MP4 fallback) carries the app's identity.
+        var next = AdPlan.withAppIdentity(tag)
         var first: String?
         for _ in 0...Self.maxWrappers {
             guard let url = URL(string: next), let (status, data) = await body(url), (200..<300).contains(status) else { return nil }

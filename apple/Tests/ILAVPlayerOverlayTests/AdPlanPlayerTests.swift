@@ -277,7 +277,8 @@ final class AdPlanPlayerTests: XCTestCase {
         player.playMedia = { _, url in played = url; return true }
         await player.start()
         XCTAssertEqual(played?.absoluteString, "https://c.example/a.mp4")
-        XCTAssertEqual(StubNetwork.seen.first, engine.tags.first)
+        // Same request as IMA got, plus the app's identity that IMA would have added itself.
+        XCTAssertEqual(StubNetwork.seen.first, engine.tags.first.map(AdPlan.withAppIdentity))
         XCTAssertEqual(events.last?.type, "break_end")
         player.stop()
     }
