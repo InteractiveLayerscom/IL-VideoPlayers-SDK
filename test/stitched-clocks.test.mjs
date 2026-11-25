@@ -314,3 +314,21 @@ test('a page loaded in the middle of an ad draws nothing until content, then the
   assert.equal(onScreen.get('il-ads-w')?.end, 35000, 'content 31 s is inside the window 20–35 s');
   ads.destroy();
 });
+
+// MediaTailor's master names its variants relative to the master, in another directory; Shaka keeps that relative URI
+// as the track's originalVideoId. Resolved against the media playlist's own URL it named nothing, so the clock never
+// found the active variant (`clock_playlist_missing`) and nothing was drawn with Shaka on a real MediaTailor stream.
+test('the Shaka clock finds a variant the master names relative to itself in another directory', () => {
+  const s = fakeShaka();
+  const master = 'https://mt.example/v1/master/h/cfg/master.m3u8';
+  const media = 'https://mt.example/v1/manifest/h/cfg/session/0.m3u8';
+  s.player.active = '../../../manifest/h/cfg/session/0.m3u8';
+  const events = [];
+  const clock = shakaContentClock({ player: s.player, plan: stitchedPlan(), onEvent: (e) => events.push(e) });
+  s.download(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n${s.player.active}\n`, 0, master);
+  s.download(playlist(), 0, media);
+  s.video.currentTime = 22;
+  assert.equal(clock.time(), 12);
+  assert.deepEqual(events.filter((e) => e.type === 'clock_playlist_missing'), []);
+  clock.destroy();
+});
