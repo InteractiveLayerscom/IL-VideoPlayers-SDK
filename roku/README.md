@@ -180,6 +180,8 @@ m.plan.callFunc("adEnded")
 m.plan.callFunc("breakEnded")
 ```
 
+**Un solo conductor de cortes.** Si el plan trae sus propios `cuts`, el componente los reproduce con RAF y rechaza `setBreaks` y `breakStarted` con `{ type: "break_refused", reason: "plan_has_cuts" }`, sin abrir un corte del host. Del mismo modo, una vez que el canal informó cortes (o con un corte del host abierto), `replacePlan` rechaza un plan con `cuts`: devuelve `false`, conserva el plan actual y emite el mismo evento.
+
 **Separación alrededor de tus cortes.** Las ventanas del plan del host sólo están separadas de los cortes que IL ubicaría, no de los que reproduce el canal. El componente aplica `scenes.pacing.cut_clearance_seconds` (y la del producto) alrededor de cada posición informada con `setBreaks` o, si faltó, con `breakStarted`. Sin cortes informados no hay separación: informarlos antes de que lleguen es obligación del canal.
 
 **Sin `break_url`.** Un plan del host trae `commerce.break_url` sólo si el playback se creó con `"graphics": true` y recorre pasos ordenados. Sin ella no hay Comprar durante los cortes ni ninguna llamada; el resto funciona igual.
