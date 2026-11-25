@@ -47,6 +47,8 @@ public final class ILAdPlanPlayer {
     private let planOrigin: String?
     private let sessionID: String
     private var hostBreaks: [Int64] = []
+    /// The app reported breaks of its own (`setBreaks`, `breakStarted`): from then on this view has one break driver.
+    private var hostDriven = false
     /// Set once a version 2 plan expired: nothing of it is used until `replacePlan` brings a current one.
     private var expired = false
     /// Where `load` asked for the plan, for the renewal of a version 2 plan.
@@ -289,6 +291,11 @@ public final class ILAdPlanPlayer {
     @discardableResult
     public func replacePlan(_ json: Data) -> Bool {
         guard !closed, let next = AdPlan.read(json, now: now(), origin: planOrigin, sessionID: sessionID, breaks: hostBreaks) else { return false }
+        // An app that plays its own breaks keeps doing so: a plan with cuts would add the reader's breaks next to them.
+        if hostDriven || hostCut != nil, !next.cuts.isEmpty {
+            emit("break_refused", "plan_has_cuts", "")
+            return false
+        }
         planJSON = json
         adopt(next)
         if loadURL != nil { scheduleRenewal() }
@@ -364,6 +371,11 @@ public final class ILAdPlanPlayer {
     /// The positions (content seconds) of the breaks the app itself plays, so graphics keep the plan's clearance.
     public func setBreaks(_ positions: [TimeInterval]) {
         guard !closed else { return }
+        guard plan.cuts.isEmpty else {
+            emit("break_refused", "plan_has_cuts", "")
+            return
+        }
+        hostDriven = true
         hostBreaks = positions.filter { $0.isFinite && $0 >= 0 }.map { Int64(($0 * 1000).rounded()) }
         rebuildForBreaks()
     }
@@ -389,6 +401,7 @@ public final class ILAdPlanPlayer {
         }
         let ms = Int64((position * 1000).rounded())
         let cut = AdPlan.Cut(id: "at-\(ms)", atMs: ms, requests: [])
+        hostDriven = true
         hostCut = cut
         // A break the app did not announce with setBreaks still gets the plan's clearance from now on.
         if !hostBreaks.contains(ms) {

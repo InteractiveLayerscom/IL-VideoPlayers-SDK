@@ -128,6 +128,90 @@ El SDK muestra el acceso de compra si el feed devuelve el mismo creativo y entre
 
 Para leer el plan de IL y mostrar cortes, gráficas y productos, seguí la [guía de SDK nativos](../docs/native-ad-plan-matrix.md). Indica qué formato falta probar en un dispositivo.
 
+### Pedir el plan desde la app (`load`)
+
+```java
+AdPlanPlayer plan = AdPlanPlayer.load(overlays, player, "https://<host de la consola>", projectId, assetId,
+        null, "es", (type, format, id) -> Log.i("IL", type + " " + id));
+plan.start(() -> player.play());
+```
+
+El SDK hace `GET <origen>/il-player/app-plan?project=…&asset=…&app=android:<nombre del paquete>` fuera del hilo principal. El valor de `app=` es `android:` más `getPackageName()` (por ejemplo `android:com.example.tv`) y **tiene que estar registrado para el proyecto en la Consola**. `load` nunca devuelve `null`: `start` espera el plan como mucho 5 s y después deja reproducir el contenido.
+
+- **200:** el plan se lee y se conecta como con `attach`.
+- **Sin plan:** el contenido sigue sin anuncios y el SDK no reintenta (la próxima vista vuelve a pedirlo). Siempre llega un único evento `plan_unavailable`. Su `format` es el motivo y su `id` es `app=<valor enviado> status=<código HTTP o 0>`. Motivos:
+  - `http_204`: IL todavía no tiene plan o se alcanzó un límite.
+  - `http_404`: proyecto, video o app desconocidos, con la misma respuesta para los tres. Revisá primero que el `app=` esté registrado; el log también lo dice.
+  - `http_<código>`: otra respuesta HTTP.
+  - `timeout`: sin respuesta en 5 s.
+  - `network`: falla de red.
+  - `app_id`: el nombre del paquete no cumple el formato de IL y no se envió nada.
+  - `request`: el origen no es un origen HTTPS sin ruta.
+  - `stitched`: un plan con `timeline` (proyecto con inserción en el servidor), que los lectores nativos todavía no reproducen.
+  - `invalid`: cualquier otro 200 que no se puede leer.
+
+El origen tiene que ser HTTPS, sin ruta. Las URL del producto deben ser del mismo origen. Ningún evento ni línea de log incluye el `grant`, la URL de renovación ni las URL completas de `commerce`.
+
+### Identidad de la app en Google Ad Manager
+
+El plan de una app no trae `page_url`, así que el SDK nunca agrega `url` ni `description_url`. En los pedidos a Google Ad Manager que el SDK hace por su cuenta (etiquetas de gráficas y la caída a MP4 de un corte de GAM), agrega `msid` (nombre del paquete) y `an` (nombre visible de la app) si la etiqueta no los trae. Así lo pide Google para las llamadas VAST directas desde apps ([parámetros de etiquetas VAST](https://support.google.com/admanager/answer/10678356)). Los pedidos que hace IMA llevan esos datos por cuenta del propio IMA.
+
+### Ciclo de vida
+
+Llamá a `plan.close()` en `onDestroy()` (en un fragmento, en `onDestroyView()`), antes de liberar el reproductor. Es obligatorio. Como respaldo, si se destruye la `Activity` que contiene el `PlayerView` sin `close()`, el SDK se cierra solo y deja de registrarse, para no mantener viva esa `Activity`. En ese caso emite `plan_closed`, con `format` igual a `configuration_change` si fue un cambio de configuración (por ejemplo una rotación sin `configChanges`) o `activity_destroyed` si no. Si el cierre llega en medio de un corte del SDK, el contenido vuelve a su posición en pausa, sin iniciarse, igual que con `close()`. **Después de un cambio de configuración, la app tiene que volver a llamar a `load` o `attach` con el `PlayerView` nuevo**, aunque conserve su `ExoPlayer` (por ejemplo en un `ViewModel`); si no, no hay anuncios ni Comprar. Ese respaldo no cubre un fragmento que se destruye dentro de una `Activity` que sigue viva. Con la app en segundo plano, el SDK deja de despertar al hilo principal. Al volver, lo primero que hace es comprobar si el plan venció, antes de pedir o dibujar algo.
+
+### Plan versión 2 y renovación
+
+Un plan `version: 2` (aprobación de formato nativo de Google Ad Manager) se acepta como en `web/ads.mjs`: sólo con `native_gam.contract` igual a `native-gam-plan-v1` y `expires_at` a no más de 120 s. Al vencer, el SDK deja de usarlo en el próximo tick o salto, emite `plan_expired`, quita sus gráficas y devuelve el contenido si estaba en un corte. Con `load`, el SDK lo vuelve a pedir 20 s antes de `expires_at` con `&renew=<grant>` (el `grant` de `commerce.url`) y lo reemplaza sin perder la vista: lo ya mostrado, intentado y resuelto, el pacing y la sesión de comercio siguen. Cortes y ventanas se rearman con el plan nuevo. Emite `plan_renewed` (`format` = versión nueva) o `plan_renew_failed` (`format` = motivo, como arriba). Si un intento falla (204, error, red o tiempo agotado), el SDK reintenta a `expires_at` − 12 s y − 5 s, nunca con dos pedidos a la vez, y se detiene en el primero que funciona. `plan_renew_failed` llega una sola vez, después del último intento o si la respuesta llega cuando el plan ya venció, con el último motivo. Una respuesta que llega después del vencimiento o de `close()` no se usa. Mientras tanto, el plan actual se sigue usando hasta su `expires_at`. Una respuesta versión 1 se adopta y corta las renovaciones. Si tu app obtiene el plan por su cuenta, llamá a `plan.replacePlan(json)` con la versión nueva: hace lo mismo y devuelve `false`, sin tocar el plan actual, si el JSON no sirve.
+
+### Comprar durante un corte con `commerce.break_url`
+
+Si el plan trae `commerce.break_url` y el `sid` es `commerce.session`, el SDK pide la ficha del anuncio en curso a esa URL, sin cambiarla, agregando `cut`, `tag`, `creative`, `delivery` y `locale`, como la web. `delivery` sale del `Ad@id` `il-shop-<preroll|midroll>-<43 caracteres>`. Un anuncio sin ese prefijo no pide nada. La ficha se dibuja con el mismo botón Comprar y las mismas reglas de foco y cierre de la sección anterior. Se quita al terminar, saltar o fallar el anuncio, salvo el panel que el espectador abrió. La impresión es la del VAST: el SDK sólo envía `commerce.viewUrl` cuando se abre la ficha. Sin `break_url` sigue el camino del feed de sesión de `setLinearAdActive`.
+
+### Cortes de la app (modo host)
+
+Cuando tu app pide cada corte con la API por corte de IL y lo reproduce con su propio reproductor de anuncios, conectá un plan de host (`cuts: []`, de `GET /v1/vod/playbacks/{id}/plan`) con `attach` y avisá al SDK lo que pasa:
+
+```java
+AdPlanPlayer plan = AdPlanPlayer.attach(overlays, player, planJson, "https://<host de la consola>", null, "es", events);
+plan.setBreaks(new long[] {0, 58000});           // posiciones de tus cortes, en ms de contenido
+plan.start(() -> player.play());
+
+plan.breakStarted(58000);                        // tu corte empieza (0 para el pre-roll)
+plan.adStarted(adTagUrl, ad.getAdId(), ad.getCreativeId());  // IMA: Ad.getAdId() y Ad.getCreativeId()
+// o, con el VAST crudo: plan.adStarted(adTagUrl, vastXml);
+plan.adEnded();                                  // completo, salto o error
+plan.breakEnded();                               // vuelve el contenido
+```
+
+Las ventanas de un plan de host vienen separadas de los cortes que IL pondría, no de los tuyos. Por eso el SDK aplica `scenes.pacing.cut_clearance_seconds` alrededor de cada posición que informás con `setBreaks` o `breakStarted`. Si no informás nada, no hay distancia a ningún corte. Una posición negativa no inicia nada y emite `break_refused` (`format` = `position`). Los avisos de corte son para un plan de host (`cuts: []`): con un plan que trae sus propios cortes, `breakStarted` se rechaza con `break_refused` (`format` = `plan_has_cuts`), para no mezclar dos formas de manejar los cortes. Un plan versión 2 vence a su hora aunque el contenido esté en pausa o haya un corte de la app: se quitan las gráficas y el botón Comprar y llega `plan_expired`.
+
+Con un plan de host el SDK no pide ni reproduce ningún anuncio de video. Durante el corte informado no dibuja nada de IL salvo el botón Comprar, descarta las respuestas de gráficas que lleguen tarde y no cambia el pacing ni las impresiones. Para Comprar pide la ficha con `cut=at-<ms>` (`at-0` en el pre-roll) y el `tag` de la `adTagUrl` de iADServer. La app no necesita IMA ni Google Mobile Ads para este modo.
+
+Comprar durante el corte necesita `commerce.break_url` en el plan de host: sólo viene si el playback se creó con `graphics: true` y recorre pasos ordenados. Sin `break_url` no hay Comprar y no se avisa nada. Si conectaste el plan con un `sessionId` propio y el plan trae `break_url`, el SDK emite una vez `buy_unavailable` (`format` = `session`): para Comprar, pasá `null` y se usa `commerce.session`.
+
+Un `adStarted` que llega antes de que el plan esté conectado se guarda, como `breakStarted`, y se aplica cuando el plan llega si ese anuncio sigue en pantalla: un `adEnded` o `breakEnded` anterior lo descarta. Un `adStarted` sin un corte abierto emite `break_refused` (`format` = `no_break`). `replacePlan` con un plan que trae cortes, mientras la app maneja sus propios cortes, devuelve `false`, conserva el plan actual y emite `break_refused` (`format` = `plan_has_cuts`).
+
+**En TV, el control de tu `PlayerView` durante Comprar.** Es lo único de la interfaz de la app que el SDK toca durante un corte de la app. Cuando aparece Comprar, o hay un panel de producto abierto, el SDK guarda la vista que tenía el foco y llama a `setUseController(false)` en tu `PlayerView`, para que el control remoto llegue al botón. Cuando ya no hay nada para elegir, vuelve a llamar a `setUseController(true)` si antes estaba activado y la app no lo cambió mientras tanto. Si la app lo cambió, gana el valor de la app. El foco vuelve a la vista guardada sólo si quedó en ninguna vista o en una vista del SDK. Si la app maneja la visibilidad de sus controles por su cuenta, va a ver esos dos cambios y su `ControllerVisibilityListener` va a recibir que los controles se ocultan; los controles propios (por ejemplo los de Leanback) tienen que dejar de tomar el foco mientras haya algo para elegir.
+
+Red de seguridad: si un corte informado no recibe ningún aviso durante 180 s de primer plano (por ejemplo, porque el reproductor de anuncios de la app falló y nunca llegó `breakEnded`), el SDK lo da por terminado, emite `break_error` y vuelve a mostrar gráficas. Durante un corte de la app el SDK nunca toca su reproductor: `close()`, `replacePlan` o el vencimiento del plan sólo limpian el estado y la capa del SDK.
+
+**Obligaciones de la app en este modo:** informar cada corte (`breakStarted`/`breakEnded`) y cada anuncio (`adStarted`/`adEnded`). Si no informa nada, el SDK no tiene forma de saber que hay un anuncio en pantalla: las gráficas siguen sólo por tiempo de contenido y no hay Comprar. `setBreaks` sirve para que las gráficas respeten la distancia a los cortes. El anuncio tiene que verse en el mismo `PlayerView` o debajo de él, porque el botón se dibuja sobre el `PlayerView`.
+
+Hay una app de ejemplo con los dos modos en [examples/android](../examples/android/README.md).
+
+Cada lector guarda su propio consentimiento e identidad de app: dos reproductores en el mismo proceso no se pisan.
+
+### Verificación
+
+- Pruebas unitarias en la JVM, con dobles del reproductor, de la red y del reloj, y con las respuestas de IL de `test/fixtures/native`.
+- Pruebas instrumentadas en un emulador de teléfono con Android 15 (API 35) y en un emulador de Android TV 14 (API 34), con ExoPlayer real y un servidor HTTPS local dentro del emulador.
+- La app de ejemplo en los dos modos y en ambos emuladores, contra fixtures servidos desde la Mac. En el modo de cortes de la app, el anuncio está simulado.
+- Una build de release de la app de ejemplo, minificada con R8 y sin IMA ni Google Mobile Ads, corrió en los dos modos en el emulador de teléfono.
+- No se probó con anuncios reales de Google Ad Manager, IMA ni iADServer en esta ronda.
+- Nada corrió en un dispositivo físico.
+- Fire TV no se probó: se trata como Android TV por inferencia.
+
 ## Tipografía de la tienda
 
 Los paneles de producto de TV y de móvil usan Montserrat, la primera fuente que nombra la tienda web, con sus pesos: 500 para el texto, 600 para los botones, 650 para los encabezados y 700 para títulos y precios. En Android, la biblioteca incluye la fuente y la app no tiene que agregar nada. El paquete web también la incluye (`web/fonts/`) y la carga con `player.css` o `fonts.css`; ver [Tipografía de los paneles](../web/README.md#tipografía-de-los-paneles). Desde Android 8.0 (API 26) se usa la fuente incluida. En versiones anteriores, o si la fuente no se puede usar, los paneles usan la fuente del sistema. Una capa de escena cuyo `fontFamily` empieza por Montserrat también recibe la fuente incluida; las demás familias se resuelven como antes.
