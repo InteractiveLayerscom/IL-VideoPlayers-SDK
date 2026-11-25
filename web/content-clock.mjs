@@ -14,6 +14,10 @@ export function videoClock(video) {
 // the graphic before the ad's first frame.
 const AD_EDGE_SECONDS = 0.25;
 const AD_LEAD_SECONDS = 0.5;
+// `inAd()` also says yes this close before an ad: a player's position can trail the frame it presents by a few
+// milliseconds (Video.js put the first ad frame 15–20 ms before the ad segment's start in the browser tests), and a
+// kept product closed one frame early is never one left over the ad.
+const AD_FRAME_SECONDS = 0.05;
 // How far content PDTs may be from where the layout puts them: IL writes milliseconds, playlists round
 // #EXTINF to the millisecond.
 const PDT_TOLERANCE = 0.05;
@@ -194,7 +198,9 @@ function segmentClock({ resolve, kind, position, rate, edge, lead, onDestroy }) 
     inAd() {
       if (disposed) return false;
       const t = Number(position());
-      return Number.isFinite(t) && kind?.(t) === 'ad';
+      if (!Number.isFinite(t)) return false;
+      const r = Number(rate());
+      return kind?.(t) === 'ad' || kind?.(t + AD_FRAME_SECONDS * (Number.isFinite(r) && r > 1 ? r : 1)) === 'ad';
     },
     // For the session's programTime: content milliseconds, null while an ad plays.
     programTime() {

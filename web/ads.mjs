@@ -1418,7 +1418,10 @@ export function attachAds({
   // With a stitched clock, while anything the module drew is on screen it is re-checked on every frame
   // (video frames where the browser reports them), not only on video events, so an ad never shows under it.
   const frames = { id: null, video: false };
-  const drawing = () => overlay.live || [...cues.values()].some((cue) => cue.onScreen);
+  // A product panel the viewer kept open after its card's end counts too: a stitched ad starting under it closes it
+  // in its first frame, not at the next video event (timeupdate comes only every 250 ms).
+  const drawing = () => overlay.live ||
+    [...cues].some(([id, cue]) => cue.onScreen || (cue.product && session.holding?.(id) === true));
   function guard() {
     frames.id = null;
     if (disposed) return;

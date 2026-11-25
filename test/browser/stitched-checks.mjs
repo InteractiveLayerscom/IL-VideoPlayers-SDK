@@ -207,3 +207,104 @@ export function containerChecks(player) {
     });
   }
 }
+
+// The scene product (a card with Buy, from IL) over the same stitched stream, in one window per page: content 6–11 s
+// (segments 3 to 5, before the mid-roll; &product=1) or 16–21 s (segments 8 to 10, after it; &product=2). Judged frame by frame like the graphics:
+// never a card over an ad picture; `windows` (when given) is where in content a card may be seen.
+export function judgeProduct(samples, windows = null) {
+  const shown = new Set();
+  let ad = 0;
+  for (const s of samples) {
+    const p = picture(s);
+    expect(s.products, `one product card at most at ${s.t}`).toBeLessThanOrEqual(1);
+    if (p.ad) {
+      ad++;
+      expect(s.product, `product card over an ad frame at ${s.t}`).toBe(false);
+      continue;
+    }
+    // Just after a seek the frame may still be the one from before it: only the rule above is checked there.
+    if (s.seeking || s.sinceSeek < RECENT_SEEK_MS || p.segment == null || !s.product) continue;
+    if (windows) {
+      const inside = windows.some(([start, end]) => s.clock != null && s.clock >= start - EDGE && s.clock < end + EDGE);
+      const segmentOk = windows.some(([start, end]) => p.segment >= Math.floor(start / 2) && p.segment <= Math.floor((end - 0.001) / 2));
+      expect(inside || segmentOk, `product card at ${s.t} over content segment ${p.segment} (clock ${s.clock})`).toBe(true);
+    }
+    shown.add(p.segment);
+  }
+  return { ad, shown };
+}
+
+// Product requests per window, and impressions measured per window.
+const productCounts = (page) => page.evaluate(() => {
+  const count = (filter) => {
+    const out = {};
+    for (const { url } of window.harness.requests.filter(filter)) {
+      const id = url.startsWith('https://console.test/') ? new URL(url).searchParams.get('window') : url.split('/').at(-1);
+      out[id] = (out[id] ?? 0) + 1;
+    }
+    return out;
+  };
+  return {
+    requests: count(({ url }) => url.startsWith('https://console.test/il-player/scene-product?')),
+    impressions: count(({ url }) => url.startsWith('https://creative.test/impression/')),
+  };
+});
+
+export function productChecks(player) {
+  // [page, window id, content seconds, the content segments it covers]
+  for (const [mode, id, window, segments, side] of [['1', 'w1', [6, 11], [3, 5], 'before'], ['2', 'w2', [16, 21], [8, 10], 'after']]) {
+    test(`${player}: scene product ${side} the mid-roll in its window, never over an ad, one request and impression`, async ({ page }) => {
+      await open(page, player, '&product=' + mode);
+      await playUntil(page, 37.6);
+      const result = judgeProduct(await page.evaluate(() => window.harness.samples), [window]);
+      expect(result.ad, 'ad frames sampled').toBeGreaterThan(120);
+      // After the mid-roll, the card in its content segments proves content time across the stitched ad.
+      expect([...result.shown].some((segment) => segment >= segments[0] && segment <= segments[1]), `card ${side} the mid-roll`)
+        .toBe(true);
+      expect(await productCounts(page)).toEqual({ requests: { [id]: 1 }, impressions: { [id]: 1 } });
+    });
+  }
+
+  test(`${player}: an open product panel is kept after its window and closed when the stitched ad starts`, async ({ page }) => {
+    await open(page, player, '&product=1');
+    // Stream 12.5 is content 8.5, inside the first window.
+    await playUntil(page, 12.5);
+    await page.waitForFunction(() => window.harness.samples.at(-1)?.product === true);
+    expect(await page.evaluate(() => window.harness.openProduct()), 'panel opened').toBe(true);
+    // Stream 16.5 is content 12.5: the window ended, the panel the viewer opened stays.
+    await playUntil(page, 16.5);
+    await page.waitForFunction(() => window.harness.time() >= 16.5 && window.harness.samples.at(-1).t >= 16.4);
+    expect((await page.evaluate(() => window.harness.samples.at(-1))).panel, 'panel kept after its window').toBe(true);
+    // Into the mid-roll (stream 18–22).
+    await playUntil(page, 20);
+    const samples = await page.evaluate(() => window.harness.samples);
+    judgeProduct(samples);
+    const adFrames = samples.filter((s) => picture(s).ad && s.t >= 18);
+    expect(adFrames.length, 'mid-roll frames sampled').toBeGreaterThan(20);
+    expect(adFrames.some((s) => s.panel || s.product), 'panel over the mid-roll').toBe(false);
+    // Closed, not hidden: it does not come back with the content.
+    await playUntil(page, 23);
+    expect(await page.evaluate(() => document.querySelectorAll('.il-commerce-panel').length)).toBe(0);
+  });
+
+  test(`${player}: a tab hidden while an ad starts never shows the kept card over it when visible again`, async ({ page }) => {
+    await open(page, player, '&product=1');
+    await playUntil(page, 12.5);
+    await page.waitForFunction(() => window.harness.samples.at(-1)?.product === true);
+    expect(await page.evaluate(() => window.harness.openProduct()), 'panel opened').toBe(true);
+    // Hidden on content (stream 17), shown again inside the mid-roll (stream 19.5).
+    await playUntil(page, 17);
+    expect((await page.evaluate(() => window.harness.samples.at(-1))).panel, 'panel on screen before hiding').toBe(true);
+    await page.evaluate(() => window.harness.setHidden(true));
+    await playUntil(page, 19.5);
+    const before = await page.evaluate(() => window.harness.samples.length);
+    await page.evaluate(() => window.harness.setHidden(false));
+    await playUntil(page, 21);
+    const after = (await page.evaluate(() => window.harness.samples)).slice(before);
+    judgeProduct(after);
+    const adFrames = after.filter((s) => picture(s).ad);
+    expect(adFrames.length, 'ad frames after the tab came back').toBeGreaterThan(20);
+    expect(adFrames.some((s) => s.panel || s.product), 'card over the ad after the tab came back').toBe(false);
+    judgeProduct(await page.evaluate(() => window.harness.samples));
+  });
+}

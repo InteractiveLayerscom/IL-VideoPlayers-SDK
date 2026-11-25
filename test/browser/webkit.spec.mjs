@@ -1,5 +1,5 @@
 import { fontChecks } from './fonts-checks.mjs';
-import { containerChecks, renditionChecks, stitchedChecks } from './stitched-checks.mjs';
+import { containerChecks, productChecks, renditionChecks, stitchedChecks } from './stitched-checks.mjs';
 
 fontChecks();
 
@@ -7,3 +7,4 @@ fontChecks();
 stitchedChecks('native');
 renditionChecks('native', { failsClosed: true });
 containerChecks('native');
+productChecks('native');
