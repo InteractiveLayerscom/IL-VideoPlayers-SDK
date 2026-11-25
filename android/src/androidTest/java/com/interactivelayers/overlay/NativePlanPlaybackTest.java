@@ -295,5 +295,26 @@ public final class NativePlanPlaybackTest {
         assertFalse(loaded.isClosed());
         activity.recreate();
         assertTrue("the Activity holding the PlayerView is gone: nothing keeps it reachable", loaded.isClosed());
+        assertTrue("never silently: " + events, events.contains("plan_closed null"));
+    }
+
+    @Test public void anAdReportedBeforeThePlanArrivesStillGetsItsBuy() throws Exception {
+        planDelayMs = 1500;
+        String tag = new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url");
+        String shopAdId = "il-shop-midroll-" + delivery();
+        load();
+        activity.onActivity(a -> {
+            plan.breakStarted(58000);
+            plan.adStarted(tag, shopAdId, "cr1");
+        });
+        await(() -> !buttons("Comprar").isEmpty());
+        assertTrue(requests.stream().anyMatch(path -> path.contains("cut=at-58000&tag=T_mid&creative=cr1")));
+    }
+
+    @Test public void anAdReportedWithoutABreakIsRefusedNotDropped() throws Exception {
+        planDelayMs = 1500;
+        load();
+        activity.onActivity(a -> plan.adStarted("https://ads.iadserver.com/gampad/ads?tag=T", "il-shop-midroll-x", "cr1"));
+        await(() -> events.contains("break_refused null"));
     }
 }

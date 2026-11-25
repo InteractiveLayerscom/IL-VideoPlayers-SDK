@@ -181,10 +181,26 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     private void use(AdPlan plan) {
         current = plan;
         driver = new AdPlanDriver(this, plan, locale);
+        // The IAB keys a consent platform writes to the app's default SharedPreferences. This reader's own consent and app identity: a second reader in the process does not overwrite them.
+        Context app = overlay.playerView().getContext().getApplicationContext();
+        SharedPreferences stored = app.getSharedPreferences(app.getPackageName() + "_preferences", Context.MODE_PRIVATE);
+        driver.consent = stored::getAll;
+        driver.appId = app.getPackageName();
+        CharSequence label = app.getApplicationInfo().loadLabel(app.getPackageManager());
+        driver.appName = label == null ? null : label.toString();
         overlay.useContentClock(driver::cueVisible);
         if (hostBreaks != null) driver.setBreaks(hostBreaks);
         if (hostBreakAt != null) driver.breakStarted(hostBreakAt);
+        // The ad the app reported before the plan arrived, if it is still the one on screen.
+        if (hostBreakAt != null && pendingAd != null) {
+            if (pendingAd[2] != null) driver.hostAdStarted(pendingAd[0], pendingAd[2]);
+            else driver.hostAdStarted(pendingAd[0], pendingAd[1], pendingAd[3]);
+        }
+        pendingAd = null;
     }
+
+    // {tag, adId, vastXml, creativeId} of an ad reported before the plan attached; cleared by adEnded/breakEnded.
+    private String[] pendingAd;
 
     private AdPlan current;
 
@@ -212,8 +228,9 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
             if (startCalled) driver.start(takeReady());
             return true;
         }
+        // A plan with cuts while the app drives its own breaks is refused (break_refused, plan_has_cuts).
+        if (!driver.replace(plan)) return false;
         current = plan;
-        driver.replace(plan);
         return true;
     }
 
@@ -246,16 +263,30 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
      * {@code Ad.getAdId()} and {@code Ad.getCreativeId()}).
      */
     public void adStarted(String adTagUrl, String adId, String creativeId) {
-        if (!closed && driver != null) driver.hostAdStarted(adTagUrl, adId, creativeId);
+        if (closed) return;
+        if (driver != null) driver.hostAdStarted(adTagUrl, adId, creativeId);
+        else queueAd(new String[] {adTagUrl, adId, null, creativeId});
+    }
+
+    // Before the plan: kept until it attaches, as breakStarted is; without an open break it is refused at once.
+    private void queueAd(String[] ad) {
+        if (hostBreakAt == null) {
+            event("break_refused", "no_break", null);
+            return;
+        }
+        pendingAd = ad;
     }
 
     /** Host-driven mode: as {@link #adStarted(String, String, String)}, from the raw VAST the app's player received. */
     public void adStarted(String adTagUrl, String vastXml) {
-        if (!closed && driver != null) driver.hostAdStarted(adTagUrl, vastXml);
+        if (closed) return;
+        if (driver != null) driver.hostAdStarted(adTagUrl, vastXml);
+        else queueAd(new String[] {adTagUrl, null, vastXml, null});
     }
 
     /** Host-driven mode: the ad ended (complete, skip or error). Its Buy button goes; an open product stays. */
     public void adEnded() {
+        pendingAd = null;
         if (!closed && driver != null) driver.hostAdEnded();
     }
 
@@ -263,17 +294,12 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
     public void breakEnded() {
         if (closed) return;
         hostBreakAt = null;
+        pendingAd = null;
         if (driver != null) driver.breakEnded();
     }
 
     private static AdPlan read(OverlayController overlay, String planJson, String planOrigin, String sessionId) {
-        // The IAB keys a consent platform writes to the app's default SharedPreferences.
-        Context app = overlay.playerView().getContext().getApplicationContext();
-        SharedPreferences stored = app.getSharedPreferences(app.getPackageName() + "_preferences", Context.MODE_PRIVATE);
-        AdPlan.consent = stored::getAll;
-        AdPlan.appId = app.getPackageName();
-        CharSequence label = app.getApplicationInfo().loadLabel(app.getPackageManager());
-        AdPlan.appName = label == null ? null : label.toString();
+        // Consent and app identity are set per reader in use(); reading a plan needs neither.
         return AdPlan.read(planJson, System.currentTimeMillis(), planOrigin, sessionId);
     }
 
@@ -321,7 +347,11 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         @Override public void onActivityStopped(android.app.Activity a) { }
         @Override public void onActivitySaveInstanceState(android.app.Activity a, android.os.Bundle b) { }
         @Override public void onActivityDestroyed(android.app.Activity a) {
-            if (a == owner) close();
+            if (a != owner || closed) return;
+            // Closing is right (the view is gone and must not be kept), but never silently: after a configuration
+            // change the app has to load or attach again with its new PlayerView.
+            event("plan_closed", a.isChangingConfigurations() ? "configuration_change" : "activity_destroyed", null);
+            close();
         }
     };
 

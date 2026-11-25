@@ -151,10 +151,13 @@ final class AdPlan {
      * Adds the consent the app's CMP stored under the IAB keys (TCF v2, US Privacy, GPP) as the standard ad
      * request parameters. Nothing stored, nothing added.
      */
-    static String withConsent(String url) {
+    static String withConsent(String url) { return withConsent(url, consent); }
+
+    /** As {@link #withConsent(String)}, with the consent store of one reader (two readers in a process stay apart). */
+    static String withConsent(String url, ConsentStore store) {
         Map<String, ?> stored;
         try {
-            stored = consent.read();
+            stored = store.read();
         } catch (RuntimeException e) {
             return url;
         }
@@ -593,19 +596,26 @@ final class AdPlan {
      * Adds {@code msid} (package name) and {@code an} (app name) to a GAM request the reader sends itself, unless the
      * tag carries them: Google asks for both on direct VAST calls from apps; IMA adds them on its own requests.
      */
-    static String withApp(String url) {
+    static String withApp(String url) { return withApp(url, appId, appName); }
+
+    static String withApp(String url, String id, String name) {
         if (!"https://pubads.g.doubleclick.net".equals(origin(url))) return url;
-        String id = appId, name = appName;
         if (id != null && !id.isEmpty() && query(url, "msid").isEmpty() && !url.contains("msid=")) url = setQuery(url, "msid", id);
         if (name != null && !name.isEmpty() && query(url, "an").isEmpty() && !url.contains("&an=") && !url.contains("?an=")) url = setQuery(url, "an", name);
         return url;
     }
 
-    static String correlated(String url) {
-        return withConsent(setQuery(url, "correlator", System.currentTimeMillis() + String.format(Locale.US, "%06d", RANDOM.nextInt(1000000))));
+    static String correlated(String url) { return correlated(url, consent); }
+
+    static String correlated(String url, ConsentStore store) {
+        return withConsent(setQuery(url, "correlator", System.currentTimeMillis() + String.format(Locale.US, "%06d", RANDOM.nextInt(1000000))), store);
     }
 
     static String graphicTag(String tagUrl, String format, JSONObject targeting, String page) {
+        return graphicTag(tagUrl, format, targeting, page, consent, appId, appName);
+    }
+
+    static String graphicTag(String tagUrl, String format, JSONObject targeting, String page, ConsentStore store, String id, String name) {
         Map<String, String> params = new LinkedHashMap<>();
         for (String pair : query(tagUrl, "cust_params").split("&")) {
             String[] parts = pair.split("=", 2);
@@ -632,10 +642,10 @@ final class AdPlan {
         }
         String url = setQuery(tagUrl, "cust_params", joined.toString());
         if (page != null) url = setQuery(setQuery(url, "url", page), "description_url", page);
-        return correlated(withApp(url));
+        return correlated(withApp(url, id, name), store);
     }
 
-    private static String joinValues(List<String> parts) {
+    static String joinValues(List<String> parts) {
         StringBuilder out = new StringBuilder();
         for (String part : parts) {
             if (out.length() > 0) out.append(',');

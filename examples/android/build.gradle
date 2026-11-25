@@ -17,7 +17,23 @@ android {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
     }
+    buildTypes {
+        release {
+            // R8 on: the build proves the SDK runs minified in an app that links neither IMA nor Google Mobile Ads.
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+        // The release build (minified) with the debug key and the same one-host development trust as debug, so it
+        // can be installed and pointed at a local fixture server. Not for distribution.
+        qa {
+            initWith release
+            signingConfig signingConfigs.debug
+            matchingFallbacks = ['release']
+        }
+    }
     sourceSets.debug.res.srcDir(layout.buildDirectory.dir('generated/devTrust/res'))
+    sourceSets.qa.res.srcDir(layout.buildDirectory.dir('generated/devTrust/res'))
+    sourceSets.qa.manifest.srcFile('src/debug/AndroidManifest.xml')
 }
 
 // Debug builds only: trust one local development certificate for one host (-PilDevCa=/path/cert.pem
@@ -47,7 +63,7 @@ def devTrust = tasks.register('generateDevTrust') {
         new File(out, 'xml/il_dev_network.xml').text = config
     }
 }
-tasks.matching { it.name == 'generateDebugResValues' || it.name == 'mergeDebugResources' }.configureEach { dependsOn(devTrust) }
+tasks.matching { it.name in ['generateDebugResValues', 'mergeDebugResources', 'generateQaResValues', 'mergeQaResources'] }.configureEach { dependsOn(devTrust) }
 
 dependencies {
     implementation 'com.interactivelayers:media3-overlays:0.1.0'

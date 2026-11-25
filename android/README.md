@@ -158,7 +158,7 @@ El plan de una app no trae `page_url`, así que el SDK nunca agrega `url` ni `de
 
 ### Ciclo de vida
 
-Llamá a `plan.close()` en `onDestroy()` (en un fragmento, en `onDestroyView()`), antes de liberar el reproductor. Es obligatorio. Como respaldo, si se destruye la `Activity` que contiene el `PlayerView` sin `close()`, el SDK se cierra solo y deja de registrarse, para no mantener viva esa `Activity`. Ese respaldo no cubre un fragmento que se destruye dentro de una `Activity` que sigue viva. Con la app en segundo plano, el SDK deja de despertar al hilo principal. Al volver, lo primero que hace es comprobar si el plan venció, antes de pedir o dibujar algo.
+Llamá a `plan.close()` en `onDestroy()` (en un fragmento, en `onDestroyView()`), antes de liberar el reproductor. Es obligatorio. Como respaldo, si se destruye la `Activity` que contiene el `PlayerView` sin `close()`, el SDK se cierra solo y deja de registrarse, para no mantener viva esa `Activity`. En ese caso emite `plan_closed`, con `format` igual a `configuration_change` si fue un cambio de configuración (por ejemplo una rotación sin `configChanges`) o `activity_destroyed` si no. Si el cierre llega en medio de un corte del SDK, el contenido vuelve a su posición en pausa, sin iniciarse, igual que con `close()`. **Después de un cambio de configuración, la app tiene que volver a llamar a `load` o `attach` con el `PlayerView` nuevo**, aunque conserve su `ExoPlayer` (por ejemplo en un `ViewModel`); si no, no hay anuncios ni Comprar. Ese respaldo no cubre un fragmento que se destruye dentro de una `Activity` que sigue viva. Con la app en segundo plano, el SDK deja de despertar al hilo principal. Al volver, lo primero que hace es comprobar si el plan venció, antes de pedir o dibujar algo.
 
 ### Plan versión 2 y renovación
 
@@ -190,11 +190,26 @@ Con un plan de host el SDK no pide ni reproduce ningún anuncio de video. Durant
 
 Comprar durante el corte necesita `commerce.break_url` en el plan de host: sólo viene si el playback se creó con `graphics: true` y recorre pasos ordenados. Sin `break_url` no hay Comprar y no se avisa nada. Si conectaste el plan con un `sessionId` propio y el plan trae `break_url`, el SDK emite una vez `buy_unavailable` (`format` = `session`): para Comprar, pasá `null` y se usa `commerce.session`.
 
+Un `adStarted` que llega antes de que el plan esté conectado se guarda, como `breakStarted`, y se aplica cuando el plan llega si ese anuncio sigue en pantalla: un `adEnded` o `breakEnded` anterior lo descarta. Un `adStarted` sin un corte abierto emite `break_refused` (`format` = `no_break`). `replacePlan` con un plan que trae cortes, mientras la app maneja sus propios cortes, devuelve `false`, conserva el plan actual y emite `break_refused` (`format` = `plan_has_cuts`).
+
+**En TV, el control de tu `PlayerView` durante Comprar.** Es lo único de la interfaz de la app que el SDK toca durante un corte de la app. Cuando aparece Comprar, o hay un panel de producto abierto, el SDK guarda la vista que tenía el foco y llama a `setUseController(false)` en tu `PlayerView`, para que el control remoto llegue al botón. Cuando ya no hay nada para elegir, vuelve a llamar a `setUseController(true)` si antes estaba activado y la app no lo cambió mientras tanto. Si la app lo cambió, gana el valor de la app. El foco vuelve a la vista guardada sólo si quedó en ninguna vista o en una vista del SDK. Si la app maneja la visibilidad de sus controles por su cuenta, va a ver esos dos cambios y su `ControllerVisibilityListener` va a recibir que los controles se ocultan; los controles propios (por ejemplo los de Leanback) tienen que dejar de tomar el foco mientras haya algo para elegir.
+
 Red de seguridad: si un corte informado no recibe ningún aviso durante 180 s de primer plano (por ejemplo, porque el reproductor de anuncios de la app falló y nunca llegó `breakEnded`), el SDK lo da por terminado, emite `break_error` y vuelve a mostrar gráficas. Durante un corte de la app el SDK nunca toca su reproductor: `close()`, `replacePlan` o el vencimiento del plan sólo limpian el estado y la capa del SDK.
 
 **Obligaciones de la app en este modo:** informar cada corte (`breakStarted`/`breakEnded`) y cada anuncio (`adStarted`/`adEnded`). Si no informa nada, el SDK no tiene forma de saber que hay un anuncio en pantalla: las gráficas siguen sólo por tiempo de contenido y no hay Comprar. `setBreaks` sirve para que las gráficas respeten la distancia a los cortes. El anuncio tiene que verse en el mismo `PlayerView` o debajo de él, porque el botón se dibuja sobre el `PlayerView`.
 
 Hay una app de ejemplo con los dos modos en [examples/android](../examples/android/README.md).
+
+Cada lector guarda su propio consentimiento e identidad de app: dos reproductores en el mismo proceso no se pisan.
+
+### Verificación
+
+- Pruebas unitarias en la JVM, con dobles del reproductor, de la red y del reloj, y con las respuestas de IL de `test/fixtures/native`.
+- Pruebas instrumentadas en un emulador de teléfono con Android 15 (API 35) y en un emulador de Android TV 14 (API 34), con ExoPlayer real y un servidor HTTPS local dentro del emulador.
+- La app de ejemplo en los dos modos y en ambos emuladores, contra fixtures servidos desde la Mac. En el modo de cortes de la app, el anuncio está simulado.
+- No se probó con anuncios reales de Google Ad Manager, IMA ni iADServer en esta ronda.
+- Nada corrió en un dispositivo físico.
+- Fire TV no se probó: se trata como Android TV por inferencia.
 
 ## Tipografía de la tienda
 

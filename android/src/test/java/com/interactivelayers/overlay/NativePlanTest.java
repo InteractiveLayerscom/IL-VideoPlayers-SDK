@@ -912,4 +912,50 @@ public final class NativePlanTest {
         });
         assertEquals(java.util.Collections.singletonList("0 network"), seen);
     }
+
+    @Test public void aReplacementWithCutsIsRefusedWhileTheAppDrivesItsBreaks() throws Exception {
+        AdPlanDriver driver = started(fixture("host-plan.json"));
+        driver.breakStarted(58000);
+        driver.breakEnded();
+        assertFalse(driver.replace(read(fixture("app-plan-v1.json"))));
+        assertTrue(host.eventLog.contains("break_refused|plan_has_cuts|null"));
+        host.position = 58100;
+        driver.tick();
+        assertFalse("the reader never plays its own break inside the app's", host.events.contains("break_start"));
+        assertTrue("a host plan is still accepted", driver.replace(read(fixture("host-plan.json"))));
+    }
+
+    @Test public void anAdWithNoOpenBreakIsRefused() throws Exception {
+        AdPlanDriver driver = started(fixture("host-plan.json"));
+        driver.hostAdStarted(new JSONObject(fixture("break-request-stable.json")).getString("ad_tag_url"), "il-shop-midroll-" + DELIVERY, "cr1");
+        assertTrue(host.eventLog.contains("break_refused|no_break|null"));
+        assertTrue(host.fetched.isEmpty());
+    }
+
+    @Test public void twoReadersKeepTheirOwnConsentAndApp() throws Exception {
+        java.util.Map<String, Object> a = new java.util.HashMap<>(), b = new java.util.HashMap<>();
+        a.put("IABTCF_TCString", "CONSENT-A");
+        b.put("IABTCF_TCString", "CONSENT-B");
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", "");
+        AdPlanDriverTest.FakeHost other = new AdPlanDriverTest.FakeHost();
+        other.replies.putAll(host.replies);
+        AdPlanDriver first = new AdPlanDriver(host, read(fixture("host-plan.json")), "es");
+        AdPlanDriver second = new AdPlanDriver(other, read(fixture("host-plan.json")), "es");
+        first.consent = () -> a;
+        first.appId = "com.example.one";
+        second.consent = () -> b;
+        second.appId = "com.example.two";
+        first.start(null);
+        second.start(null);
+        host.position = other.position = 1000;
+        first.tick();
+        first.tick();
+        second.tick();
+        second.tick();
+        String one = host.fetched.stream().filter(u -> u.contains("doubleclick")).findFirst().orElse("");
+        String two = other.fetched.stream().filter(u -> u.contains("doubleclick")).findFirst().orElse("");
+        assertTrue(one, one.contains("gdpr_consent=CONSENT-A") && one.contains("msid=com.example.one"));
+        assertTrue(two, two.contains("gdpr_consent=CONSENT-B") && two.contains("msid=com.example.two"));
+    }
 }
