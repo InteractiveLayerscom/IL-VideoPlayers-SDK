@@ -1,6 +1,6 @@
 // IL's ad plan on Samsung AVPlay. Graphics, products and pacing are web/ads.mjs through a video-shaped
 // view of AVPlay; this file adds what IMA does on the web: ordered requests per break and linear playback.
-import { attachAds } from './ads.mjs';
+import { attachAds, keepPlanRenewed, loadAppPlan } from './ads.mjs';
 
 const ATTEMPT_MS = 5000;
 const HOLD_MS = 8000;
@@ -76,11 +76,14 @@ export async function fetchLinearAd(tagUrl, { fetchImpl, Parser, signal }) {
     const linear = named(ad, 'Linear')[0];
     const mediaUrl = linear && mediaOf(linear);
     if (!mediaUrl) return null;
+    // What IMA would expose on the web (Ad@id, Creative@id): here the module reads them from the VAST it fetched.
+    const adId = ad.getAttribute('id') || null;
+    const creativeId = linear.parentElement?.localName === 'Creative' ? linear.parentElement.getAttribute('id') || null : null;
     const shop = named(ad, 'Extension').find((el) => el.getAttribute('type') === 'iADServerShop');
     const node = shop && named(shop, 'Shop')[0];
     const identity = node?.getAttribute('creativeId') && node.getAttribute('deliveryId')
       ? { creativeId: node.getAttribute('creativeId'), deliveryId: node.getAttribute('deliveryId') } : null;
-    return { ...collected, mediaUrl, duration: seconds(named(linear, 'Duration')[0]?.textContent), identity };
+    return { ...collected, mediaUrl, duration: seconds(named(linear, 'Duration')[0]?.textContent), identity, adId, creativeId };
   }
   return null;
 }
@@ -105,13 +108,16 @@ function breakShopAllowed(plan, planOrigin, sessionId) {
 // values ({ gdpr, gdpr_consent, us_privacy, gpp, gpp_sid }) the host's CMP holds, added to each break request.
 export function attachAvPlayAds({
   avplay, session, plan, contentUrl, listener, getDisplayRect, pageUrl, fetchImpl = globalThis.fetch, onEvent,
-  stage, clock, planOrigin, sessionId, Parser = globalThis.DOMParser, tickMs = TICK_MS, reopenContent, consent,
+  stage, clock, planOrigin, sessionId, Parser = globalThis.DOMParser, tickMs = TICK_MS, reopenContent, consent, appParams,
   isVisible = () => globalThis.document?.visibilityState !== 'hidden',
 } = {}) {
   if (!avplay || !session || typeof getDisplayRect !== 'function') throw new Error('Provide avplay, the session and getDisplayRect');
-  // This adapter owns a separate scheduler and has not implemented native plan renewal/expiry.
-  if (plan?.version === 2) plan = null;
-  const breakShop = breakShopAllowed(plan, planOrigin, sessionId);
+  // The session-feed identity (iADServerShop extension) is only for a plan without commerce.break_url; with it, Buy
+  // during a break goes through web/ads.mjs exactly as on the web (Ad@id, Creative@id, the request's tag).
+  const breakShop = breakShopAllowed(plan, planOrigin, sessionId) && typeof plan?.commerce?.break_url !== 'string';
+  let current = plan;
+  // A version 2 plan is a short-lived approval: no break of it starts once it has expired.
+  const planExpired = () => current?.version === 2 && !(Date.now() < Date.parse(current.expires_at));
   const handlers = new Map();
   let inBreak = false;
   let ended = false;
@@ -155,8 +161,7 @@ export function attachAvPlayAds({
       }
     }
   };
-  const ads = attachAds({ session, video, plan, pageUrl, fetchImpl, onEvent, stage, clock, planOrigin, sessionId });
-  const cuts = ads.cuts;
+  const ads = attachAds({ session, video, plan, pageUrl, fetchImpl, onEvent, stage, clock, planOrigin, sessionId, appParams });
   const settled = new Set();
   let disposed = false;
   let started = false;
@@ -199,7 +204,8 @@ export function attachAvPlayAds({
             counted = true;
             beacon(ad.impressions);
             beacon(ad.tracking.start);
-            session.setLinearAd(true, breakShop ? ad.identity ?? undefined : undefined);
+            if (breakShop) session.setLinearAd(true, ad.identity ?? undefined);
+            else ads.setBreakAd({ tagUrl: ad.request?.provider === 'iadserver' ? ad.request.tagUrl : undefined, adId: ad.adId, creativeId: ad.creativeId });
           }
           const now = Date.now();
           if (last && ms - last.ms > now - last.at + SCRUB_MARGIN_MS) scrubbed = true;
@@ -264,7 +270,7 @@ export function attachAvPlayAds({
     resumeAt = live() ? avplay.getCurrentTime() : 0;
     if (wasPlaying) avplay.pause();
     inBreak = true;
-    ads.setBreakActive(true);
+    ads.breakStarted(cut.at, cut);
     session.setLinearAd(true);
     emit({ type: 'break_start', cut: cut.id });
     const deadline = Date.now() + HOLD_MS;
@@ -282,6 +288,7 @@ export function attachAvPlayAds({
           if ((typeof value === 'string' && value) || Number.isFinite(value)) url.searchParams.set(key, String(value));
         }
         ad = await fetchLinearAd(url.href, { fetchImpl, Parser, signal: abort.signal });
+        if (ad) ad.request = cut.requests[index];
       } catch {
         ad = null;
       } finally {
@@ -293,6 +300,7 @@ export function attachAvPlayAds({
     const opened = !!ad;
     const complete = ad ? await playAd(ad) : false;
     if (disposed) return;
+    ads.clearBreakAd();
     let blocked = false;
     try {
       // The ad leaves AVPlay before graphics are allowed back.
@@ -306,7 +314,7 @@ export function attachAvPlayAds({
     if (disposed) return;
     session.setLinearAd(false);
     inBreak = false;
-    ads.setBreakActive(false);
+    ads.breakEnded();
     emit({ type: complete ? 'break_end' : 'break_error', cut: cut.id });
     if (blocked) emit({ type: 'resume_blocked', cut: cut.id });
   }
@@ -314,9 +322,9 @@ export function attachAvPlayAds({
   function tick() {
     if (disposed || inBreak) return;
     dispatch('timeupdate');
-    if (!started || avplay.getState() !== 'PLAYING') return;
+    if (!started || avplay.getState() !== 'PLAYING' || planExpired()) return;
     const time = avplay.getCurrentTime();
-    const due = cuts.filter((cut) => !settled.has(cut.id) && cut.at * 1000 <= time);
+    const due = ads.cuts.filter((cut) => !settled.has(cut.id) && cut.at * 1000 <= time);
     for (const cut of due.slice(0, -1)) settled.add(cut.id);
     const cut = due.at(-1);
     if (!cut) return;
@@ -327,14 +335,29 @@ export function attachAvPlayAds({
   timer = setInterval(tick, tickMs);
   return {
     ads,
-    cuts,
+    get cuts() {
+      return ads.cuts;
+    },
+    // A renewed version 2 plan (same video and version) replaces the current one, keeping the view's state.
+    replacePlan(next) {
+      if (disposed || !ads.replacePlan(next)) return false;
+      current = next;
+      return true;
+    },
+    // Host-driven breaks (the app plays them itself, for example from IL's per-break API): see web/ads.mjs.
+    setBreaks: (positions) => ads.setBreaks(positions),
+    breakStarted: (at) => ads.breakStarted(at),
+    setBreakAd: (ad) => ads.setBreakAd(ad),
+    clearBreakAd: () => ads.clearBreakAd(),
+    breakEnded: () => ads.breakEnded(),
     // Call before opening content, or with it open. Resolves when the host may play.
     async start() {
       if (disposed || started) return;
       started = true;
       const position = live() ? avplay.getCurrentTime() : 0;
       let preroll = null;
-      for (const cut of cuts) {
+      if (planExpired()) return;
+      for (const cut of ads.cuts) {
         if (cut.at === 0 && position <= 1000) preroll = cut;
         else if (cut.at * 1000 <= position) settled.add(cut.id);
       }
@@ -366,4 +389,57 @@ export function attachAvPlayAds({
       ads.destroy();
     },
   };
+}
+
+// The Tizen application id (`tizen:<id>` in the app route), or null outside a Tizen app.
+export function tizenAppId(tizen = globalThis.tizen) {
+  try {
+    return tizen?.application?.getCurrentApplication?.()?.appInfo?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Loads the plan from IL's app route (a packaged Tizen app sends no usable Origin) and attaches. No plan (204, 404,
+// timeout, a TV that refuses the cross-origin read) resolves null: play the content without ads. A version 2 plan is
+// renewed before it expires with renew=<grant>, keeping the view's state.
+export async function attachAvPlayAppAds({ origin, project, asset, app, timeoutMs, ...options } = {}) {
+  const say = (event) => {
+    try {
+      options.onEvent?.(event);
+    } catch {
+      // Diagnostics must never break playback.
+    }
+  };
+  const id = app === undefined ? tizenAppId() : null;
+  const appValue = app ?? (id ? `tizen:${id}` : null);
+  // Outside a Tizen app, without `app`, there is no id to send: refused here, never the page route.
+  if (typeof appValue !== 'string') {
+    say({ type: 'plan_unavailable', app: null, status: 0, reason: 'app_id' });
+    return null;
+  }
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const params = { origin, project, asset, app: appValue, fetchImpl, onEvent: options.onEvent, timeoutMs };
+  const plan = await loadAppPlan(params);
+  if (!plan) return null;
+  // A server-insertion project answers the stitched plan (`timeline`); this reader has no content clock for AVPlay
+  // and plays without IL ads, as IL's contract says native readers do for now.
+  if (plan.timeline != null) {
+    say({ type: 'plan_unavailable', app: appValue, status: 200, reason: 'stitched' });
+    return null;
+  }
+  const sdk = attachAvPlayAds({ ...options, plan, planOrigin: new URL(origin).origin });
+  const replace = sdk.replacePlan;
+  const renewal = keepPlanRenewed(plan, (next) => replace(next), params);
+  sdk.replacePlan = (next) => {
+    const ok = replace(next);
+    if (ok) renewal.rearm(next);
+    return ok;
+  };
+  const destroy = sdk.destroy;
+  sdk.destroy = () => {
+    renewal();
+    destroy();
+  };
+  return sdk;
 }
