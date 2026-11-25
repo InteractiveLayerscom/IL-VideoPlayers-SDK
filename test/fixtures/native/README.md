@@ -111,3 +111,15 @@ No `Origin` is needed. Requests must not carry credentials.
 
 **Timing.** Plan URLs (`tag_url`, `ad_tag_url` of GAM) carry no `correlator` in the plan; the player adds one per
 attempt. The GAM `ad_tag_url` from `/request` already includes one.
+
+## Addendum: correlator on the stable-tag answer
+
+`break-request-stable.json` is the answer of commit 6600f7c with one change applied by hand to match the backend as
+merged: `ad_tag_url` now ends in `&correlator=<16 digits>`. The backend generates it once per claimed cue. Every other
+file is unchanged, so the ids, sessions and grants across the files still belong together.
+
+- Every `ad_tag_url` of the per-break API (Google Ad Manager and the stable iADServer tag) already carries a
+  `correlator`. Fetch the URL exactly as given: do not add, change or remove `sid` or `correlator`. iADServer returns
+  the same delivery for a repeated fetch with the same correlator, so a retry or a prefetch followed by play does not
+  reserve twice and keeps the delivery id the Buy card is looked up by.
+- The plan's `tag_url`s (`cuts[].requests`, `scenes.graphics`) carry no correlator; the player adds one there, as before.

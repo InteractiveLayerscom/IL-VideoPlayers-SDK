@@ -28,7 +28,7 @@
     "iab_matched": [],
     "skipped_steps": []
   },
-  "ad_tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=58&sid=ed4c7d84521a3bc4faba519c687146f0",
+  "ad_tag_url": "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=58&sid=ed4c7d84521a3bc4faba519c687146f0&correlator=3052109197686167",
   "provider": "iadserver",
   "step": 0,
   "steps_left": 1,

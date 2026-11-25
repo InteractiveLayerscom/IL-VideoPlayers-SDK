@@ -56,7 +56,10 @@ final class NativePlayerTests: XCTestCase {
     private var events: [(type: String, format: String?, id: String)] = []
     private var clock = NativeFixtures.frozenNow
     private let consoleHost = "console.example"
-    private let stableTag = "https://ads.iadserver.com/gampad/ads?tag=T_mid&output=vast&vid=asset-40edc822d6f24974a9af51695a88184b&cue_seconds=58&sid=ed4c7d84521a3bc4faba519c687146f0"
+    /// The fixture's stable iADServer tag, exactly as the per-break API returns it (with its own `correlator`).
+    private var stableTag: String {
+        ((try? NativeFixtures.object("break-request-stable"))?["ad_tag_url"] as? String) ?? ""
+    }
     private let gamTag = "https://pubads.g.doubleclick.net/gampad/ads?iu=%2F123%2Fpilot&env=vp&gdfp_req=1&output=vast&sz=640x360&cust_params=&correlator=971569889123729"
 
     private var configuration: URLSessionConfiguration {
@@ -255,6 +258,7 @@ final class NativePlayerTests: XCTestCase {
         XCTAssertTrue(FixtureNetwork.seen.isEmpty)
         reader.adStarted(tagURL: stableTag, adID: "il-shop-midroll-" + NativeFixtures.delivery, creativeID: "cr1")
         try await waitFor({ self.events.contains { $0.type == "fill" && $0.format == "break_product" } }, "break card")
+        XCTAssertTrue(stableTag.contains("&correlator="), "the fixture tag carries the backend's correlator")
         let breakURL = try NativeFixtures.commerce("host-plan", "break_url")
         XCTAssertEqual(FixtureNetwork.seen, [breakURL + "&cut=at-58000&tag=T_mid&creative=cr1&delivery=" + NativeFixtures.delivery + "&locale=es"])
         XCTAssertEqual(view.midrollIdentity?.creative, "cr1")
