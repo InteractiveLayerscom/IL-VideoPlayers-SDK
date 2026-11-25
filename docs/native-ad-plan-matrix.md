@@ -169,7 +169,7 @@ Mientras dura un corte informado no se dibuja nada de IL salvo Comprar. La ficha
 | `plan_renew_failed` | Fallaron los intentos de renovación; una vez, con el último motivo. |
 | `plan_expired` | El plan versión 2 venció; sin más datos. |
 | `break_error` | Un corte terminó de forma anormal, también la red de seguridad de un corte de la app. |
-| `break_refused` | Un aviso de corte que no se acepta: motivo `position` (posición negativa o no finita) o, en Apple (y Android), `plan_has_cuts` (llamadas de la app sobre un plan que trae sus propios cortes). |
+| `break_refused` | Un aviso de corte que no se acepta: motivo `position` (posición negativa o no finita) o, en Apple, Roku (y Android), `plan_has_cuts` (avisos de la app sobre un plan que trae sus propios cortes; en Roku también un `replacePlan` con cortes una vez que la app informó los suyos). |
 | `buy_unavailable` | Hay `break_url` pero la sesión no es `commerce.session` (motivo `session`). |
 
 Ningún evento ni campo público lleva el `grant`, el valor de `renew` ni las URLs de `commerce`.
@@ -185,7 +185,7 @@ Donde las plataformas difieren a propósito o por su API, esta tabla lo dice. An
 | Unidad de `setBreaks` y `breakStarted` | Segundos | Milisegundos | Segundos | Milisegundos (`long`); todavía no en main |
 | Forma de los eventos | `onEvent({ type, ... })`: `plan_unavailable` trae `{ app, status, reason }`, `plan_renew_failed` trae `{ reason }` | Campo `event` con `{ type, ... }`: `plan_unavailable` trae `{ status, app, reason }`, `plan_renew_failed` trae `{ status, reason }` | Callback `(tipo, formato, id)`: en `plan_unavailable` el `id` es el `app` y el `formato` el motivo, sin estado numérico; en `plan_renewed` el `id` es la versión | Todavía no en main |
 | `msid` y `an` en pedidos a GAM | Sólo si el host los pasa en `appParams`, y sólo con un plan de la ruta de apps | Nunca los agrega | Los agrega el SDK (bundle id y nombre visible) en sus propios pedidos a GAM, no en los tags que pasa a IMA | Todavía no en main |
-| Avisos de corte de la app sobre un plan con sus propios cortes | Se aceptan por diseño: es el uso existente y soportado de una página cuyo propio ad manager reproduce los cortes del plan (por ejemplo el de Shaka, con `ads.vmap()` o `ads.cuts`) y se los informa al módulo con `setBreaks` y `setBreakActive` | Se aceptan | Se rechazan con `break_refused` (motivo `plan_has_cuts`) | Todavía no en main |
+| Avisos de corte de la app sobre un plan con sus propios cortes | Se aceptan por diseño: es el uso existente y soportado de una página cuyo propio ad manager reproduce los cortes del plan (por ejemplo el de Shaka, con `ads.vmap()` o `ads.cuts`) y se los informa al módulo con `setBreaks` y `setBreakActive` | Se rechazan: `setBreaks` y `breakStarted` emiten `break_refused` (motivo `plan_has_cuts`) sin abrir un corte, y una vez que la app informó cortes (o con uno abierto) `replacePlan` rechaza un plan con `cuts`, conserva el actual y emite el mismo evento | Se rechazan con `break_refused` (motivo `plan_has_cuts`) | Todavía no en main |
 
 ### Identidad de la app en Google Ad Manager
 
@@ -197,7 +197,7 @@ El plan de una app no trae `page_url`, así que los pedidos a GAM no llevan pág
 
 ### Ejemplos
 
-`examples/api-relay.mjs` hace de backend del cliente para la API por corte en las apps de ejemplo (`examples/apple`, `examples/roku`, `examples/tizen`), con un modo `--fixtures` sin backend. **Es sólo un ejemplo: nunca lo despliegues.** En modo real le da el poder de `IL_API_KEY` a quien lo alcance.
+`examples/api-relay.mjs` hace de backend del cliente para la API por corte en las apps de ejemplo (`examples/apple`, `examples/roku`, `examples/tizen`), con un modo `--fixtures` sin backend. **Es sólo un ejemplo: nunca lo despliegues.** En modo real le da el poder de `IL_API_KEY` a quien lo alcance. Escucha en `127.0.0.1`; para que lo alcance un equipo de la red local hay que abrirlo con `--host`, lo que lo expone a toda esa red. El SDK sólo usa plan y productos por HTTPS del mismo origen que el plan: con el relay en HTTP hay cortes y gráficas pero no productos ni Comprar. `--cert`/`--key` sirven HTTPS, pero cada dispositivo tiene que confiar en ese certificado: un Roku real confía sólo en el paquete de autoridades públicas de Roku, así que un certificado autofirmado o de una CA local no funciona ahí (ver [examples/roku](../examples/roku/README.md)).
 
 ## Qué falta probar en un dispositivo
 
