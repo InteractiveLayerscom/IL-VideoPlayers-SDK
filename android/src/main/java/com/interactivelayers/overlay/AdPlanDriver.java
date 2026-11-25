@@ -120,6 +120,19 @@ final class AdPlanDriver {
     private long shopToken;
     private boolean shopSpot;
     private long hostBreakElapsedMs;
+    private boolean suspended;
+
+    /**
+     * The app is active again: one tick at once, which checks expiry before anything is drawn or requested, then the
+     * pulse runs as before. Nothing happens if the pulse was not suspended.
+     */
+    void resume() {
+        if (closed || !started || !suspended) return;
+        host.cancel(pulse);
+        tick();
+    }
+
+    boolean pulseSuspended() { return suspended; }
     private final Runnable renewTask = this::renewNow;
 
     // Renewal attempts at expires_at - 20 s, - 12 s and - 5 s; the next one only once the previous answer is in.
@@ -202,6 +215,13 @@ final class AdPlanDriver {
 
     void tick() {
         if (closed) return;
+        // In the background the pulse stops: no wake-ups four times a second, and no queued task keeping the views
+        // alive. resume() restarts it when the app is active again.
+        if (!host.appActive()) {
+            suspended = true;
+            return;
+        }
+        suspended = false;
         host.later(pulse, TICK_MS);
         if (checkExpired()) return;
         if (inBreak) {

@@ -115,8 +115,11 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
                 ownsIma, display, events);
         out.app = app;
         if (loader == null) {
-            // Nothing is sent: the content plays without ads, and the host learns why.
-            out.unavailable(0, refused);
+            // Nothing is sent: the content plays without ads, and the host learns why, after load() has returned.
+            String reason = refused;
+            out.main.post(() -> {
+                if (!out.closed) out.unavailable(0, reason);
+            });
             return out;
         }
         out.loader = loader;
@@ -301,7 +304,43 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         this.display = display;
         this.events = events;
         player.addListener(this);
+        owner = activityOf(overlay.playerView().getContext());
+        application = (android.app.Application) overlay.playerView().getContext().getApplicationContext();
+        application.registerActivityLifecycleCallbacks(lifecycle);
     }
+
+    private final android.app.Activity owner;
+    private final android.app.Application application;
+    // Framework callbacks, no extra dependency: the pulse resumes when an activity starts, and the Activity that holds
+    // the PlayerView being destroyed closes this player, so a host that forgot close() does not keep it alive.
+    private final android.app.Application.ActivityLifecycleCallbacks lifecycle = new android.app.Application.ActivityLifecycleCallbacks() {
+        @Override public void onActivityCreated(android.app.Activity a, android.os.Bundle b) { }
+        @Override public void onActivityStarted(android.app.Activity a) { resumePulse(); }
+        @Override public void onActivityResumed(android.app.Activity a) { resumePulse(); }
+        @Override public void onActivityPaused(android.app.Activity a) { }
+        @Override public void onActivityStopped(android.app.Activity a) { }
+        @Override public void onActivitySaveInstanceState(android.app.Activity a, android.os.Bundle b) { }
+        @Override public void onActivityDestroyed(android.app.Activity a) {
+            if (a == owner) close();
+        }
+    };
+
+    private void resumePulse() {
+        // Posted: the process importance appActive() reads is updated after the lifecycle callback.
+        main.post(() -> {
+            if (!closed && driver != null) driver.resume();
+        });
+    }
+
+    private static android.app.Activity activityOf(Context context) {
+        for (Context c = context; c instanceof android.content.ContextWrapper; c = ((android.content.ContextWrapper) c).getBaseContext()) {
+            if (c instanceof android.app.Activity) return (android.app.Activity) c;
+        }
+        return null;
+    }
+
+    /** Whether close() ran (also by itself, when the Activity holding the PlayerView was destroyed). */
+    boolean isClosed() { return closed; }
 
     /** Call before playing content. {@code ready} runs once the host may play it. */
     public void start(Runnable ready) {
@@ -340,6 +379,7 @@ public final class AdPlanPlayer implements AutoCloseable, Player.Listener, AdPla
         if (driver != null) overlay.useContentClock(null);
         if (ownsIma) ima.close();
         workers.shutdownNow();
+        application.unregisterActivityLifecycleCallbacks(lifecycle);
     }
 
     @Override public long contentPositionMs() { return player.getContentPosition(); }

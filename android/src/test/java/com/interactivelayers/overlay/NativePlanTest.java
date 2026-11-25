@@ -847,4 +847,69 @@ public final class NativePlanTest {
         assertTrue(slow.cues.isEmpty());
         assertTrue(slow.events.contains("plan_expired"));
     }
+
+    // --- The pulse stops while the app is not active --------------------------------------------------------------
+
+    private boolean pulsePosted() { return host.timers.containsValue(250L); }
+
+    @Test public void noPulseIsPostedWhileTheAppIsInactiveAndExpiryComesFirstOnReturn() throws Exception {
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", "");
+        JSONObject v2 = new JSONObject(fixture("host-plan.json")).put("version", 2).put("expires_at", "2026-11-02T16:02:00Z")
+                .put("native_gam", new JSONObject().put("contract", "native-gam-plan-v1"));
+        AdPlanDriver driver = started(v2.toString());
+        assertTrue(pulsePosted());
+        host.active = false;
+        host.fire(250);
+        assertFalse("nothing wakes the main thread in the background", pulsePosted());
+        assertTrue(driver.pulseSuspended());
+        // Back after expires_at, at a position inside a window: expiry is noticed before anything is asked or drawn.
+        host.now = NOW + 120000;
+        host.position = 1000;
+        host.active = true;
+        int asked = host.fetched.size();
+        driver.resume();
+        assertTrue(host.events.contains("plan_expired"));
+        assertEquals(asked, host.fetched.size());
+        assertTrue(host.cues.isEmpty());
+        assertTrue("the pulse runs again", pulsePosted());
+    }
+
+    @Test public void resumeBeforeExpiryCarriesOn() throws Exception {
+        host.replies.put("https://pubads.g.doubleclick.net", SUPER);
+        host.replies.put(ORIGIN + "/il-player/scene-product", "");
+        AdPlanDriver driver = started(fixture("host-plan.json"));
+        host.active = false;
+        host.fire(250);
+        host.active = true;
+        host.position = 1000;
+        driver.resume();
+        driver.tick();
+        assertEquals(1, host.cues.size());
+        driver.resume();
+        assertEquals("a resume without a suspension changes nothing", 1, host.timers.values().stream().filter(d -> d == 250L).count());
+    }
+
+    @Test public void closeLeavesNoPulseOrRenewalQueued() throws Exception {
+        AdPlanDriver driver = started(fixture("app-plan-v2.json"));
+        assertTrue(pulsePosted());
+        assertTrue(host.timers.containsValue(100000L));
+        driver.close();
+        assertFalse(pulsePosted());
+        assertFalse(host.timers.containsValue(100000L));
+        assertFalse(host.timers.containsValue(8000L));
+    }
+
+    @Test public void aPlatformExceptionMessageNeverReachesTheHost() throws Exception {
+        AdPlanLoader loader = loader((url, body) -> { throw new javax.net.ssl.SSLHandshakeException("Chain validation failed for " + url); });
+        String grant = read(fixture("app-plan-v1.json")).grant;
+        String renewUrl = loader.url(grant);
+        assertTrue(renewUrl.contains("renew="));
+        List<String> seen = new ArrayList<>();
+        loader.fetch(grant, new AdPlanLoader.Listener() {
+            @Override public void loaded(String body) { seen.add(body); }
+            @Override public void unavailable(int status, String reason) { seen.add(status + " " + reason); }
+        });
+        assertEquals(java.util.Collections.singletonList("0 network"), seen);
+    }
 }

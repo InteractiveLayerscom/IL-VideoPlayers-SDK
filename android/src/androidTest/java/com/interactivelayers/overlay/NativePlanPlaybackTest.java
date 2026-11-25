@@ -274,4 +274,26 @@ public final class NativePlanPlaybackTest {
         // close() may even stop the request before it leaves; at most the one plan request was sent.
         assertTrue(requests.stream().filter(path -> path.startsWith("/il-player/")).count() <= 1);
     }
+
+    @Test public void aLocalRefusalArrivesAfterLoadReturned() throws Exception {
+        List<Boolean> sawPlayer = Collections.synchronizedList(new ArrayList<>());
+        activity.onActivity(a -> plan = AdPlanPlayer.load(overlays, player, "http://127.0.0.1", "p", "a", null, "es",
+                (type, format, id) -> {
+                    sawPlayer.add(plan != null);
+                    events.add(type + " " + format + " " + id);
+                }));
+        await(() -> !events.isEmpty());
+        assertEquals(Collections.singletonList(true), sawPlayer);
+        assertTrue(events.toString(), events.get(0).startsWith("plan_unavailable request app=android:"));
+        assertTrue(events.get(0).endsWith(" status=0"));
+    }
+
+    @Test public void destroyingTheActivityWithoutCloseClosesThePlayer() throws Exception {
+        load();
+        await(ready::get);
+        AdPlanPlayer loaded = plan;
+        assertFalse(loaded.isClosed());
+        activity.recreate();
+        assertTrue("the Activity holding the PlayerView is gone: nothing keeps it reachable", loaded.isClosed());
+    }
 }
