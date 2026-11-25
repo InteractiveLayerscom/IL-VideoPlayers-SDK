@@ -436,7 +436,11 @@ export function shakaContentClock({ player, video = player?.getMediaElement?.(),
     }
     const uri = response.originalUri ?? response.uri;
     if (!text.includes('#EXTINF')) {
-      if (text.includes('#EXT-X-STREAM-INF') && typeof uri === 'string' && !masters.includes(uri)) masters.push(uri);
+      // Both the URL asked for and the one after redirects: Shaka resolves the variants against the latter.
+      if (text.includes('#EXT-X-STREAM-INF')) {
+        for (const base of [response.uri, response.originalUri])
+          if (typeof base === 'string' && !masters.includes(base)) masters.push(base);
+      }
       return;
     }
     const layout = report(layoutSegments(parseMediaPlaylist(text), bounds));
