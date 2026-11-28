@@ -268,7 +268,7 @@ function placeBuyChip(chip, card, texts) {
 }
 
 // All web hosts share the same scene and controls. Legacy stills retain their original path.
-export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, allowVideo, allowAudio, animate }) {
+export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, allowVideo, allowAudio, animate, hidden }) {
   const doc = stage.ownerDocument;
   const win = doc.defaultView;
   let current;
@@ -568,7 +568,7 @@ export function sceneRenderer(stage, commerce, { squeeze, clock, moving, tv, all
     },
     update(time) { current?.update?.(time); },
     visible() {
-      if (!current?.visible || !current.root.isConnected || doc.hidden) return false;
+      if (!current?.visible || !current.root.isConnected || (hidden ? hidden() : doc.hidden)) return false;
       const rect = current.root.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0 || rect.right <= 0 || rect.bottom <= 0 ||
           rect.left >= win.innerWidth || rect.top >= win.innerHeight) return false;

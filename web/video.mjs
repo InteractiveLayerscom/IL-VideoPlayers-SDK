@@ -22,8 +22,8 @@ export function listenToVideo(video, callback) {
   };
 }
 
-export function imageVisible(image) {
-  if (!image?.complete || !image.naturalWidth || !image.isConnected || image.ownerDocument.hidden)
+export function imageVisible(image, hidden = () => image?.ownerDocument.hidden) {
+  if (!image?.complete || !image.naturalWidth || !image.isConnected || hidden())
     return false;
   const style = image.ownerDocument.defaultView.getComputedStyle(image);
   const rect = image.getBoundingClientRect();

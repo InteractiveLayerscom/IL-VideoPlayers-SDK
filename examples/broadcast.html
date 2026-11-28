@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gráficos para vMix</title>
+<link rel="stylesheet" href="../web/player.css">
+<style>
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+  #stage { position: absolute; inset: 0; width: 1920px; height: 1080px; background: transparent; }
+</style>
+<div id="stage"></div>
+<script type="module">
+  import { attachBroadcast } from '../web/index.mjs';
+  const broadcast = attachBroadcast({ stage: document.getElementById('stage') });
+  // The app that owns the page pushes the whole list of cues (Unix ms) whenever it changes.
+  window.ilSetCues = list => broadcast.setCues(list);
+</script>

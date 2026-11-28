@@ -222,6 +222,14 @@ export function createSession({
       tick();
       return true;
     },
+    // Replaces every cue with this list (a host that pushes cues instead of serving them) and renders at once.
+    setCues(list) {
+      if (disposed) return false;
+      cues.clear();
+      if (Array.isArray(list)) merge(list.map(normalizeCue));
+      tick();
+      return true;
+    },
     updateManifest(text) {
       manifest(text);
       tick();
