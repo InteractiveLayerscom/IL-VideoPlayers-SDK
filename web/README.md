@@ -85,6 +85,21 @@ sdk.removeCue('promo-1');
 
 `onVisible(cue)` se llama una sola vez por `id` y, cuando está presente, reemplaza al `onVisible` de la sesión y a la solicitud automática de `impressionUrl` para ese cue. `onHidden(cue)` se llama cada vez que el cue deja de presentarse. Con `timeline: 'media'` en `attachHtmlVideo` o `attachVideoJs`, el reloj es la posición del video en milisegundos y `start`/`end` se cuentan desde su inicio; un `programTime` explícito sigue teniendo prioridad.
 
+## vMix / broadcast
+
+Para una página transparente sin `<video>` (un Browser Input de vMix o una fuente de navegador de OBS) que dibuja los cues que le empuja otra app:
+
+```js
+import { attachBroadcast } from '@interactivelayers/player-sdk';
+const broadcast = attachBroadcast({ stage, onVisible: cue => report(cue) });
+broadcast.setCues([{ id: 'promo-1', format: 'super', start: Date.now(), end: Date.now() + 8000,
+  imageUrl: 'https://cdn.example/promo.png' }]);
+broadcast.setCues([]);   // limpia al instante
+broadcast.destroy();
+```
+
+`stage` es el elemento transparente de 1920×1080 que cubre el cuadro. `setCues(list)` reemplaza todo el conjunto, dibuja de inmediato y devuelve `false` si ya se destruyó; `start` y `end` son milisegundos Unix y el reloj por defecto es `Date.now()` (se puede pasar `clock`). La página se considera siempre en reproducción y los gráficos son solo overlay: nunca se achica el video, un `l` sin escena se ignora y un `l` con escena se dibuja como overlay. vMix puede informar la página como oculta: por defecto no se la trata así, y `hidden: () => boolean` permite cambiarlo. `onVisible(cue)` se llama una vez por `id` cuando el cue está realmente visible; sin él se pide la `impressionUrl`. Ver `examples/broadcast.html`.
+
 ## Anuncios desde un plan
 
 El backend de Interactive Layers calcula un plan de anuncios por video. Con ese plan, el módulo opcional `@interactivelayers/player-sdk/ads` pide los gráficos de escena a Google Ad Manager desde el navegador y los dibuja con `addCue`. La entrada principal del SDK no lo importa: sin plan no se carga ni se ejecuta código de servidor de anuncios.
